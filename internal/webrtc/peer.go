@@ -44,6 +44,10 @@ type PeerManager struct {
 	// If nil, the default API is used. Set this for testing with custom settings.
 	API *webrtc.API
 
+	// MaxPeers is the maximum number of simultaneous peer connections allowed.
+	// Defaults to 5. Set after construction to override.
+	MaxPeers int
+
 	mu    sync.Mutex
 	peers map[string]*Peer // keyed by mobile device ID
 }
@@ -68,6 +72,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		serverURL: strings.TrimRight(serverURL, "/"),
 		jwt:       jwtFn,
 		handler:   handler,
+		MaxPeers:  5,
 		peers:     make(map[string]*Peer),
 	}
 }
@@ -113,6 +118,13 @@ func (pm *PeerManager) CloseAll() {
 	}
 }
 
+// PeerCount returns the number of active peer connections.
+func (pm *PeerManager) PeerCount() int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return len(pm.peers)
+}
+
 // SendTo sends a protocol message to a specific peer via their DataChannel.
 func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 	pm.mu.Lock()
@@ -129,6 +141,22 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
 func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
+
+	// Check connection limit (don't count the requesting device — they may be reconnecting)
+	pm.mu.Lock()
+	currentCount := len(pm.peers)
+	_, isReconnect := pm.peers[mobileDeviceID]
+	pm.mu.Unlock()
+
+	if !isReconnect && currentCount >= pm.MaxPeers {
+		pm.logger.Warn("max peer connections reached", "max", pm.MaxPeers, "mobile", mobileDeviceID)
+		pm.signaling.Send(SignalingMessage{
+			Type:           "error",
+			Error:          "max connections reached",
+			TargetDeviceID: mobileDeviceID,
+		})
+		return
+	}
 
 	// Close existing peer connection if any (re-connect scenario)
 	pm.ClosePeer(mobileDeviceID)

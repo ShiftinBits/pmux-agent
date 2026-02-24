@@ -522,6 +522,82 @@ func TestPeerManager_Reconnect(t *testing.T) {
 	pm.CloseAll()
 }
 
+func TestPeerManager_MaxConnectionLimit(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm.API = fastAPI(t)
+	pm.MaxPeers = 2
+
+	// Connect two peers (should succeed)
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
+	time.Sleep(500 * time.Millisecond)
+
+	if pm.PeerCount() != 2 {
+		t.Fatalf("expected 2 peers, got %d", pm.PeerCount())
+	}
+
+	// Third peer should be rejected
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m3"})
+	time.Sleep(200 * time.Millisecond)
+
+	if pm.PeerCount() != 2 {
+		t.Errorf("expected 2 peers after rejection, got %d", pm.PeerCount())
+	}
+
+	// Verify error message was sent
+	errors := sender.messagesOfType("error")
+	found := false
+	for _, e := range errors {
+		if e.TargetDeviceID == "m3" && e.Error == "max connections reached" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected error message sent to m3")
+	}
+
+	pm.CloseAll()
+}
+
+func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm.API = fastAPI(t)
+	pm.MaxPeers = 2
+
+	// Fill to capacity
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
+	time.Sleep(500 * time.Millisecond)
+
+	if pm.PeerCount() != 2 {
+		t.Fatalf("expected 2 peers, got %d", pm.PeerCount())
+	}
+
+	// m1 reconnecting should succeed (same device ID)
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
+	time.Sleep(500 * time.Millisecond)
+
+	if pm.PeerCount() != 2 {
+		t.Errorf("expected 2 peers after reconnect, got %d", pm.PeerCount())
+	}
+
+	// No error messages for m1
+	errors := sender.messagesOfType("error")
+	for _, e := range errors {
+		if e.TargetDeviceID == "m1" {
+			t.Errorf("m1 reconnect should NOT receive error, got: %s", e.Error)
+		}
+	}
+
+	pm.CloseAll()
+}
+
 // TestBasicDataChannel verifies that two fastAPI peer connections can
 // establish a DataChannel using gathered-complete SDP exchange.
 func TestBasicDataChannel(t *testing.T) {
