@@ -75,6 +75,14 @@ func Run(ctx context.Context, paths config.Paths) error {
 	}))
 	logger.Info("agent starting", "pid", os.Getpid())
 
+	// Write our own PID file (overwrites the one written by spawn with the
+	// actual agent PID — they match in practice, but this ensures correctness).
+	pidFile := PIDFilePath(paths)
+	if err := WritePIDFile(pidFile); err != nil {
+		logger.Error("failed to write PID file", "error", err)
+		// Non-fatal: agent can still run, just harder to manage
+	}
+
 	// Load identity
 	identity, err := auth.LoadIdentity(paths.KeysDir)
 	if err != nil {
@@ -124,7 +132,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 	logger.Info("agent shutting down")
 	peerManager.CloseAll()
 	signalingClient.Close()
-	RemovePIDFile(paths)
+	RemovePIDFile(pidFile)
 
 	if err != nil && err != context.Canceled {
 		return err

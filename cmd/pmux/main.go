@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +58,12 @@ func main() {
 		return
 	case "unpair":
 		handleUnpair(args[1:])
+		return
+	case "agent-status":
+		handleAgentStatus()
+		return
+	case "agent-stop":
+		handleAgentStop()
 		return
 	case "--version", "-v":
 		fmt.Printf("pmux version %s\n", version)
@@ -272,6 +282,138 @@ func handleDevices() {
 	}
 }
 
+func handleAgentStatus() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	pidFile := agent.PIDFilePath(paths)
+
+	pid, err := agent.ReadPIDFile(pidFile)
+	if err != nil {
+		fmt.Println("Agent is not running")
+		os.Exit(1)
+	}
+
+	if !agent.IsProcessRunning(pid) {
+		fmt.Println("Agent is not running (stale PID file)")
+		agent.CleanStalePIDFile(pidFile)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Agent is running (PID %d)\n", pid)
+
+	// Try to get process uptime via ps
+	out, err := exec.Command("ps", "-o", "etime=", "-p", fmt.Sprintf("%d", pid)).Output()
+	if err == nil {
+		uptime := strings.TrimSpace(string(out))
+		if uptime != "" {
+			fmt.Printf("Uptime: %s\n", uptime)
+		}
+	}
+
+	// Show last 5 lines of agent log
+	logFile := filepath.Join(paths.ConfigDir, "agent.log")
+	lines, err := tailFile(logFile, 5)
+	if err == nil && len(lines) > 0 {
+		fmt.Println("\nRecent log:")
+		for _, line := range lines {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+}
+
+func handleAgentStop() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	pidFile := agent.PIDFilePath(paths)
+
+	pid, err := agent.ReadPIDFile(pidFile)
+	if err != nil {
+		fmt.Println("Agent is not running")
+		os.Exit(1)
+	}
+
+	if !agent.IsProcessRunning(pid) {
+		fmt.Println("Agent is not running (stale PID file cleaned up)")
+		agent.RemovePIDFile(pidFile)
+		os.Exit(0)
+	}
+
+	// Send SIGTERM for graceful shutdown
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to find process %d: %v\n", pid, err)
+		os.Exit(1)
+	}
+
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to send SIGTERM to PID %d: %v\n", pid, err)
+		os.Exit(1)
+	}
+
+	// Wait up to 5 seconds for process to exit (poll every 200ms)
+	const (
+		stopTimeout  = 5 * time.Second
+		pollInterval = 200 * time.Millisecond
+	)
+
+	deadline := time.After(stopTimeout)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			// Process didn't exit in time — send SIGKILL
+			if err := process.Signal(syscall.SIGKILL); err != nil {
+				// Process may have exited between the last check and now
+				if !agent.IsProcessRunning(pid) {
+					fmt.Println("Agent stopped")
+					agent.RemovePIDFile(pidFile)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "error: failed to send SIGKILL to PID %d: %v\n", pid, err)
+				os.Exit(1)
+			}
+			fmt.Println("Agent forcefully killed")
+			agent.RemovePIDFile(pidFile)
+			return
+		case <-ticker.C:
+			if !agent.IsProcessRunning(pid) {
+				fmt.Println("Agent stopped")
+				agent.RemovePIDFile(pidFile)
+				return
+			}
+		}
+	}
+}
+
+// tailFile reads the last n lines from a file.
+func tailFile(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) > n {
+			lines = lines[1:]
+		}
+	}
+	return lines, scanner.Err()
+}
+
 func printHelp() {
 	fmt.Println(`pmux — PocketMux terminal access agent
 
@@ -280,6 +422,8 @@ PocketMux commands:
   pair          Pair with a mobile device (displays QR code)
   devices       List paired mobile devices
   unpair        Remove a paired mobile device
+  agent-status  Show agent process status and recent logs
+  agent-stop    Stop the background agent process
   --version     Show version
   --help        Show this help
 

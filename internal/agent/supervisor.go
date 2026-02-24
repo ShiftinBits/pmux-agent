@@ -6,14 +6,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
-
-const pidFileName = "agent.pid"
 
 // EnsureRunning checks if the agent is already running and starts it if not.
 // Returns nil if the agent is running (or was started successfully).
@@ -24,47 +21,22 @@ func EnsureRunning(paths config.Paths) error {
 		return nil
 	}
 
-	pidFile := filepath.Join(paths.ConfigDir, pidFileName)
+	pidFile := PIDFilePath(paths)
 
-	// TODO: There's a TOCTOU race between isRunning and spawn. Two concurrent
+	// TODO: There's a TOCTOU race between the running check and spawn. Two concurrent
 	// pmux commands could both pass the check and spawn two agents. Use file
-	// locking (syscall.Flock) in Phase 2 to make this atomic.
-	if isRunning(pidFile) {
+	// locking (syscall.Flock) in a future phase to make this atomic.
+	pid, err := ReadPIDFile(pidFile)
+	if err == nil && IsProcessRunning(pid) {
 		return nil
 	}
 
 	return spawn(pidFile)
 }
 
-// RemovePIDFile removes the agent PID file on clean shutdown.
-func RemovePIDFile(paths config.Paths) {
-	os.Remove(filepath.Join(paths.ConfigDir, pidFileName)) //nolint:errcheck
-}
-
 // PIDFilePath returns the path to the agent PID file.
 func PIDFilePath(paths config.Paths) string {
 	return filepath.Join(paths.ConfigDir, pidFileName)
-}
-
-// isRunning checks if a process with the PID from the file is alive.
-func isRunning(pidFile string) bool {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return false
-	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return false
-	}
-
-	// On Unix, FindProcess always succeeds. Check with signal 0.
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // spawn starts a new agent process in the background.
@@ -85,8 +57,9 @@ func spawn(pidFile string) error {
 		return fmt.Errorf("start agent: %w", err)
 	}
 
-	// Write PID file
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
+	// Write the child process PID so subsequent pmux commands can detect
+	// the agent before it writes its own PID in Run().
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), pidFilePerms); err != nil {
 		return fmt.Errorf("write PID file: %w", err)
 	}
 
