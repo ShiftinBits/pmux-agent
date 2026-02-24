@@ -3,6 +3,7 @@ package agent
 import (
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
@@ -23,9 +24,10 @@ type Handler struct {
 	broadcastRaw BroadcastRawFunc
 	logger       *slog.Logger
 
-	mu          sync.Mutex
-	bridges     map[string]*tmux.PaneBridge // per-peer attached bridge
-	paneForPeer map[string]string           // peerID -> paneID (for restore on detach)
+	mu           sync.Mutex
+	bridges      map[string]*tmux.PaneBridge // per-peer attached bridge
+	paneForPeer  map[string]string           // peerID -> paneID (for restore on detach)
+	lastPingTime map[string]time.Time        // peerID -> last ping received
 }
 
 // NewHandler creates a protocol message handler.
@@ -38,6 +40,7 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, broadcastRaw BroadcastRa
 		logger:       logger,
 		bridges:      make(map[string]*tmux.PaneBridge),
 		paneForPeer:  make(map[string]string),
+		lastPingTime: make(map[string]time.Time),
 	}
 }
 
@@ -89,7 +92,28 @@ func (h *Handler) HandleMessage(peerID string, msg protocol.Message) {
 
 // PeerDisconnected cleans up state when a peer disconnects.
 func (h *Handler) PeerDisconnected(peerID string) {
+	h.mu.Lock()
+	delete(h.lastPingTime, peerID)
+	h.mu.Unlock()
+
 	h.detachPeer(peerID)
+}
+
+// GetStalePeers returns peer IDs that have not sent a ping within the given timeout.
+// A peer with no recorded ping time is not considered stale (it may not have
+// connected long enough to send its first ping).
+func (h *Handler) GetStalePeers(timeout time.Duration) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := time.Now()
+	var stale []string
+	for peerID, lastPing := range h.lastPingTime {
+		if now.Sub(lastPing) > timeout {
+			stale = append(stale, peerID)
+		}
+	}
+	return stale
 }
 
 func (h *Handler) handleListSessions(peerID string) {
@@ -184,6 +208,11 @@ func (h *Handler) handleResize(peerID string, req *protocol.ResizeRequest) {
 }
 
 func (h *Handler) handlePing(peerID string) {
+	// Record when this peer last sent a ping (for idle detection).
+	h.mu.Lock()
+	h.lastPingTime[peerID] = time.Now()
+	h.mu.Unlock()
+
 	// Latency is measured by the mobile client (ping send time → pong receive time).
 	// The agent responds immediately; the Latency field is unused on the agent side.
 	h.sendMsg(peerID, &protocol.PongEvent{

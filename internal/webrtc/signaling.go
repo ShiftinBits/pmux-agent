@@ -31,6 +31,10 @@ const (
 	initialBackoff = 1 * time.Second
 	maxBackoff     = 30 * time.Second
 	backoffFactor  = 2.0
+
+	// DormancyTimeout is how long continuous reconnection failures must persist
+	// before the signaling client enters dormancy (stops retrying).
+	DormancyTimeout = 5 * time.Minute
 )
 
 // SignalingMessage represents a JSON message to/from the signaling server.
@@ -72,6 +76,16 @@ type SignalingClient struct {
 	closed    bool
 	closeCh   chan struct{}
 
+	// Dormancy: after DormancyTimeout of continuous reconnection failures,
+	// stop retrying until an activity signal is received.
+	failureStart time.Time // when continuous failures began (zero if not failing)
+	dormant      bool      // true when in dormancy mode
+
+	// activitySignal wakes the client from dormancy. External callers (e.g.,
+	// the supervisor detecting new tmux commands) send on this channel to
+	// resume reconnection attempts.
+	activitySignal chan struct{}
+
 	// HTTPClient used for token exchange. Defaults to a 10s-timeout client.
 	HTTPClient *http.Client
 }
@@ -85,12 +99,28 @@ func NewSignalingClient(identity *auth.Identity, serverURL string, handler Messa
 		logger:           logger,
 		PresenceInterval: DefaultPresenceInterval,
 		closeCh:          make(chan struct{}),
+		activitySignal:   make(chan struct{}, 1),
 		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// SignalActivity wakes the signaling client from dormancy, causing it to
+// resume reconnection attempts. Safe to call from any goroutine.
+// Used by the supervisor when it detects tmux command activity.
+func (sc *SignalingClient) SignalActivity() {
+	select {
+	case sc.activitySignal <- struct{}{}:
+	default:
+		// Already signaled, don't block
 	}
 }
 
 // Run connects to the signaling server and maintains the connection with
 // automatic reconnection and token refresh. Blocks until ctx is canceled.
+//
+// After DormancyTimeout of continuous reconnection failures, the client
+// enters dormancy and stops retrying. It resumes when SignalActivity() is
+// called (e.g., when a new tmux command triggers supervisor activity).
 func (sc *SignalingClient) Run(ctx context.Context) error {
 	backoff := initialBackoff
 
@@ -101,15 +131,53 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		default:
 		}
 
+		// Dormancy check: if in dormancy, wait for activity signal or context cancel.
+		sc.mu.Lock()
+		isDormant := sc.dormant
+		sc.mu.Unlock()
+
+		if isDormant {
+			sc.logger.Info("signaling client dormant, waiting for activity signal")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-sc.activitySignal:
+				sc.mu.Lock()
+				sc.dormant = false
+				sc.failureStart = time.Time{}
+				sc.mu.Unlock()
+				backoff = initialBackoff
+				sc.logger.Info("activity signal received, resuming reconnection")
+			}
+		}
+
 		connected, err := sc.connectAndServe(ctx)
 		if err == nil {
 			// Graceful shutdown (context canceled)
 			return nil
 		}
 
-		// Reset backoff after a successful connection (was up then dropped)
+		// Reset backoff and failure tracking after a successful connection
 		if connected {
 			backoff = initialBackoff
+			sc.mu.Lock()
+			sc.failureStart = time.Time{}
+			sc.mu.Unlock()
+		} else {
+			// Track continuous failure start
+			sc.mu.Lock()
+			if sc.failureStart.IsZero() {
+				sc.failureStart = time.Now()
+			}
+			// Check if failures have persisted long enough to enter dormancy
+			if time.Since(sc.failureStart) >= DormancyTimeout {
+				sc.dormant = true
+				sc.mu.Unlock()
+				sc.logger.Warn("entering dormancy after continuous signaling failures",
+					"duration", time.Since(sc.failureStart))
+				continue // loop back to dormancy check
+			}
+			sc.mu.Unlock()
 		}
 
 		sc.logger.Warn("signaling connection lost", "error", err)
@@ -118,6 +186,15 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-sc.activitySignal:
+			// Activity signal received during backoff — reset and try immediately
+			sc.mu.Lock()
+			sc.failureStart = time.Time{}
+			sc.dormant = false
+			sc.mu.Unlock()
+			backoff = initialBackoff
+			sc.logger.Info("activity signal received during backoff, reconnecting immediately")
+			continue
 		case <-time.After(backoff):
 		}
 
