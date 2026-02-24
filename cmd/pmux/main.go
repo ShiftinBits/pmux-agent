@@ -5,6 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/shiftinbits/pmux-agent/internal/auth"
+	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
 const (
@@ -42,7 +45,39 @@ func main() {
 }
 
 func handleInit() {
-	fmt.Println("pmux init: not implemented yet (T1.9)")
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if identity already exists
+	if auth.HasIdentity(paths.KeysDir) {
+		id, err := auth.LoadIdentity(paths.KeysDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to load existing identity: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Identity already exists.\n")
+		fmt.Printf("Device ID: %s\n", id.DeviceID)
+		return
+	}
+
+	// Create directories and generate identity
+	if err := paths.EnsureDirs(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	id, err := auth.GenerateIdentity(paths.KeysDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to generate identity: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Identity generated.\n")
+	fmt.Printf("Device ID: %s\n", id.DeviceID)
+	fmt.Printf("Keys saved to: %s\n", paths.KeysDir)
 }
 
 func handlePair() {
