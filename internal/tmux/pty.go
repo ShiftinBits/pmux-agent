@@ -53,8 +53,10 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 
 	// Start pipe-pane to stream pane output to our FIFO.
 	// -o means output only (not input echo).
+	// Shell-escape the FIFO path to handle any special characters.
+	escapedPath := strings.ReplaceAll(fifoPath, "'", "'\\''")
 	if _, err := c.run("pipe-pane", "-t", paneID, "-o",
-		fmt.Sprintf("exec cat > '%s'", fifoPath)); err != nil {
+		fmt.Sprintf("exec cat > '%s'", escapedPath)); err != nil {
 		fifo.Close()
 		os.RemoveAll(dir) //nolint:errcheck
 		return nil, fmt.Errorf("start pipe-pane: %w", err)
@@ -74,6 +76,11 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 		fifo:           fifo,
 		initialContent: initialContent,
 	}, nil
+}
+
+// PaneID returns the ID of the pane this bridge is attached to.
+func (pb *PaneBridge) PaneID() string {
+	return pb.paneID
 }
 
 // InitialContent returns the pane content captured at attach time.
@@ -96,15 +103,19 @@ func (pb *PaneBridge) Read(buf []byte) (int, error) {
 }
 
 // Write sends input to the pane via tmux send-keys.
-func (pb *PaneBridge) Write(data []byte) error {
+// Implements io.Writer.
+func (pb *PaneBridge) Write(data []byte) (int, error) {
 	pb.mu.Lock()
 	if pb.closed {
 		pb.mu.Unlock()
-		return fmt.Errorf("bridge closed")
+		return 0, fmt.Errorf("bridge closed")
 	}
 	pb.mu.Unlock()
 
-	return pb.client.SendKeys(pb.paneID, data)
+	if err := pb.client.SendKeys(pb.paneID, data); err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 // Resize changes the pane dimensions by resizing the containing window.

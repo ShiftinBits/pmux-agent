@@ -179,7 +179,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	})
 	if err != nil {
 		pm.logger.Error("failed to create data channel", "error", err)
-		pc.Close()
+		pm.ClosePeer(mobileDeviceID)
 		return
 	}
 	peer.dc = dc
@@ -189,13 +189,13 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		pm.logger.Error("failed to create SDP offer", "error", err)
-		pc.Close()
+		pm.ClosePeer(mobileDeviceID)
 		return
 	}
 
 	if err := pc.SetLocalDescription(offer); err != nil {
 		pm.logger.Error("failed to set local description", "error", err)
-		pc.Close()
+		pm.ClosePeer(mobileDeviceID)
 		return
 	}
 

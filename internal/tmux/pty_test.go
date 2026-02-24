@@ -59,7 +59,7 @@ func TestAttachPane_ReadWrite(t *testing.T) {
 	defer bridge.Close()
 
 	// Write echo command
-	if err := bridge.Write([]byte("echo BRIDGE_HELLO_42\n")); err != nil {
+	if _, err := bridge.Write([]byte("echo BRIDGE_HELLO_42\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestAttachPane_EscapeSequences(t *testing.T) {
 	// Send a command that produces ANSI color escape sequences.
 	// pipe-pane captures raw PTY output: the echo is literal characters
 	// (\, 0, 3, 3) but printf's output contains actual ESC (0x1b) bytes.
-	if err := bridge.Write([]byte("printf '\\033[31mRED\\033[0m\\n'\n")); err != nil {
+	if _, err := bridge.Write([]byte("printf '\\033[31mRED\\033[0m\\n'\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestAttachPane_CloseCleanup(t *testing.T) {
 	}
 
 	// Verify bridge reports closed
-	if err := bridge.Write([]byte("test")); err == nil {
+	if _, err := bridge.Write([]byte("test")); err == nil {
 		t.Error("Write after Close should return error")
 	}
 	if _, err := bridge.Read(make([]byte, 1)); err == nil {
