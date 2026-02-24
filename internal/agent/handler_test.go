@@ -74,7 +74,7 @@ func testHandler(t *testing.T) (*Handler, *tmux.Client, *messageCatcher) {
 
 	tc := tmux.NewClient(handlerTestSocket)
 	catcher := &messageCatcher{}
-	h := NewHandler(tc, catcher.Send, slog.Default())
+	h := NewHandler(tc, catcher.Send, func(data []byte) {}, slog.Default())
 	return h, tc, catcher
 }
 
@@ -500,5 +500,47 @@ func TestHandler_PeerDisconnected(t *testing.T) {
 	h.mu.Unlock()
 	if bridge != nil {
 		t.Error("expected bridge to be nil after disconnect")
+	}
+}
+
+func TestHandler_BroadcastEmptySessions(t *testing.T) {
+	var mu sync.Mutex
+	var broadcastData []byte
+
+	tc := tmux.NewClient("pmux-broadcast-test")
+	h := NewHandler(tc, func(peerID string, msg protocol.Message) error {
+		return nil
+	}, func(data []byte) {
+		mu.Lock()
+		broadcastData = make([]byte, len(data))
+		copy(broadcastData, data)
+		mu.Unlock()
+	}, slog.Default())
+
+	h.BroadcastEmptySessions()
+
+	mu.Lock()
+	data := broadcastData
+	mu.Unlock()
+
+	if data == nil {
+		t.Fatal("expected broadcast data to be non-nil")
+	}
+
+	// Decode the broadcast data and verify it's an empty sessions event
+	msg, err := protocol.Decode(data)
+	if err != nil {
+		t.Fatalf("failed to decode broadcast data: %v", err)
+	}
+
+	sessionsEvent, ok := msg.(*protocol.SessionsEvent)
+	if !ok {
+		t.Fatalf("expected SessionsEvent, got %T", msg)
+	}
+	if sessionsEvent.Type != "sessions" {
+		t.Errorf("type = %q, want sessions", sessionsEvent.Type)
+	}
+	if len(sessionsEvent.Sessions) != 0 {
+		t.Errorf("expected 0 sessions, got %d", len(sessionsEvent.Sessions))
 	}
 }

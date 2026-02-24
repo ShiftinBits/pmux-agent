@@ -11,13 +11,17 @@ import (
 // SendFunc sends a protocol message to a specific peer.
 type SendFunc func(peerID string, msg protocol.Message) error
 
+// BroadcastRawFunc sends raw pre-encoded bytes to all connected peers.
+type BroadcastRawFunc func(data []byte)
+
 // Handler processes protocol messages from mobile clients and dispatches
 // them to the appropriate tmux operations.
 type Handler struct {
-	tmux        *tmux.Client
-	sizeTracker *tmux.PaneSizeTracker
-	send        SendFunc
-	logger      *slog.Logger
+	tmux         *tmux.Client
+	sizeTracker  *tmux.PaneSizeTracker
+	send         SendFunc
+	broadcastRaw BroadcastRawFunc
+	logger       *slog.Logger
 
 	mu          sync.Mutex
 	bridges     map[string]*tmux.PaneBridge // per-peer attached bridge
@@ -25,15 +29,35 @@ type Handler struct {
 }
 
 // NewHandler creates a protocol message handler.
-func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Handler {
+func NewHandler(tmuxClient *tmux.Client, send SendFunc, broadcastRaw BroadcastRawFunc, logger *slog.Logger) *Handler {
 	return &Handler{
-		tmux:        tmuxClient,
-		sizeTracker: tmux.NewPaneSizeTracker(tmuxClient),
-		send:        send,
-		logger:      logger,
-		bridges:     make(map[string]*tmux.PaneBridge),
-		paneForPeer: make(map[string]string),
+		tmux:         tmuxClient,
+		sizeTracker:  tmux.NewPaneSizeTracker(tmuxClient),
+		send:         send,
+		broadcastRaw: broadcastRaw,
+		logger:       logger,
+		bridges:      make(map[string]*tmux.PaneBridge),
+		paneForPeer:  make(map[string]string),
 	}
+}
+
+// BroadcastEmptySessions encodes a SessionsEvent with an empty session list
+// and sends it to all connected peers. Used during graceful shutdown to notify
+// mobile clients that the tmux server has exited.
+func (h *Handler) BroadcastEmptySessions() {
+	msg := &protocol.SessionsEvent{
+		Type:     "sessions",
+		Sessions: []protocol.TmuxSession{},
+	}
+
+	data, err := protocol.Encode(msg)
+	if err != nil {
+		h.logger.Error("failed to encode empty sessions event", "error", err)
+		return
+	}
+
+	h.logger.Info("broadcasting empty sessions to all peers")
+	h.broadcastRaw(data)
 }
 
 // HandleMessage processes an incoming protocol message from a peer.

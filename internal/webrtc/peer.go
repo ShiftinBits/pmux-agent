@@ -125,6 +125,23 @@ func (pm *PeerManager) PeerCount() int {
 	return len(pm.peers)
 }
 
+// BroadcastRaw sends raw bytes to all connected peers' DataChannels.
+// Errors on individual peers are logged but do not stop the broadcast.
+func (pm *PeerManager) BroadcastRaw(data []byte) {
+	pm.mu.Lock()
+	peers := make([]*Peer, 0, len(pm.peers))
+	for _, p := range pm.peers {
+		peers = append(peers, p)
+	}
+	pm.mu.Unlock()
+
+	for _, p := range peers {
+		if err := p.SendRaw(data); err != nil {
+			pm.logger.Debug("broadcast send failed", "peer", p.DeviceID, "error", err)
+		}
+	}
+}
+
 // SendTo sends a protocol message to a specific peer via their DataChannel.
 func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 	pm.mu.Lock()
@@ -403,6 +420,22 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 			p.handler(p.DeviceID, decoded)
 		}
 	})
+}
+
+// SendRaw sends pre-encoded bytes directly over the DataChannel.
+func (p *Peer) SendRaw(data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return fmt.Errorf("peer connection closed")
+	}
+
+	if p.dc == nil {
+		return fmt.Errorf("data channel not established")
+	}
+
+	return p.dc.Send(data)
 }
 
 // SendMessage encodes and sends a protocol message over the DataChannel.
