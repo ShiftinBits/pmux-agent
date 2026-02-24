@@ -121,6 +121,23 @@ func SavePairedDevices(path string, devices []PairedDevice) error {
 	return nil
 }
 
+// RemovePairedDevice removes a device by ID from the stored paired devices list.
+func RemovePairedDevice(path string, deviceID string) error {
+	devices, err := LoadPairedDevices(path)
+	if err != nil {
+		return err
+	}
+
+	filtered := make([]PairedDevice, 0, len(devices))
+	for _, d := range devices {
+		if d.DeviceID != deviceID {
+			filtered = append(filtered, d)
+		}
+	}
+
+	return SavePairedDevices(path, filtered)
+}
+
 // AddPairedDevice appends a new paired device to the stored list.
 func AddPairedDevice(path string, device PairedDevice) error {
 	devices, err := LoadPairedDevices(path)

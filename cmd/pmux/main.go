@@ -52,6 +52,9 @@ func main() {
 	case "devices":
 		handleDevices()
 		return
+	case "unpair":
+		handleUnpair(args[1:])
+		return
 	case "--version", "-v":
 		fmt.Printf("pmux version %s\n", version)
 		return
@@ -243,6 +246,19 @@ func handlePair() {
 	fmt.Printf("Paired successfully with device %s\n", pairComplete.MobileDeviceID)
 }
 
+func handleUnpair(args []string) {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := agent.RunUnpair(args, paths.PairedDevices, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func handleDevices() {
 	paths, err := config.DefaultPaths()
 	if err != nil {
@@ -263,6 +279,7 @@ PocketMux commands:
   init          Generate identity and register with signaling server
   pair          Pair with a mobile device (displays QR code)
   devices       List paired mobile devices
+  unpair        Remove a paired mobile device
   --version     Show version
   --help        Show this help
 
