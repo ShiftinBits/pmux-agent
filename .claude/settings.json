@@ -1,11 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "mcp__context7__*",
-      "mcp__tree-sitter__*",
-      "mcp__memory__*",
-      "mcp__sequential-thinking__*",
-      "mcp__plugin_linear_linear__*",
+      "mcp__context7",
+      "mcp__tree-sitter",
+      "mcp__chrome-devtools",
+      "mcp__memory",
+      "mcp__sequential-thinking",
+      "mcp__plugin_constellation_constellation",
+      "mcp__plugin_linear_linear",
+      "mcp__chrome-devtools__take_snapshot",
+      "mcp__chrome-devtools__list_*",
       "Skill(frontend-design:frontend-design)",
       "Skill(feature-dev:feature-dev)",
       "Skill(superpowers:*)",
@@ -14,7 +18,8 @@
       "Bash(npm run test:*)",
       "Bash(npm info *)",
       "Bash(gh run view *)",
-      "Bash(gh run list *)"
+      "Bash(gh run list *)",
+      "Bash(cd:*)"
     ],
     "deny": ["Read(**/.env)", "Read(**/.*.env)"],
     "ask": []
@@ -22,6 +27,7 @@
   "enabledMcpjsonServers": [
     "memory",
     "context7",
+    "chrome-devtools",
     "tree-sitter",
     "sequential-thinking",
     "linear",
@@ -31,7 +37,7 @@
     "feature-dev@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
-    "gopls-lsp@claude-plugins-official": true,    
+    "typescript-lsp@claude-plugins-official": true,
     "linear@claude-plugins-official": true
   },
   "env": {
