@@ -30,6 +30,10 @@ func TestRunDevices_WithDevices(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
 
+	// Use time.Local for LastSeen so the formatted date matches regardless of
+	// the system timezone (time.Unix uses local time for formatting).
+	lastSeenTime := time.Date(2025, 6, 20, 14, 30, 0, 0, time.Local)
+
 	// Write test devices
 	devices := []auth.PairedDevice{
 		{
@@ -37,7 +41,7 @@ func TestRunDevices_WithDevices(t *testing.T) {
 			Name:         "My Phone",
 			SharedSecret: "dGVzdA==",
 			PairedAt:     time.Date(2025, 6, 15, 0, 0, 0, 0, time.UTC),
-			LastSeen:     time.Date(2025, 6, 20, 14, 30, 0, 0, time.UTC).Unix(),
+			LastSeen:     lastSeenTime.Unix(),
 		},
 		{
 			DeviceID:     "xyz789012345xyz789012345xyz78901",
@@ -81,9 +85,10 @@ func TestRunDevices_WithDevices(t *testing.T) {
 		t.Error("expected '(unnamed)' for device without name")
 	}
 
-	// Check last seen formatting
-	if !strings.Contains(output, "2025-06-20") {
-		t.Errorf("expected last seen date '2025-06-20' in output: %s", output)
+	// Check last seen formatting (uses local time, matching time.Unix behavior)
+	expectedLastSeen := lastSeenTime.Format("2006-01-02 15:04")
+	if !strings.Contains(output, expectedLastSeen) {
+		t.Errorf("expected last seen %q in output: %s", expectedLastSeen, output)
 	}
 
 	// Check "never" for device with no last seen

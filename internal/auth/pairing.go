@@ -22,7 +22,10 @@ type PairedDevice struct {
 	Name         string    `json:"name,omitempty"`
 	SharedSecret string    `json:"sharedSecret"` // base64-encoded X25519 shared secret
 	PairedAt     time.Time `json:"pairedAt"`
-	LastSeen     int64     `json:"lastSeen,omitempty"` // Unix timestamp, 0 = never seen
+	// LastSeen is an int64 Unix timestamp (not time.Time) so that the zero
+	// value 0 cleanly means "never seen" and omitempty suppresses it in JSON.
+	// This matches the mobile side which stores lastSeen as a numeric timestamp.
+	LastSeen int64 `json:"lastSeen,omitempty"`
 }
 
 // QRPayload is the JSON structure encoded in the pairing QR code.
