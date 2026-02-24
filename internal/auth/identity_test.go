@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -134,7 +135,7 @@ func TestLoadIdentity_Errors(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !containsSubstring(err.Error(), tt.wantErr) {
+			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
 			}
 		})
@@ -254,15 +255,3 @@ func TestGenerateIdentity_Uniqueness(t *testing.T) {
 	}
 }
 
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
-
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

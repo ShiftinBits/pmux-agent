@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -49,7 +50,7 @@ func TestExchangeToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !containsSubstring(err.Error(), "token exchange failed") {
+		if !strings.Contains(err.Error(), "token exchange failed") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "token exchange failed")
 		}
 	})
@@ -65,7 +66,7 @@ func TestExchangeToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !containsSubstring(err.Error(), "empty token") {
+		if !strings.Contains(err.Error(), "empty token") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "empty token")
 		}
 	})

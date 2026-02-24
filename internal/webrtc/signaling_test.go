@@ -140,36 +140,21 @@ func TestSignalingClient_SendsPresenceHeartbeats(t *testing.T) {
 	})
 	defer server.Close()
 
-	// Use a very short presence interval for testing
-	origInterval := PresenceInterval
-	defer func() {
-		// Can't reassign const, but we test with the real interval timing
-		_ = origInterval
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	sc := NewSignalingClient(id, server.URL, nil, logger)
 	sc.HTTPClient = server.Client()
+	sc.PresenceInterval = 200 * time.Millisecond // fast for testing
 
-	// Need to override presence interval for fast test - not possible with const
-	// Instead, just verify the connection stays up and we can send messages
 	go sc.Run(ctx)
 
-	// Give time to connect and send at least auth
-	time.Sleep(500 * time.Millisecond)
+	// Wait enough for connection + multiple heartbeats
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
 
-	// Manually send a presence message
-	err := sc.Send(SignalingMessage{Type: "presence"})
-	if err != nil {
-		t.Fatalf("Send() error: %v", err)
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	if presenceCount.Load() < 1 {
-		t.Error("expected at least 1 presence message")
+	if presenceCount.Load() < 2 {
+		t.Errorf("expected at least 2 presence heartbeats, got %d", presenceCount.Load())
 	}
 }
 

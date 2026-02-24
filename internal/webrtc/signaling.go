@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	// PresenceInterval is how often the agent sends presence heartbeats.
-	PresenceInterval = 30 * time.Second
+	// DefaultPresenceInterval is how often the agent sends presence heartbeats.
+	DefaultPresenceInterval = 30 * time.Second
 
 	// TokenRefreshMargin is how early before expiry to refresh the JWT.
 	TokenRefreshMargin = 5 * time.Minute
@@ -62,6 +62,9 @@ type SignalingClient struct {
 	logger    *slog.Logger
 	handler   MessageHandler
 
+	// PresenceInterval controls how often heartbeats are sent. Defaults to 30s.
+	PresenceInterval time.Duration
+
 	mu        sync.Mutex
 	conn      *websocket.Conn
 	jwt       string
@@ -76,12 +79,13 @@ type SignalingClient struct {
 // NewSignalingClient creates a signaling client for the given identity and server.
 func NewSignalingClient(identity *auth.Identity, serverURL string, handler MessageHandler, logger *slog.Logger) *SignalingClient {
 	return &SignalingClient{
-		identity:   identity,
-		serverURL:  strings.TrimRight(serverURL, "/"),
-		handler:    handler,
-		logger:     logger,
-		closeCh:    make(chan struct{}),
-		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		identity:         identity,
+		serverURL:        strings.TrimRight(serverURL, "/"),
+		handler:          handler,
+		logger:           logger,
+		PresenceInterval: DefaultPresenceInterval,
+		closeCh:          make(chan struct{}),
+		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -97,10 +101,15 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		default:
 		}
 
-		err := sc.connectAndServe(ctx)
+		connected, err := sc.connectAndServe(ctx)
 		if err == nil {
 			// Graceful shutdown (context canceled)
 			return nil
+		}
+
+		// Reset backoff after a successful connection (was up then dropped)
+		if connected {
+			backoff = initialBackoff
 		}
 
 		sc.logger.Warn("signaling connection lost", "error", err)
@@ -119,14 +128,6 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 
 // Send sends a signaling message to the server. Thread-safe.
 func (sc *SignalingClient) Send(msg SignalingMessage) error {
-	sc.mu.Lock()
-	conn := sc.conn
-	sc.mu.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("not connected")
-	}
-
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal signaling message: %w", err)
@@ -134,6 +135,10 @@ func (sc *SignalingClient) Send(msg SignalingMessage) error {
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
+
+	if sc.conn == nil {
+		return fmt.Errorf("not connected")
+	}
 	return sc.conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -156,10 +161,11 @@ func (sc *SignalingClient) Close() {
 }
 
 // connectAndServe establishes one WebSocket connection and runs until disconnect.
-func (sc *SignalingClient) connectAndServe(ctx context.Context) error {
+// Returns (true, err) if auth succeeded before the error, (false, err) otherwise.
+func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool, err error) {
 	// Ensure we have a valid JWT
 	if err := sc.ensureToken(); err != nil {
-		return fmt.Errorf("obtain JWT: %w", err)
+		return false, fmt.Errorf("obtain JWT: %w", err)
 	}
 
 	// Connect WebSocket
@@ -170,7 +176,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) error {
 	dialer := websocket.DefaultDialer
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
-		return fmt.Errorf("connect to signaling server: %w", err)
+		return false, fmt.Errorf("connect to signaling server: %w", err)
 	}
 
 	sc.mu.Lock()
@@ -186,7 +192,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) error {
 
 	// Authenticate
 	if err := sc.authenticate(conn); err != nil {
-		return err
+		return false, err
 	}
 
 	sc.logger.Info("connected to signaling server")
@@ -200,8 +206,14 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) error {
 	// Start token refresh loop
 	go sc.tokenRefreshLoop(presenceCtx)
 
+	// Close conn when context is canceled to unblock readLoop promptly
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
 	// Read messages
-	return sc.readLoop(ctx, conn)
+	return true, sc.readLoop(conn)
 }
 
 // authenticate sends the JWT auth message and waits for confirmation.
@@ -259,7 +271,7 @@ func (sc *SignalingClient) ensureToken() error {
 
 // presenceLoop sends periodic heartbeats to the signaling server.
 func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(PresenceInterval)
+	ticker := time.NewTicker(sc.PresenceInterval)
 	defer ticker.Stop()
 
 	for {
@@ -307,14 +319,9 @@ func (sc *SignalingClient) tokenRefreshLoop(ctx context.Context) {
 }
 
 // readLoop reads messages from the WebSocket and dispatches to the handler.
-func (sc *SignalingClient) readLoop(ctx context.Context, conn *websocket.Conn) error {
+// The conn will be closed externally when context is canceled, unblocking ReadMessage.
+func (sc *SignalingClient) readLoop(conn *websocket.Conn) error {
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,11 +23,22 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client) (string,
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	signature := id.SignChallenge(id.DeviceID, timestamp)
 
-	body := fmt.Sprintf(`{"deviceId":%q,"timestamp":%q,"signature":%q}`,
-		id.DeviceID, timestamp, signature)
+	reqBody := struct {
+		DeviceID  string `json:"deviceId"`
+		Timestamp string `json:"timestamp"`
+		Signature string `json:"signature"`
+	}{
+		DeviceID:  id.DeviceID,
+		Timestamp: timestamp,
+		Signature: signature,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal token request: %w", err)
+	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/token"
-	resp, err := client.Post(url, "application/json", strings.NewReader(body))
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("token exchange request: %w", err)
 	}

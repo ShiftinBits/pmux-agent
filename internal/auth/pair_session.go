@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,11 +28,22 @@ type PairCompleteMessage struct {
 
 // InitiatePairing calls the server to create a pairing session.
 func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client) (*PairInitiateResponse, error) {
-	body := fmt.Sprintf(`{"deviceId":%q,"publicKey":%q,"x25519PublicKey":%q}`,
-		id.DeviceID, id.PublicKeyBase64(), x25519PubKeyBase64)
+	reqBody := struct {
+		DeviceID       string `json:"deviceId"`
+		PublicKey      string `json:"publicKey"`
+		X25519PubKey   string `json:"x25519PublicKey"`
+	}{
+		DeviceID:     id.DeviceID,
+		PublicKey:    id.PublicKeyBase64(),
+		X25519PubKey: x25519PubKeyBase64,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal pair initiate request: %w", err)
+	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/pair/initiate"
-	resp, err := client.Post(url, "application/json", strings.NewReader(body))
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("pair initiate request: %w", err)
 	}

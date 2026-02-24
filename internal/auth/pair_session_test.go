@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func TestInitiatePairing(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !containsSubstring(err.Error(), "pair initiate failed") {
+		if !strings.Contains(err.Error(), "pair initiate failed") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "pair initiate failed")
 		}
 	})
@@ -86,7 +87,7 @@ func TestInitiatePairing(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !containsSubstring(err.Error(), "empty pairing code") {
+		if !strings.Contains(err.Error(), "empty pairing code") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "empty pairing code")
 		}
 	})
@@ -211,7 +212,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected timeout error, got nil")
 		}
-		if !containsSubstring(err.Error(), "timed out") {
+		if !strings.Contains(err.Error(), "timed out") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "timed out")
 		}
 	})
@@ -238,7 +239,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected auth error, got nil")
 		}
-		if !containsSubstring(err.Error(), "WebSocket auth failed") {
+		if !strings.Contains(err.Error(), "WebSocket auth failed") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "WebSocket auth failed")
 		}
 	})
