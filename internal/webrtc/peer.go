@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -16,6 +17,15 @@ import (
 
 // DataChannelLabel is the name of the WebRTC DataChannel used for terminal protocol.
 const DataChannelLabel = "terminal"
+
+// maxMessageSize is the maximum size in bytes for a single DataChannel message
+// used for terminal I/O. Terminal data is typically small (< 1KB), so 4KB
+// provides ample headroom without excessive memory allocation.
+const maxMessageSize = 4096
+
+// bufferedAmountLowThreshold is the byte threshold at which the DataChannel
+// fires the OnBufferedAmountLow callback, enabling backpressure-aware sending.
+const bufferedAmountLowThreshold = 4096
 
 // TurnCredentials holds STUN/TURN server credentials from the signaling server.
 type TurnCredentials struct {
@@ -96,10 +106,16 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 	if ok {
 		delete(pm.peers, deviceID)
 	}
+	peerCount := len(pm.peers)
 	pm.mu.Unlock()
 
 	if ok {
 		peer.Close()
+		pm.logger.Info("peer disconnected",
+			"mobile", deviceID,
+			"peerCount", peerCount,
+			"goroutines", runtime.NumGoroutine(),
+		)
 	}
 }
 
@@ -110,11 +126,19 @@ func (pm *PeerManager) CloseAll() {
 	for _, p := range pm.peers {
 		peers = append(peers, p)
 	}
+	closedCount := len(peers)
 	pm.peers = make(map[string]*Peer)
 	pm.mu.Unlock()
 
 	for _, p := range peers {
 		p.Close()
+	}
+
+	if closedCount > 0 {
+		pm.logger.Info("all peers closed",
+			"closedCount", closedCount,
+			"goroutines", runtime.NumGoroutine(),
+		)
 	}
 }
 
@@ -228,7 +252,14 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		return
 	}
 	pm.peers[mobileDeviceID] = peer
+	peerCount := len(pm.peers)
 	pm.mu.Unlock()
+
+	pm.logger.Info("peer connected",
+		"mobile", mobileDeviceID,
+		"peerCount", peerCount,
+		"goroutines", runtime.NumGoroutine(),
+	)
 
 	// Set up event handlers
 	peer.setupHandlers()
@@ -423,6 +454,11 @@ func (p *Peer) setupHandlers() {
 
 // setupDataChannelHandlers sets up handlers on a DataChannel.
 func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
+	// Set the buffered amount low threshold for backpressure awareness.
+	// When the buffered amount drops below this threshold, the
+	// OnBufferedAmountLow callback fires, enabling flow control.
+	dc.SetBufferedAmountLowThreshold(bufferedAmountLowThreshold)
+
 	dc.OnOpen(func() {
 		p.logger.Info("DataChannel opened", "label", dc.Label())
 	})

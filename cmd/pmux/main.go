@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"syscall"
 	"time"
@@ -30,8 +32,24 @@ func main() {
 	args := os.Args[1:]
 
 	// Internal: agent background mode (spawned by supervisor)
-	if len(args) == 1 && args[0] == "--agent" {
-		runAgent()
+	// Supports optional --cpuprofile <file> and --memprofile <file> flags.
+	if len(args) >= 1 && args[0] == "--agent" {
+		var cpuProfile, memProfile string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--cpuprofile":
+				if i+1 < len(args) {
+					cpuProfile = args[i+1]
+					i++
+				}
+			case "--memprofile":
+				if i+1 < len(args) {
+					memProfile = args[i+1]
+					i++
+				}
+			}
+		}
+		runAgent(cpuProfile, memProfile)
 		return
 	}
 
@@ -94,10 +112,29 @@ func ensureAgent() {
 }
 
 // runAgent runs the background WebRTC agent process.
-func runAgent() {
+// cpuProfile and memProfile are optional file paths for runtime/pprof output.
+func runAgent(cpuProfile, memProfile string) {
 	paths, err := config.DefaultPaths()
 	if err != nil {
 		os.Exit(1)
+	}
+
+	// Start CPU profiling if requested
+	if cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: could not create CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			fmt.Fprintf(os.Stderr, "error: could not start CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -110,7 +147,23 @@ func runAgent() {
 		cancel()
 	}()
 
-	if err := agent.Run(ctx, paths); err != nil && err != context.Canceled {
+	agentErr := agent.Run(ctx, paths)
+
+	// Write memory profile on shutdown if requested
+	if memProfile != "" {
+		f, err := os.Create(memProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: could not create memory profile: %v\n", err)
+		} else {
+			runtime.GC() // Get up-to-date heap statistics
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "error: could not write memory profile: %v\n", err)
+			}
+			f.Close()
+		}
+	}
+
+	if agentErr != nil && agentErr != context.Canceled {
 		os.Exit(1)
 	}
 }

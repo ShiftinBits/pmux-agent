@@ -3,12 +3,25 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
+)
+
+const (
+	// defaultCommandTimeout is the default timeout for tmux CLI commands.
+	// Most commands complete in milliseconds; this prevents zombie processes
+	// from accumulating if tmux hangs.
+	defaultCommandTimeout = 10 * time.Second
+
+	// serverCheckTimeout is the timeout specifically for IsServerRunning checks.
+	// This is shorter because it's called frequently in the monitoring loop.
+	serverCheckTimeout = 5 * time.Second
 )
 
 // DefaultSocket is the tmux socket name used by pmux.
@@ -31,23 +44,41 @@ func NewClient(socket string) *Client {
 	}
 }
 
-// run executes a tmux command with the pmux socket.
+// run executes a tmux command with the pmux socket and the default timeout.
+// Uses exec.CommandContext to prevent zombie tmux processes from accumulating.
 func (c *Client) run(args ...string) (string, error) {
+	return c.runCtx(context.Background(), defaultCommandTimeout, args...)
+}
+
+// runCtx executes a tmux command with the pmux socket using the given
+// context and timeout. The timeout is applied as a context deadline on top
+// of any existing deadline in ctx.
+func (c *Client) runCtx(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	fullArgs := append([]string{"-L", c.Socket}, args...)
-	cmd := exec.Command(c.TmuxBin, fullArgs...)
+	cmd := exec.CommandContext(ctx, c.TmuxBin, fullArgs...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return strings.TrimRight(string(out), "\n"), fmt.Errorf("tmux command timed out after %s: %v", timeout, args)
+	}
 	return strings.TrimRight(string(out), "\n"), err
 }
 
 // IsServerRunning checks if the tmux server on the pmux socket is alive.
+// Uses a 5-second timeout to prevent blocking the monitoring loop if tmux hangs.
 func (c *Client) IsServerRunning() bool {
-	_, err := c.run("has-session")
+	_, err := c.runCtx(context.Background(), serverCheckTimeout, "has-session")
 	return err == nil
 }
 
 // Version returns the tmux version string.
 func (c *Client) Version() (string, error) {
-	cmd := exec.Command(c.TmuxBin, "-V")
+	ctx, cancel := context.WithTimeout(context.Background(), defaultCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, c.TmuxBin, "-V")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tmux not available: %w", err)

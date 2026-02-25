@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type Handler struct {
 
 	mu           sync.Mutex
 	bridges      map[string]*tmux.PaneBridge // per-peer attached bridge
+	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
 	paneForPeer  map[string]string           // peerID -> paneID (for restore on detach)
 	lastPingTime map[string]time.Time        // peerID -> last ping received
 }
@@ -39,6 +41,7 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, broadcastRaw BroadcastRa
 		broadcastRaw: broadcastRaw,
 		logger:       logger,
 		bridges:      make(map[string]*tmux.PaneBridge),
+		cancels:      make(map[string]context.CancelFunc),
 		paneForPeer:  make(map[string]string),
 		lastPingTime: make(map[string]time.Time),
 	}
@@ -149,8 +152,12 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		return
 	}
 
+	// Create a per-peer context so streamOutput can be cleanly canceled on detach.
+	ctx, cancel := context.WithCancel(context.Background())
+
 	h.mu.Lock()
 	h.bridges[peerID] = bridge
+	h.cancels[peerID] = cancel
 	h.paneForPeer[peerID] = req.PaneID
 	h.mu.Unlock()
 
@@ -168,8 +175,8 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		})
 	}
 
-	// Start streaming output in background
-	go h.streamOutput(peerID, bridge)
+	// Start streaming output in background with context for lifecycle management
+	go h.streamOutput(ctx, peerID, bridge)
 }
 
 func (h *Handler) handleDetach(peerID string) {
@@ -257,12 +264,22 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 }
 
 // streamOutput reads from a PaneBridge and sends output events to the peer.
-// Exits when the bridge is closed or sending fails.
-func (h *Handler) streamOutput(peerID string, bridge *tmux.PaneBridge) {
+// Exits when the context is canceled, the bridge is closed, or sending fails.
+func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
 	buf := make([]byte, 4096)
 	for {
+		// Check context before blocking on Read
+		if ctx.Err() != nil {
+			h.logger.Debug("streamOutput context canceled", "peer", peerID)
+			return
+		}
+
 		n, err := bridge.Read(buf)
 		if err != nil {
+			// Distinguish between context cancellation and bridge errors
+			if ctx.Err() != nil {
+				h.logger.Debug("streamOutput stopped by context", "peer", peerID)
+			}
 			return
 		}
 
@@ -281,17 +298,26 @@ func (h *Handler) streamOutput(peerID string, bridge *tmux.PaneBridge) {
 	}
 }
 
-// detachPeer closes any existing bridge for a peer and restores the
-// original pane size if this was the last mobile client attached.
+// detachPeer cancels the streamOutput goroutine, closes any existing bridge
+// for a peer, and restores the original pane size if this was the last
+// mobile client attached.
 func (h *Handler) detachPeer(peerID string) {
 	h.mu.Lock()
 	bridge, ok := h.bridges[peerID]
+	cancel := h.cancels[peerID]
 	paneID := h.paneForPeer[peerID]
 	if ok {
 		delete(h.bridges, peerID)
+		delete(h.cancels, peerID)
 		delete(h.paneForPeer, peerID)
 	}
 	h.mu.Unlock()
+
+	// Cancel the streamOutput context first so the goroutine can exit
+	// before we close the bridge underneath it.
+	if cancel != nil {
+		cancel()
+	}
 
 	if ok {
 		bridge.Close()

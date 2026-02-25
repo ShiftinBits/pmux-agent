@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"fmt"
 	"log/slog"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -542,5 +544,117 @@ func TestHandler_BroadcastEmptySessions(t *testing.T) {
 	}
 	if len(sessionsEvent.Sessions) != 0 {
 		t.Errorf("expected 0 sessions, got %d", len(sessionsEvent.Sessions))
+	}
+}
+
+// TestHandler_GoroutineLeak verifies that repeated connect/attach/detach/disconnect
+// cycles do not leak goroutines. Each cycle creates a tmux session, attaches a
+// peer, sends messages, detaches, and disconnects. After all cycles, the
+// goroutine count should return to approximately the baseline.
+func TestHandler_GoroutineLeak(t *testing.T) {
+	skipIfNoTmux(t)
+
+	const testSocket = "pmux-leak-test"
+	const cycles = 7
+	const goroutineMargin = 3
+
+	exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	t.Cleanup(func() {
+		exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	})
+
+	tc := tmux.NewClient(testSocket)
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, func(data []byte) {}, slog.Default())
+
+	// Create a persistent session so the tmux server stays alive across cycles
+	_, err := tc.CreateSession("leak-anchor", "")
+	if err != nil {
+		t.Fatalf("CreateSession (anchor): %v", err)
+	}
+
+	// Let runtime stabilize and collect garbage before baseline measurement
+	runtime.GC()
+	time.Sleep(200 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+	t.Logf("baseline goroutines: %d", baseline)
+
+	for i := 0; i < cycles; i++ {
+		peerID := fmt.Sprintf("leak-peer-%d", i)
+		sessionName := fmt.Sprintf("leak-sess-%d", i)
+
+		// Create a session for this cycle
+		_, err := tc.CreateSession(sessionName, "")
+		if err != nil {
+			t.Fatalf("cycle %d: CreateSession: %v", i, err)
+		}
+
+		sessions, err := tc.ListAll()
+		if err != nil {
+			t.Fatalf("cycle %d: ListAll: %v", i, err)
+		}
+
+		// Find the session we just created
+		var paneID string
+		for _, s := range sessions {
+			if s.Name == sessionName {
+				paneID = s.Windows[0].Panes[0].ID
+				break
+			}
+		}
+		if paneID == "" {
+			t.Fatalf("cycle %d: could not find pane for session %s", i, sessionName)
+		}
+
+		// Attach
+		h.HandleMessage(peerID, &protocol.AttachRequest{
+			Type:   "attach",
+			PaneID: paneID,
+			Cols:   80,
+			Rows:   24,
+		})
+
+		// Wait for attached confirmation
+		catcher.waitFor(t, "attached", 2*time.Second)
+
+		// Send some input to exercise the stream
+		h.HandleMessage(peerID, &protocol.InputRequest{
+			Type: "input",
+			Data: []byte("echo hello\n"),
+		})
+		time.Sleep(100 * time.Millisecond)
+
+		// Detach
+		h.HandleMessage(peerID, &protocol.DetachRequest{Type: "detach"})
+		catcher.waitFor(t, "detached", 2*time.Second)
+
+		// Simulate peer disconnect (cleans up any remaining state)
+		h.PeerDisconnected(peerID)
+
+		// Kill the per-cycle session to clean up tmux state
+		tc.KillSession(sessionName) //nolint:errcheck
+
+		// Reset catcher for next cycle
+		catcher.mu.Lock()
+		catcher.messages = nil
+		catcher.mu.Unlock()
+	}
+
+	// Allow goroutines to settle — give the runtime time to reap goroutines
+	// that have returned but not yet been collected by the scheduler.
+	for attempt := 0; attempt < 10; attempt++ {
+		runtime.GC()
+		time.Sleep(200 * time.Millisecond)
+		if runtime.NumGoroutine() <= baseline+goroutineMargin {
+			break
+		}
+	}
+
+	final := runtime.NumGoroutine()
+	t.Logf("final goroutines: %d (baseline was %d, delta: %d)", final, baseline, final-baseline)
+
+	if final > baseline+goroutineMargin {
+		t.Errorf("goroutine leak detected: baseline=%d, final=%d, delta=%d (max allowed: +%d)",
+			baseline, final, final-baseline, goroutineMargin)
 	}
 }

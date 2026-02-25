@@ -2,25 +2,43 @@ package tmux
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // PaneBridge provides a bidirectional byte stream to a tmux pane.
 // Output is streamed via tmux pipe-pane through a FIFO, and input
 // is sent via tmux send-keys -l.
+//
+// Internally, a relay goroutine copies from the FIFO into an os.Pipe.
+// Callers read from the pipe's read end. This design ensures that
+// Close() reliably unblocks any blocked Read() call — closing the pipe's
+// write end causes the read end to return io.EOF immediately. The relay
+// goroutine polls the FIFO with short timeouts so it can check the done
+// channel and exit promptly when Close() is called.
 type PaneBridge struct {
 	client         *Client
 	paneID         string
 	fifoDir        string
-	fifo           *os.File
+	fifoFd         int      // raw fd for non-blocking FIFO reads
+	pipeR          *os.File // read end of relay pipe (used by Read)
+	pipeW          *os.File // write end of relay pipe (written by relay goroutine)
+	done           chan struct{} // closed on Close() to signal relay to stop
+	relayDone      chan struct{} // closed when relay goroutine exits
 	initialContent string
 	mu             sync.Mutex
 	closed         bool
 }
+
+// relayPollInterval is how often the relay goroutine checks the done
+// channel when the FIFO has no data. This is short enough to avoid
+// perceptible lag on shutdown but long enough to avoid busy-waiting.
+const relayPollInterval = 50 * time.Millisecond
 
 // AttachPane creates a bidirectional stream to a tmux pane.
 // Output is captured via pipe-pane and input is sent via send-keys.
@@ -38,13 +56,23 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 		return nil, fmt.Errorf("create output FIFO: %w", err)
 	}
 
-	// Open FIFO with O_RDWR to avoid blocking on open.
-	// O_RDONLY would block until a writer opens the other end;
-	// O_RDWR returns immediately and reads block until data arrives.
-	fifo, err := os.OpenFile(fifoPath, os.O_RDWR, 0)
+	// Open FIFO with O_RDWR|O_NONBLOCK for non-blocking reads in the relay.
+	// O_RDWR avoids blocking on open (no need to wait for a writer).
+	// O_NONBLOCK allows Read to return EAGAIN when no data is available,
+	// enabling the relay goroutine to check its done channel.
+	fd, err := syscall.Open(fifoPath, syscall.O_RDWR|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		os.RemoveAll(dir) //nolint:errcheck
 		return nil, fmt.Errorf("open output FIFO: %w", err)
+	}
+
+	// Create a relay pipe. The relay goroutine copies FIFO data into pipeW;
+	// callers read from pipeR. Closing pipeW reliably unblocks pipeR.Read().
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		syscall.Close(fd)
+		os.RemoveAll(dir) //nolint:errcheck
+		return nil, fmt.Errorf("create relay pipe: %w", err)
 	}
 
 	// Capture current pane content before setting up pipe-pane.
@@ -57,7 +85,9 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 	escapedPath := strings.ReplaceAll(fifoPath, "'", "'\\''")
 	if _, err := c.run("pipe-pane", "-t", paneID, "-o",
 		fmt.Sprintf("exec cat > '%s'", escapedPath)); err != nil {
-		fifo.Close()
+		pipeR.Close()
+		pipeW.Close()
+		syscall.Close(fd)
 		os.RemoveAll(dir) //nolint:errcheck
 		return nil, fmt.Errorf("start pipe-pane: %w", err)
 	}
@@ -69,13 +99,67 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 		}
 	}
 
-	return &PaneBridge{
+	pb := &PaneBridge{
 		client:         c,
 		paneID:         paneID,
 		fifoDir:        dir,
-		fifo:           fifo,
+		fifoFd:         fd,
+		pipeR:          pipeR,
+		pipeW:          pipeW,
+		done:           make(chan struct{}),
+		relayDone:      make(chan struct{}),
 		initialContent: initialContent,
-	}, nil
+	}
+
+	// Start the relay goroutine that copies from FIFO to pipe.
+	go pb.relayFIFOToPipe()
+
+	return pb, nil
+}
+
+// relayFIFOToPipe copies data from the FIFO to the relay pipe using
+// non-blocking reads. Polls the FIFO fd at short intervals and checks
+// the done channel between polls so it can exit promptly on Close().
+func (pb *PaneBridge) relayFIFOToPipe() {
+	defer close(pb.relayDone)
+
+	buf := make([]byte, 4096)
+	for {
+		// Check if we should stop
+		select {
+		case <-pb.done:
+			return
+		default:
+		}
+
+		n, err := syscall.Read(pb.fifoFd, buf)
+		if n > 0 {
+			if _, writeErr := pb.pipeW.Write(buf[:n]); writeErr != nil {
+				// pipeW was closed — bridge is shutting down
+				return
+			}
+		}
+		if err != nil {
+			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+				// No data available — poll after a short sleep.
+				// Use a timer with select for prompt cancellation.
+				timer := time.NewTimer(relayPollInterval)
+				select {
+				case <-pb.done:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+				continue
+			}
+			// FIFO error (EBADF after close, etc.) — stop relaying
+			return
+		}
+		if n == 0 {
+			// EOF on FIFO (all writers closed and no more data)
+			return
+		}
+	}
 }
 
 // PaneID returns the ID of the pane this bridge is attached to.
@@ -90,16 +174,20 @@ func (pb *PaneBridge) InitialContent() string {
 }
 
 // Read reads output bytes from the pane. Blocks until data is available.
-// Implements io.Reader.
+// Returns io.EOF when the bridge is closed. Implements io.Reader.
 func (pb *PaneBridge) Read(buf []byte) (int, error) {
 	pb.mu.Lock()
 	if pb.closed {
 		pb.mu.Unlock()
-		return 0, fmt.Errorf("bridge closed")
+		return 0, io.EOF
 	}
 	pb.mu.Unlock()
 
-	return pb.fifo.Read(buf)
+	n, err := pb.pipeR.Read(buf)
+	if err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // Write sends input to the pane via tmux send-keys.
@@ -135,7 +223,8 @@ func (pb *PaneBridge) Resize(cols, rows int) error {
 }
 
 // Close detaches from the pane, disabling pipe-pane and cleaning up
-// the FIFO and temp directory. Any blocked Read call will return an error.
+// the FIFO, relay pipe, and temp directory. Any blocked Read call will
+// return io.EOF because the pipe write end is closed.
 func (pb *PaneBridge) Close() error {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
@@ -148,8 +237,19 @@ func (pb *PaneBridge) Close() error {
 	// Disable pipe-pane (empty command removes the pipe)
 	pb.client.run("pipe-pane", "-t", pb.paneID) //nolint:errcheck
 
-	// Close FIFO (unblocks any pending Read)
-	pb.fifo.Close()
+	// Signal the relay goroutine to stop and wait for it to exit.
+	// The relay checks done between non-blocking poll intervals.
+	close(pb.done)
+
+	// Close the relay pipe write end — this causes pipeR.Read() to
+	// return io.EOF, unblocking any goroutine blocked on Read().
+	pb.pipeW.Close()
+
+	// Close the read end of the relay pipe
+	pb.pipeR.Close()
+
+	// Close the raw FIFO fd
+	syscall.Close(pb.fifoFd)
 
 	// Remove temp directory and FIFO
 	os.RemoveAll(pb.fifoDir) //nolint:errcheck
