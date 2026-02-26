@@ -1,0 +1,26 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build all platforms
+        run: make build-all
+      - name: Generate checksums
+        run: cd bin && sha256sum pmux-* > checksums.txt
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/pmux-*
+            bin/checksums.txt
+          generate_release_notes: true

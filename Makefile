@@ -1,10 +1,31 @@
 # Makefile for pmux-agent
 
-.PHONY: build test test-integration test-stress clean
+VERSION ?= dev
+BINARY := pmux
+PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+
+.PHONY: build build-all release test test-integration test-stress test-all clean
 
 # Build the pmux binary
 build:
-	go build -o bin/pmux ./cmd/pmux
+	go build -o bin/$(BINARY) ./cmd/pmux
+
+# Build for all supported platforms
+build-all:
+	@for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; \
+		arch=$${platform#*/}; \
+		output=bin/$(BINARY)-$${os}-$${arch}; \
+		echo "Building $${output}..."; \
+		GOOS=$${os} GOARCH=$${arch} go build -ldflags="-s -w" -o $${output} ./cmd/pmux; \
+	done
+
+# Build all platforms and generate release checksums
+release: build-all
+	@echo "Generating checksums..."
+	@cd bin && shasum -a 256 $(BINARY)-* > checksums.txt
+	@echo "Release artifacts in bin/"
+	@echo "Tag and push: git tag v$(VERSION) && git push origin v$(VERSION)"
 
 # Run unit tests
 test:
