@@ -23,10 +23,21 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/proxy"
 )
 
-const (
-	tmuxSocket = "pmux"
-	version    = "0.1.0-dev"
-)
+const version = "0.1.0-dev"
+
+// loadEffectiveConfig loads the config from disk with env overrides.
+// Returns a usable config even if the config file doesn't exist.
+func loadEffectiveConfig() config.Config {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		return config.Defaults()
+	}
+	cfg, err := config.LoadConfig(paths.ConfigFile)
+	if err != nil {
+		return config.Defaults()
+	}
+	return cfg
+}
 
 func main() {
 	args := os.Args[1:]
@@ -53,10 +64,14 @@ func main() {
 		return
 	}
 
+	// Load effective config for socket name and other settings
+	cfg := loadEffectiveConfig()
+	socketName := cfg.Tmux.SocketName
+
 	// No args: default to new session (or attach if server running)
 	if len(args) == 0 {
 		ensureAgent()
-		if err := proxy.ExecTmux(tmuxSocket); err != nil {
+		if err := proxy.ExecTmux(socketName); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 			os.Exit(1)
 		}
@@ -70,6 +85,9 @@ func main() {
 		return
 	case "pair":
 		handlePair()
+		return
+	case "config":
+		handleConfig()
 		return
 	case "devices":
 		handleDevices()
@@ -91,9 +109,9 @@ func main() {
 		return
 	}
 
-	// Everything else: ensure agent is running, then passthrough to tmux -L pmux
+	// Everything else: ensure agent is running, then passthrough to tmux -L <socket>
 	ensureAgent()
-	if err := proxy.ExecTmux(tmuxSocket, args...); err != nil {
+	if err := proxy.ExecTmux(socketName, args...); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -213,9 +231,9 @@ func handleInit() {
 		input = defaultName
 	}
 
-	// Save config
-	cfg := config.Config{Name: input}
-	if err := config.SaveConfig(paths.ConfigFile, cfg); err != nil {
+	// Write config: start with commented defaults, then prepend the name
+	configContent := fmt.Sprintf("name = %q\n\n%s", input, config.CommentedDefaultConfig())
+	if err := os.WriteFile(paths.ConfigFile, []byte(configContent), 0600); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to save config: %v\n", err)
 		os.Exit(1)
 	}
@@ -224,6 +242,22 @@ func handleInit() {
 	fmt.Printf("Device ID: %s\n", id.DeviceID)
 	fmt.Printf("Host name: %s\n", input)
 	fmt.Printf("Keys saved to: %s\n", paths.KeysDir)
+}
+
+func handleConfig() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg, sources, err := config.LoadConfigWithSources(paths.ConfigFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Print(config.FormatEffective(cfg, sources))
 }
 
 func handlePair() {
@@ -245,7 +279,9 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	serverURL := config.ServerURL()
+	// Load config to get server URL and host name
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+	serverURL := cfg.ServerURL()
 
 	// Generate X25519 ephemeral keypair for key exchange
 	x25519kp, err := auth.GenerateX25519Keypair()
@@ -254,8 +290,6 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	// Load host name from config, fall back to OS hostname
-	cfg, _ := config.LoadConfig(paths.ConfigFile)
 	hostName := cfg.Name
 	if hostName == "" {
 		hostName = config.DefaultHostName()
@@ -501,6 +535,7 @@ func printHelp() {
 PocketMux commands:
   init          Generate identity and register with signaling server
   pair          Pair with a mobile device (displays QR code)
+  config        Show effective configuration with sources
   devices       List paired mobile devices
   unpair        Remove a paired mobile device
   host-status   Show host process status and recent logs

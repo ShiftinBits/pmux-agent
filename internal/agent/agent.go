@@ -90,10 +90,17 @@ func Run(ctx context.Context, paths config.Paths) error {
 	}
 	logger.Info("identity loaded", "deviceID", identity.DeviceID)
 
-	// Create tmux client targeting the pmux socket
-	tmuxClient := tmux.NewClient(tmux.DefaultSocket)
+	// Load config for server URL, socket name, and timing settings
+	cfg, err := config.LoadConfig(paths.ConfigFile)
+	if err != nil {
+		logger.Warn("failed to load config, using defaults", "error", err)
+		cfg = config.Defaults()
+	}
 
-	serverURL := config.ServerURL()
+	// Create tmux client targeting the configured socket
+	tmuxClient := tmux.NewClient(cfg.Tmux.SocketName)
+
+	serverURL := cfg.ServerURL()
 
 	// Create components with forward references (resolved via closures)
 	var peerManager *webrtc.PeerManager
@@ -107,6 +114,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 	signalingClient := webrtc.NewSignalingClient(identity, serverURL, func(msg webrtc.SignalingMessage) {
 		peerManager.HandleSignalingMessage(msg)
 	}, logger)
+	signalingClient.PresenceInterval = cfg.KeepaliveInterval()
 
 	peerManager = webrtc.NewPeerManager(
 		logger,
