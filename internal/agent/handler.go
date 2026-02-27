@@ -267,6 +267,7 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 // Exits when the context is canceled, the bridge is closed, or sending fails.
 func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
 	buf := make([]byte, 4096)
+	filter := tmux.NewTitleFilter() // Strip tmux title escapes for xterm.js
 	for {
 		// Check context before blocking on Read
 		if ctx.Err() != nil {
@@ -283,9 +284,16 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 			return
 		}
 
-		// Copy data since buf is reused
-		data := make([]byte, n)
-		copy(data, buf[:n])
+		// Strip tmux-specific ESC k ... ESC \ title sequences that
+		// xterm.js does not recognize and would render as visible text.
+		filtered := filter.Filter(buf[:n])
+		if len(filtered) == 0 {
+			continue // entire chunk was title data
+		}
+
+		// Copy data since filtered slice is reused by the filter
+		data := make([]byte, len(filtered))
+		copy(data, filtered)
 
 		if err := h.sendMsg(peerID, &protocol.OutputEvent{
 			Type: "output",
