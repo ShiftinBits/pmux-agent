@@ -328,6 +328,15 @@ func handlePair() {
 	fmt.Printf("Manual pairing code: %s\n\n", pairResp.PairingCode)
 	fmt.Println("Waiting for mobile device to complete pairing...")
 
+	// Stop the background agent if running. During pairing, the pair CLI
+	// opens its own WebSocket to receive pair_complete. A competing agent
+	// WebSocket for the same device ID can intercept the message after DO
+	// hibernation, causing the pair CLI to hang. Stopping the agent ensures
+	// only one WebSocket exists for this device during pairing.
+	if err := agent.StopRunning(paths); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to stop host for pairing: %v\n", err)
+	}
+
 	// Get JWT for WebSocket auth
 	jwt, err := auth.ExchangeToken(id, serverURL, httpClient)
 	if err != nil {

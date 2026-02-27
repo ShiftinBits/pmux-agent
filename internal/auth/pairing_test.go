@@ -119,7 +119,7 @@ func TestBuildQRPayload(t *testing.T) {
 	})
 
 	t.Run("omits default server URL", func(t *testing.T) {
-		payload, err := BuildQRPayload("ABC123", "x25519pubkey==", "device-abc", "https://signal.pocketmux.dev")
+		payload, err := BuildQRPayload("ABC123", "x25519pubkey==", "device-abc", "https://signal.pmux.io")
 		if err != nil {
 			t.Fatalf("BuildQRPayload() error: %v", err)
 		}

@@ -18,7 +18,7 @@ type TokenResponse struct {
 }
 
 // ExchangeToken signs a challenge with the identity key and exchanges it for a JWT.
-// serverURL should be the base URL of the signaling server (e.g., "https://signal.pocketmux.dev").
+// serverURL should be the base URL of the signaling server (e.g., "https://signal.pmux.io").
 func ExchangeToken(id *Identity, serverURL string, client *http.Client) (string, error) {
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	signature := id.SignChallenge(id.DeviceID, timestamp)

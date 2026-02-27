@@ -10,11 +10,11 @@ import (
 func TestDefaults(t *testing.T) {
 	cfg := Defaults()
 
-	if cfg.Server.URL != "https://signal.pocketmux.dev" {
-		t.Errorf("Server.URL = %q, want %q", cfg.Server.URL, "https://signal.pocketmux.dev")
+	if cfg.Server.URL != "https://signal.pmux.io" {
+		t.Errorf("Server.URL = %q, want %q", cfg.Server.URL, "https://signal.pmux.io")
 	}
-	if cfg.Identity.KeyPath != "~/.config/pocketmux/keys/" {
-		t.Errorf("Identity.KeyPath = %q, want %q", cfg.Identity.KeyPath, "~/.config/pocketmux/keys/")
+	if cfg.Identity.KeyPath != "~/.config/pmux/keys/" {
+		t.Errorf("Identity.KeyPath = %q, want %q", cfg.Identity.KeyPath, "~/.config/pmux/keys/")
 	}
 	if cfg.Connection.ReconnectInterval != "5s" {
 		t.Errorf("Connection.ReconnectInterval = %q, want %q", cfg.Connection.ReconnectInterval, "5s")
@@ -105,8 +105,8 @@ socket_name = "custom-socket"
 	if cfg.Connection.ReconnectInterval != "5s" {
 		t.Errorf("ReconnectInterval = %q, want default %q", cfg.Connection.ReconnectInterval, "5s")
 	}
-	if cfg.Identity.KeyPath != "~/.config/pocketmux/keys/" {
-		t.Errorf("Identity.KeyPath = %q, want default %q", cfg.Identity.KeyPath, "~/.config/pocketmux/keys/")
+	if cfg.Identity.KeyPath != "~/.config/pmux/keys/" {
+		t.Errorf("Identity.KeyPath = %q, want default %q", cfg.Identity.KeyPath, "~/.config/pmux/keys/")
 	}
 }
 
@@ -257,9 +257,9 @@ func TestValidate_ValidURLSchemes(t *testing.T) {
 		name string
 		url  string
 	}{
-		{"https", "https://signal.pocketmux.dev"},
+		{"https", "https://signal.pmux.io"},
 		{"http", "http://localhost:8787"},
-		{"wss", "wss://signal.pocketmux.dev"},
+		{"wss", "wss://signal.pmux.io"},
 		{"ws", "ws://localhost:8787"},
 	}
 
@@ -388,8 +388,8 @@ func TestKeepaliveInterval(t *testing.T) {
 
 func TestServerURL_Method(t *testing.T) {
 	cfg := Defaults()
-	if cfg.ServerURL() != "https://signal.pocketmux.dev" {
-		t.Errorf("ServerURL() = %q, want %q", cfg.ServerURL(), "https://signal.pocketmux.dev")
+	if cfg.ServerURL() != "https://signal.pmux.io" {
+		t.Errorf("ServerURL() = %q, want %q", cfg.ServerURL(), "https://signal.pmux.io")
 	}
 
 	cfg.Server.URL = "https://custom.example.com"
@@ -539,7 +539,7 @@ func TestFormatEffective(t *testing.T) {
 
 	// Check that it contains expected strings
 	if !containsAll(output, []string{
-		`server.url = "https://signal.pocketmux.dev"  (default)`,
+		`server.url = "https://signal.pmux.io"  (default)`,
 		`tmux.socket_name = "pmux"  (default)`,
 		`connection.max_mobile_connections = 5  (default)`,
 	}) {
@@ -557,7 +557,7 @@ func TestCommentedDefaultConfig(t *testing.T) {
 		"[tmux]",
 		"PMUX_SERVER_URL",
 		"PMUX_KEY_PATH",
-		`# url = "https://signal.pocketmux.dev"`,
+		`# url = "https://signal.pmux.io"`,
 		`# socket_name = "pmux"`,
 	}
 

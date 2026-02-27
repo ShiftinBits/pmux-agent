@@ -1,5 +1,5 @@
 // Package config handles configuration file parsing, defaults, and path resolution.
-// Config stored at ~/.config/pocketmux/config.toml.
+// Config stored at ~/.config/pmux/config.toml.
 package config
 
 import (
@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	appDir            = "pocketmux"
+	appDir            = "pmux"
 	keysDir           = "keys"
 	pairedDevicesFile = "paired_devices.json"
 	configFile        = "config.toml"
 
 	// DefaultServerURL is the production signaling server base URL.
 	// Used for both HTTP endpoints and WebSocket (signaling.go converts to wss://).
-	DefaultServerURL = "https://signal.pocketmux.dev"
+	DefaultServerURL = "https://signal.pmux.io"
 
 	// EnvServerURL is the legacy environment variable to override the signaling server URL.
 	// Kept for backward compatibility; PMUX_SERVER_URL takes precedence if both are set.
@@ -101,7 +101,7 @@ type ConfigSources struct {
 func Defaults() Config {
 	return Config{
 		Server:   ServerConfig{URL: DefaultServerURL},
-		Identity: IdentityConfig{KeyPath: "~/.config/pocketmux/keys/"},
+		Identity: IdentityConfig{KeyPath: "~/.config/pmux/keys/"},
 		Connection: ConnectionConfig{
 			ReconnectInterval:    "5s",
 			KeepaliveInterval:    "30s",
@@ -350,11 +350,11 @@ func CommentedDefaultConfig() string {
 
 [server]
 # Signaling server URL (env: PMUX_SERVER_URL)
-# url = "https://signal.pocketmux.dev"
+# url = "https://signal.pmux.io"
 
 [identity]
 # Path to Ed25519 keypair (env: PMUX_KEY_PATH)
-# key_path = "~/.config/pocketmux/keys/"
+# key_path = "~/.config/pmux/keys/"
 
 [connection]
 # reconnect_interval = "5s"
@@ -368,10 +368,10 @@ func CommentedDefaultConfig() string {
 
 // Paths holds resolved filesystem paths for PocketMux configuration and keys.
 type Paths struct {
-	ConfigDir     string // ~/.config/pocketmux
-	KeysDir       string // ~/.config/pocketmux/keys
-	PairedDevices string // ~/.config/pocketmux/paired_devices.json
-	ConfigFile    string // ~/.config/pocketmux/config.toml
+	ConfigDir     string // ~/.config/pmux
+	KeysDir       string // ~/.config/pmux/keys
+	PairedDevices string // ~/.config/pmux/paired_devices.json
+	ConfigFile    string // ~/.config/pmux/config.toml
 }
 
 // DefaultPaths returns the standard PocketMux directory paths based on $HOME.

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
@@ -127,6 +129,24 @@ func Run(ctx context.Context, paths config.Paths) error {
 	// Create a cancelable context for the agent
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Handle SIGUSR1 to wake signaling client from dormancy.
+	// The supervisor sends SIGUSR1 on every pmux CLI invocation so that a
+	// dormant agent resumes reconnection without requiring a manual restart.
+	usr1Ch := make(chan os.Signal, 1)
+	signal.Notify(usr1Ch, syscall.SIGUSR1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				signal.Stop(usr1Ch)
+				return
+			case <-usr1Ch:
+				logger.Info("SIGUSR1 received, signaling activity")
+				signalingClient.SignalActivity()
+			}
+		}
+	}()
 
 	// Watch for tmux server lifecycle (tmux.Client satisfies serverChecker)
 	go watchTmux(ctx, cancel, tmuxClient, handler.BroadcastEmptySessions, defaultWatchConfig(), logger)
