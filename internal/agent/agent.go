@@ -125,6 +125,14 @@ func Run(ctx context.Context, paths config.Paths) error {
 		signalingClient.JWT,
 		handler.HandleMessage,
 	)
+	peerManager.MaxPeers = cfg.Connection.MaxMobileConnections
+
+	// Load paired device for connection validation
+	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
+	pairedDevice, err := auth.LoadPairedDevice(pairedDevicesPath)
+	if err == nil && pairedDevice != nil {
+		peerManager.AllowedDeviceID = pairedDevice.DeviceID
+	}
 
 	// Create a cancelable context for the agent
 	ctx, cancel := context.WithCancel(ctx)

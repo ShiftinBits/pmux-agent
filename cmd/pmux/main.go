@@ -279,6 +279,36 @@ func handlePair() {
 		os.Exit(1)
 	}
 
+	// Check for existing pairing
+	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
+	existingDevice, err := auth.LoadPairedDevice(pairedDevicesPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load paired devices: %v\n", err)
+		os.Exit(1)
+	}
+
+	if existingDevice != nil {
+		name := existingDevice.Name
+		if name == "" {
+			name = existingDevice.DeviceID[:12] + "..."
+		}
+		pairedDate := existingDevice.PairedAt.Format("2006-01-02")
+		fmt.Printf("A device is already paired: %s (paired %s). Replace it? [y/N] ", name, pairedDate)
+
+		reader := bufio.NewReader(os.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println("Pairing cancelled.")
+			return
+		}
+
+		if err := auth.SavePairedDevices(pairedDevicesPath, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to clear paired devices: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// Load config to get server URL and host name
 	cfg, _ := config.LoadConfig(paths.ConfigFile)
 	serverURL := cfg.ServerURL()

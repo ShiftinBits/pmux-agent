@@ -105,7 +105,7 @@ func Defaults() Config {
 		Connection: ConnectionConfig{
 			ReconnectInterval:    "5s",
 			KeepaliveInterval:    "30s",
-			MaxMobileConnections: 5,
+			MaxMobileConnections: 1,
 		},
 		Tmux: TmuxConfig{SocketName: "pmux"},
 	}
@@ -289,9 +289,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("connection.keepalive_interval: %w", err)
 	}
 
-	// max_mobile_connections must be 1-20
-	if c.Connection.MaxMobileConnections < 1 || c.Connection.MaxMobileConnections > 20 {
-		return fmt.Errorf("connection.max_mobile_connections must be 1-20, got %d", c.Connection.MaxMobileConnections)
+	// max_mobile_connections must be exactly 1 (single-pairing mode)
+	if c.Connection.MaxMobileConnections != 1 {
+		return fmt.Errorf("connection.max_mobile_connections must be 1 (single-pairing mode)")
 	}
 
 	// socket_name must be non-empty
@@ -359,7 +359,7 @@ func CommentedDefaultConfig() string {
 [connection]
 # reconnect_interval = "5s"
 # keepalive_interval = "30s"
-# max_mobile_connections = 5
+# max_mobile_connections = 1
 
 [tmux]
 # socket_name = "pmux"

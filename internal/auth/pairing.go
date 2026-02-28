@@ -136,25 +136,21 @@ func RemovePairedDevice(path string, deviceID string) error {
 	return SavePairedDevices(path, filtered)
 }
 
-// AddPairedDevice appends a new paired device to the stored list.
-func AddPairedDevice(path string, device PairedDevice) error {
+// LoadPairedDevice returns the single paired device, or nil if none.
+func LoadPairedDevice(path string) (*PairedDevice, error) {
 	devices, err := LoadPairedDevices(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if len(devices) == 0 {
+		return nil, nil
+	}
+	return &devices[0], nil
+}
 
-	// Replace if device ID already exists (re-pairing)
-	found := false
-	for i, d := range devices {
-		if d.DeviceID == device.DeviceID {
-			devices[i] = device
-			found = true
-			break
-		}
-	}
-	if !found {
-		devices = append(devices, device)
-	}
-
-	return SavePairedDevices(path, devices)
+// AddPairedDevice stores a paired device, replacing any existing pairing.
+// Single-pairing mode: only one device can be paired at a time.
+func AddPairedDevice(path string, device PairedDevice) error {
+	// Single-pairing: always replace the entire list with just this device
+	return SavePairedDevices(path, []PairedDevice{device})
 }

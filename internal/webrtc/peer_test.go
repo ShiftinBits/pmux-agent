@@ -360,7 +360,7 @@ func TestPeerManager_ClosePeer(t *testing.T) {
 	}
 }
 
-func TestPeerManager_MultiplePeers(t *testing.T) {
+func TestPeerManager_CloseAllClearsAllPeers(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 	turnServer := mockTurnServer(t)
@@ -369,15 +369,15 @@ func TestPeerManager_MultiplePeers(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
 	pm.API = fastAPI(t)
 
+	// Connect a single peer and verify CloseAll removes it
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
 	time.Sleep(500 * time.Millisecond)
 
 	pm.mu.Lock()
 	count := len(pm.peers)
 	pm.mu.Unlock()
-	if count != 2 {
-		t.Errorf("expected 2 peers, got %d", count)
+	if count != 1 {
+		t.Errorf("expected 1 peer, got %d", count)
 	}
 
 	pm.CloseAll()
@@ -529,35 +529,74 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
 	pm.API = fastAPI(t)
-	pm.MaxPeers = 2
+	pm.MaxPeers = 1
 
-	// Connect two peers (should succeed)
+	// Connect one peer (should succeed)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
 	time.Sleep(500 * time.Millisecond)
 
-	if pm.PeerCount() != 2 {
-		t.Fatalf("expected 2 peers, got %d", pm.PeerCount())
+	if pm.PeerCount() != 1 {
+		t.Fatalf("expected 1 peer, got %d", pm.PeerCount())
 	}
 
-	// Third peer should be rejected
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m3"})
+	// Second peer should be rejected
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
 	time.Sleep(200 * time.Millisecond)
 
-	if pm.PeerCount() != 2 {
-		t.Errorf("expected 2 peers after rejection, got %d", pm.PeerCount())
+	if pm.PeerCount() != 1 {
+		t.Errorf("expected 1 peer after rejection, got %d", pm.PeerCount())
 	}
 
 	// Verify error message was sent
 	errors := sender.messagesOfType("error")
 	found := false
 	for _, e := range errors {
-		if e.TargetDeviceID == "m3" && e.Error == "max connections reached" {
+		if e.TargetDeviceID == "m2" && e.Error == "max connections reached" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected error message sent to m3")
+		t.Error("expected error message sent to m2")
+	}
+
+	pm.CloseAll()
+}
+
+func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm.API = fastAPI(t)
+	pm.AllowedDeviceID = "paired-device-123"
+
+	// Attempt connection from a different (unpaired) device
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "rogue-device-456"})
+	time.Sleep(200 * time.Millisecond)
+
+	// Should have no peers
+	if pm.PeerCount() != 0 {
+		t.Errorf("expected 0 peers, got %d", pm.PeerCount())
+	}
+
+	// Verify rejection error sent
+	errors := sender.messagesOfType("error")
+	found := false
+	for _, e := range errors {
+		if e.TargetDeviceID == "rogue-device-456" && e.Error == "not_paired" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected not_paired error message sent to rogue device")
+	}
+
+	// Now connect with the correct (paired) device — should succeed
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "paired-device-123"})
+	time.Sleep(500 * time.Millisecond)
+
+	if pm.PeerCount() != 1 {
+		t.Errorf("expected 1 peer for paired device, got %d", pm.PeerCount())
 	}
 
 	pm.CloseAll()
@@ -569,23 +608,22 @@ func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
 	pm.API = fastAPI(t)
-	pm.MaxPeers = 2
+	pm.MaxPeers = 1
 
-	// Fill to capacity
+	// Fill to capacity (single device)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
 	time.Sleep(500 * time.Millisecond)
 
-	if pm.PeerCount() != 2 {
-		t.Fatalf("expected 2 peers, got %d", pm.PeerCount())
+	if pm.PeerCount() != 1 {
+		t.Fatalf("expected 1 peer, got %d", pm.PeerCount())
 	}
 
-	// m1 reconnecting should succeed (same device ID)
+	// m1 reconnecting should succeed (same device ID, replaces existing)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
 	time.Sleep(500 * time.Millisecond)
 
-	if pm.PeerCount() != 2 {
-		t.Errorf("expected 2 peers after reconnect, got %d", pm.PeerCount())
+	if pm.PeerCount() != 1 {
+		t.Errorf("expected 1 peer after reconnect, got %d", pm.PeerCount())
 	}
 
 	// No error messages for m1

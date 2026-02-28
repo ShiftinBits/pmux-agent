@@ -22,8 +22,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Connection.KeepaliveInterval != "30s" {
 		t.Errorf("Connection.KeepaliveInterval = %q, want %q", cfg.Connection.KeepaliveInterval, "30s")
 	}
-	if cfg.Connection.MaxMobileConnections != 5 {
-		t.Errorf("Connection.MaxMobileConnections = %d, want %d", cfg.Connection.MaxMobileConnections, 5)
+	if cfg.Connection.MaxMobileConnections != 1 {
+		t.Errorf("Connection.MaxMobileConnections = %d, want %d", cfg.Connection.MaxMobileConnections, 1)
 	}
 	if cfg.Tmux.SocketName != "pmux" {
 		t.Errorf("Tmux.SocketName = %q, want %q", cfg.Tmux.SocketName, "pmux")
@@ -195,8 +195,8 @@ func TestLoadConfig_InvalidMaxConnectionsEnvIgnored(t *testing.T) {
 		t.Fatalf("LoadConfig() error: %v", err)
 	}
 	// Should keep default since env value can't be parsed
-	if cfg.Connection.MaxMobileConnections != 5 {
-		t.Errorf("MaxMobileConnections = %d, want default %d", cfg.Connection.MaxMobileConnections, 5)
+	if cfg.Connection.MaxMobileConnections != 1 {
+		t.Errorf("MaxMobileConnections = %d, want default %d", cfg.Connection.MaxMobileConnections, 1)
 	}
 }
 
@@ -311,10 +311,9 @@ func TestValidate_MaxConnectionsRange(t *testing.T) {
 		{"zero", 0, true},
 		{"negative", -1, true},
 		{"one", 1, false},
-		{"five", 5, false},
-		{"twenty", 20, false},
-		{"twentyone", 21, true},
-		{"hundred", 100, true},
+		{"two", 2, true},
+		{"five", 5, true},
+		{"twenty", 20, true},
 	}
 
 	for _, tt := range tests {
@@ -541,7 +540,7 @@ func TestFormatEffective(t *testing.T) {
 	if !containsAll(output, []string{
 		`server.url = "https://signal.pmux.io"  (default)`,
 		`tmux.socket_name = "pmux"  (default)`,
-		`connection.max_mobile_connections = 5  (default)`,
+		`connection.max_mobile_connections = 1  (default)`,
 	}) {
 		t.Errorf("FormatEffective() output missing expected content:\n%s", output)
 	}

@@ -55,8 +55,12 @@ type PeerManager struct {
 	API *webrtc.API
 
 	// MaxPeers is the maximum number of simultaneous peer connections allowed.
-	// Defaults to 5. Set after construction to override.
+	// Defaults to 1 (single-pairing mode). Set after construction to override.
 	MaxPeers int
+
+	// AllowedDeviceID is the single paired mobile device ID.
+	// When set, only this device is allowed to connect; others are rejected.
+	AllowedDeviceID string
 
 	mu    sync.Mutex
 	peers map[string]*Peer // keyed by mobile device ID
@@ -82,7 +86,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		serverURL: strings.TrimRight(serverURL, "/"),
 		jwt:       jwtFn,
 		handler:   handler,
-		MaxPeers:  5,
+		MaxPeers:  1,
 		peers:     make(map[string]*Peer),
 	}
 }
@@ -184,6 +188,20 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
 func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
+
+	// Validate device is the paired device
+	if pm.AllowedDeviceID != "" && mobileDeviceID != pm.AllowedDeviceID {
+		pm.logger.Warn("connection rejected: device not paired",
+			"mobile", mobileDeviceID, "expected", pm.AllowedDeviceID)
+		if err := pm.signaling.Send(SignalingMessage{
+			Type:           "error",
+			Error:          "not_paired",
+			TargetDeviceID: mobileDeviceID,
+		}); err != nil {
+			pm.logger.Warn("failed to send rejection", "error", err)
+		}
+		return
+	}
 
 	// Check connection limit (don't count the requesting device — they may be reconnecting)
 	pm.mu.Lock()
