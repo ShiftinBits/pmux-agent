@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
@@ -27,8 +28,10 @@ func TestEnsureRunning_NoIdentity(t *testing.T) {
 		KeysDir:   filepath.Join(dir, "keys"),
 	}
 
+	store := auth.NewMemorySecretStore()
+
 	// No identity exists — EnsureRunning should be a no-op
-	err := EnsureRunning(paths)
+	err := EnsureRunning(paths, store)
 	if err != nil {
 		t.Errorf("EnsureRunning should not error without identity: %v", err)
 	}

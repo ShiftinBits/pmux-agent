@@ -9,8 +9,8 @@ import (
 )
 
 // RunDevices lists all paired mobile devices.
-func RunDevices(pairedDevicesPath string, w io.Writer) error {
-	devices, err := auth.LoadPairedDevices(pairedDevicesPath)
+func RunDevices(pairedDevicesPath string, store auth.SecretStore, w io.Writer) error {
+	devices, err := auth.LoadPairedDevices(pairedDevicesPath, store)
 	if err != nil {
 		return fmt.Errorf("load paired devices: %w", err)
 	}

@@ -133,9 +133,10 @@ func TestBuildQRPayload(t *testing.T) {
 func TestPairedDeviceStorage(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := NewMemorySecretStore()
 
 	t.Run("load returns nil for missing file", func(t *testing.T) {
-		devices, err := LoadPairedDevices(path)
+		devices, err := LoadPairedDevices(path, store)
 		if err != nil {
 			t.Fatalf("LoadPairedDevices() error: %v", err)
 		}
@@ -146,28 +147,48 @@ func TestPairedDeviceStorage(t *testing.T) {
 
 	t.Run("save and load round-trips", func(t *testing.T) {
 		now := time.Now().Truncate(time.Second)
+
+		// Use valid base64 for shared secrets (base64 of "secret-data-1" and "secret-data-2")
+		secret1 := base64.StdEncoding.EncodeToString([]byte("secret-data-1"))
+		secret2 := base64.StdEncoding.EncodeToString([]byte("secret-data-2"))
+
 		devices := []PairedDevice{
-			{DeviceID: "mobile-1", SharedSecret: "secret1==", PairedAt: now},
-			{DeviceID: "mobile-2", SharedSecret: "secret2==", PairedAt: now},
+			{DeviceID: "mobile-1", SharedSecret: secret1, PairedAt: now},
+			{DeviceID: "mobile-2", SharedSecret: secret2, PairedAt: now},
 		}
 
-		if err := SavePairedDevices(path, devices); err != nil {
-			t.Fatalf("SavePairedDevices() error: %v", err)
+		// Use AddPairedDevice to store secrets in store and metadata on disk
+		for _, d := range devices {
+			if err := AddPairedDevice(path, d, store); err != nil {
+				t.Fatalf("AddPairedDevice() error: %v", err)
+			}
 		}
 
-		loaded, err := LoadPairedDevices(path)
+		loaded, err := LoadPairedDevices(path, store)
 		if err != nil {
 			t.Fatalf("LoadPairedDevices() error: %v", err)
 		}
 
-		if len(loaded) != 2 {
-			t.Fatalf("loaded %d devices, want 2", len(loaded))
+		// Single-pairing mode: only the last added device remains
+		if len(loaded) != 1 {
+			t.Fatalf("loaded %d devices, want 1 (single-pairing)", len(loaded))
 		}
-		if loaded[0].DeviceID != "mobile-1" {
-			t.Errorf("loaded[0].DeviceID = %q, want %q", loaded[0].DeviceID, "mobile-1")
+		if loaded[0].DeviceID != "mobile-2" {
+			t.Errorf("loaded[0].DeviceID = %q, want %q", loaded[0].DeviceID, "mobile-2")
 		}
-		if loaded[1].SharedSecret != "secret2==" {
-			t.Errorf("loaded[1].SharedSecret = %q, want %q", loaded[1].SharedSecret, "secret2==")
+		if loaded[0].SharedSecret == "" {
+			t.Error("loaded[0].SharedSecret should not be empty")
+		}
+	})
+
+	t.Run("shared secret not in JSON file", func(t *testing.T) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read file: %v", err)
+		}
+		// SharedSecret has json:"-", so it should NOT appear in the JSON
+		if containsSubstring(string(data), "sharedSecret") {
+			t.Error("sharedSecret should NOT appear in JSON file (stored in SecretStore)")
 		}
 	})
 
@@ -185,18 +206,20 @@ func TestPairedDeviceStorage(t *testing.T) {
 func TestAddPairedDevice(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := NewMemorySecretStore()
 
 	t.Run("adds first device", func(t *testing.T) {
+		secret := base64.StdEncoding.EncodeToString([]byte("first-secret"))
 		err := AddPairedDevice(path, PairedDevice{
 			DeviceID:     "mobile-1",
-			SharedSecret: "secret1==",
+			SharedSecret: secret,
 			PairedAt:     time.Now(),
-		})
+		}, store)
 		if err != nil {
 			t.Fatalf("AddPairedDevice() error: %v", err)
 		}
 
-		devices, _ := LoadPairedDevices(path)
+		devices, _ := LoadPairedDevices(path, store)
 		if len(devices) != 1 {
 			t.Fatalf("expected 1 device, got %d", len(devices))
 		}
@@ -206,21 +229,28 @@ func TestAddPairedDevice(t *testing.T) {
 	})
 
 	t.Run("re-pairing replaces existing device", func(t *testing.T) {
+		newSecret := base64.StdEncoding.EncodeToString([]byte("new-secret-data"))
 		err := AddPairedDevice(path, PairedDevice{
 			DeviceID:     "mobile-1",
-			SharedSecret: "new-secret==",
+			SharedSecret: newSecret,
 			PairedAt:     time.Now(),
-		})
+		}, store)
 		if err != nil {
 			t.Fatalf("AddPairedDevice() error: %v", err)
 		}
 
-		devices, _ := LoadPairedDevices(path)
+		devices, _ := LoadPairedDevices(path, store)
 		if len(devices) != 1 {
 			t.Fatalf("expected 1 device, got %d", len(devices))
 		}
-		if devices[0].SharedSecret != "new-secret==" {
-			t.Errorf("SharedSecret = %q, want %q", devices[0].SharedSecret, "new-secret==")
+		// Verify the shared secret was updated in the store
+		secretBytes, err := store.Get(SharedSecretKey("mobile-1"))
+		if err != nil {
+			t.Fatalf("store.Get() error: %v", err)
+		}
+		gotSecret := base64.StdEncoding.EncodeToString(secretBytes)
+		if gotSecret != newSecret {
+			t.Errorf("SharedSecret = %q, want %q", gotSecret, newSecret)
 		}
 	})
 }
@@ -228,18 +258,22 @@ func TestAddPairedDevice(t *testing.T) {
 func TestAddPairedDevice_ReplacesAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := NewMemorySecretStore()
+
+	secretA := base64.StdEncoding.EncodeToString([]byte("secret-A-data"))
+	secretB := base64.StdEncoding.EncodeToString([]byte("secret-B-data"))
 
 	// Add device A
 	err := AddPairedDevice(path, PairedDevice{
 		DeviceID:     "device-A",
-		SharedSecret: "secretA==",
+		SharedSecret: secretA,
 		PairedAt:     time.Now(),
-	})
+	}, store)
 	if err != nil {
 		t.Fatalf("AddPairedDevice(A) error: %v", err)
 	}
 
-	devices, _ := LoadPairedDevices(path)
+	devices, _ := LoadPairedDevices(path, store)
 	if len(devices) != 1 || devices[0].DeviceID != "device-A" {
 		t.Fatalf("after adding A: expected [device-A], got %v", devices)
 	}
@@ -247,31 +281,38 @@ func TestAddPairedDevice_ReplacesAll(t *testing.T) {
 	// Add device B — should replace A entirely
 	err = AddPairedDevice(path, PairedDevice{
 		DeviceID:     "device-B",
-		SharedSecret: "secretB==",
+		SharedSecret: secretB,
 		PairedAt:     time.Now(),
-	})
+	}, store)
 	if err != nil {
 		t.Fatalf("AddPairedDevice(B) error: %v", err)
 	}
 
-	devices, _ = LoadPairedDevices(path)
+	devices, _ = LoadPairedDevices(path, store)
 	if len(devices) != 1 {
 		t.Fatalf("expected exactly 1 device after replacing, got %d", len(devices))
 	}
 	if devices[0].DeviceID != "device-B" {
 		t.Errorf("DeviceID = %q, want %q", devices[0].DeviceID, "device-B")
 	}
-	if devices[0].SharedSecret != "secretB==" {
-		t.Errorf("SharedSecret = %q, want %q", devices[0].SharedSecret, "secretB==")
+	// Verify shared secret is in store
+	secretBytes, err := store.Get(SharedSecretKey("device-B"))
+	if err != nil {
+		t.Fatalf("store.Get() error: %v", err)
+	}
+	gotSecret := base64.StdEncoding.EncodeToString(secretBytes)
+	if gotSecret != secretB {
+		t.Errorf("SharedSecret = %q, want %q", gotSecret, secretB)
 	}
 }
 
 func TestLoadPairedDevice_Singular(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := NewMemorySecretStore()
 
 	t.Run("returns nil for missing file", func(t *testing.T) {
-		device, err := LoadPairedDevice(path)
+		device, err := LoadPairedDevice(path, store)
 		if err != nil {
 			t.Fatalf("LoadPairedDevice() error: %v", err)
 		}
@@ -284,7 +325,7 @@ func TestLoadPairedDevice_Singular(t *testing.T) {
 		if err := SavePairedDevices(path, []PairedDevice{}); err != nil {
 			t.Fatalf("SavePairedDevices() error: %v", err)
 		}
-		device, err := LoadPairedDevice(path)
+		device, err := LoadPairedDevice(path, store)
 		if err != nil {
 			t.Fatalf("LoadPairedDevice() error: %v", err)
 		}
@@ -293,15 +334,21 @@ func TestLoadPairedDevice_Singular(t *testing.T) {
 		}
 	})
 
-	t.Run("returns single device", func(t *testing.T) {
+	t.Run("returns single device with secret from store", func(t *testing.T) {
 		now := time.Now().Truncate(time.Second)
-		if err := SavePairedDevices(path, []PairedDevice{
-			{DeviceID: "mobile-1", SharedSecret: "secret==", PairedAt: now},
-		}); err != nil {
-			t.Fatalf("SavePairedDevices() error: %v", err)
+		secret := base64.StdEncoding.EncodeToString([]byte("device-secret"))
+
+		// Add device via AddPairedDevice to store secret properly
+		err := AddPairedDevice(path, PairedDevice{
+			DeviceID:     "mobile-1",
+			SharedSecret: secret,
+			PairedAt:     now,
+		}, store)
+		if err != nil {
+			t.Fatalf("AddPairedDevice() error: %v", err)
 		}
 
-		device, err := LoadPairedDevice(path)
+		device, err := LoadPairedDevice(path, store)
 		if err != nil {
 			t.Fatalf("LoadPairedDevice() error: %v", err)
 		}
@@ -311,8 +358,8 @@ func TestLoadPairedDevice_Singular(t *testing.T) {
 		if device.DeviceID != "mobile-1" {
 			t.Errorf("DeviceID = %q, want %q", device.DeviceID, "mobile-1")
 		}
-		if device.SharedSecret != "secret==" {
-			t.Errorf("SharedSecret = %q, want %q", device.SharedSecret, "secret==")
+		if device.SharedSecret == "" {
+			t.Error("SharedSecret should not be empty (loaded from store)")
 		}
 	})
 }

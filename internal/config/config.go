@@ -32,6 +32,7 @@ const (
 	EnvKeyPath         = "PMUX_KEY_PATH"
 	EnvSocketName      = "PMUX_SOCKET_NAME"
 	EnvMaxConnections  = "PMUX_MAX_CONNECTIONS"
+	EnvSecretBackend   = "PMUX_SECRET_BACKEND"
 )
 
 // Config holds user-editable PocketMux configuration from config.toml.
@@ -48,9 +49,10 @@ type ServerConfig struct {
 	URL string `toml:"url"`
 }
 
-// IdentityConfig holds Ed25519 identity path configuration.
+// IdentityConfig holds Ed25519 identity path and secret storage configuration.
 type IdentityConfig struct {
-	KeyPath string `toml:"key_path"`
+	KeyPath       string `toml:"key_path"`
+	SecretBackend string `toml:"secret_backend"` // "auto", "keyring", or "file"
 }
 
 // ConnectionConfig holds connection tuning parameters.
@@ -89,6 +91,7 @@ func (s configSource) String() string {
 type ConfigSources struct {
 	ServerURL            configSource
 	KeyPath              configSource
+	SecretBackend        configSource
 	ReconnectInterval    configSource
 	KeepaliveInterval    configSource
 	MaxMobileConnections configSource
@@ -101,7 +104,7 @@ type ConfigSources struct {
 func Defaults() Config {
 	return Config{
 		Server:   ServerConfig{URL: DefaultServerURL},
-		Identity: IdentityConfig{KeyPath: "~/.config/pmux/keys/"},
+		Identity: IdentityConfig{KeyPath: "~/.config/pmux/keys/", SecretBackend: "auto"},
 		Connection: ConnectionConfig{
 			ReconnectInterval:    "5s",
 			KeepaliveInterval:    "30s",
@@ -175,6 +178,9 @@ func overlayFile(cfg *Config, fileCfg *Config) {
 	if fileCfg.Identity.KeyPath != "" {
 		cfg.Identity.KeyPath = fileCfg.Identity.KeyPath
 	}
+	if fileCfg.Identity.SecretBackend != "" {
+		cfg.Identity.SecretBackend = fileCfg.Identity.SecretBackend
+	}
 	if fileCfg.Connection.ReconnectInterval != "" {
 		cfg.Connection.ReconnectInterval = fileCfg.Connection.ReconnectInterval
 	}
@@ -202,6 +208,10 @@ func overlayFileTracked(cfg *Config, fileCfg *Config, sources *ConfigSources) {
 	if fileCfg.Identity.KeyPath != "" {
 		cfg.Identity.KeyPath = fileCfg.Identity.KeyPath
 		sources.KeyPath = sourceFile
+	}
+	if fileCfg.Identity.SecretBackend != "" {
+		cfg.Identity.SecretBackend = fileCfg.Identity.SecretBackend
+		sources.SecretBackend = sourceFile
 	}
 	if fileCfg.Connection.ReconnectInterval != "" {
 		cfg.Connection.ReconnectInterval = fileCfg.Connection.ReconnectInterval
@@ -235,6 +245,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv(EnvSocketName); v != "" {
 		cfg.Tmux.SocketName = v
 	}
+	if v := os.Getenv(EnvSecretBackend); v != "" {
+		cfg.Identity.SecretBackend = v
+	}
 	if v := os.Getenv(EnvMaxConnections); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Connection.MaxMobileConnections = n
@@ -259,6 +272,10 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 		cfg.Tmux.SocketName = v
 		sources.SocketName = sourceEnv
 	}
+	if v := os.Getenv(EnvSecretBackend); v != "" {
+		cfg.Identity.SecretBackend = v
+		sources.SecretBackend = sourceEnv
+	}
 	if v := os.Getenv(EnvMaxConnections); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Connection.MaxMobileConnections = n
@@ -279,6 +296,15 @@ func (c *Config) Validate() error {
 		strings.HasPrefix(c.Server.URL, "https://")
 	if !validScheme {
 		return fmt.Errorf("server.url must start with http://, https://, ws://, or wss://, got %q", c.Server.URL)
+	}
+
+	// secret_backend must be a known value
+	switch c.Identity.SecretBackend {
+	case "auto", "keyring", "file":
+		// valid
+	default:
+		return fmt.Errorf("identity.secret_backend must be %q, %q, or %q, got %q",
+			"auto", "keyring", "file", c.Identity.SecretBackend)
 	}
 
 	// Durations must parse
@@ -335,6 +361,7 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "name = %q  (%s)\n", cfg.Name, sources.Name)
 	fmt.Fprintf(&b, "server.url = %q  (%s)\n", cfg.Server.URL, sources.ServerURL)
 	fmt.Fprintf(&b, "identity.key_path = %q  (%s)\n", cfg.Identity.KeyPath, sources.KeyPath)
+	fmt.Fprintf(&b, "identity.secret_backend = %q  (%s)\n", cfg.Identity.SecretBackend, sources.SecretBackend)
 	fmt.Fprintf(&b, "connection.reconnect_interval = %q  (%s)\n", cfg.Connection.ReconnectInterval, sources.ReconnectInterval)
 	fmt.Fprintf(&b, "connection.keepalive_interval = %q  (%s)\n", cfg.Connection.KeepaliveInterval, sources.KeepaliveInterval)
 	fmt.Fprintf(&b, "connection.max_mobile_connections = %d  (%s)\n", cfg.Connection.MaxMobileConnections, sources.MaxMobileConnections)
@@ -355,6 +382,11 @@ func CommentedDefaultConfig() string {
 [identity]
 # Path to Ed25519 keypair (env: PMUX_KEY_PATH)
 # key_path = "~/.config/pmux/keys/"
+# Secret storage backend: "auto", "keyring", or "file" (env: PMUX_SECRET_BACKEND)
+# auto = use system keychain if available, fall back to encrypted file
+# keyring = require system keychain (macOS Keychain, Linux SecretService)
+# file = always use encrypted file
+# secret_backend = "auto"
 
 [connection]
 # reconnect_interval = "5s"

@@ -14,7 +14,8 @@ import (
 
 func TestInitiatePairing(t *testing.T) {
 	keysDir := t.TempDir()
-	id, err := GenerateIdentity(keysDir)
+	store := NewMemorySecretStore()
+	id, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}

@@ -15,14 +15,14 @@ import (
 // device and notifying the signaling server would give immediate feedback.
 // For now, the device is only removed from local storage; the agent will
 // reject messages from the device on its next connection attempt.
-func RunUnpair(args []string, pairedDevicesPath string, r io.Reader, w io.Writer) error {
+func RunUnpair(args []string, pairedDevicesPath string, store auth.SecretStore, r io.Reader, w io.Writer) error {
 	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
 		fmt.Fprintln(w, "Usage: pmux unpair <device-id-prefix>")
 		return nil
 	}
 
 	prefix := args[0]
-	devices, err := auth.LoadPairedDevices(pairedDevicesPath)
+	devices, err := auth.LoadPairedDevices(pairedDevicesPath, store)
 	if err != nil {
 		return fmt.Errorf("load paired devices: %w", err)
 	}
@@ -82,7 +82,7 @@ func RunUnpair(args []string, pairedDevicesPath string, r io.Reader, w io.Writer
 	}
 
 	// Remove from storage
-	if err := auth.RemovePairedDevice(pairedDevicesPath, device.DeviceID); err != nil {
+	if err := auth.RemovePairedDevice(pairedDevicesPath, device.DeviceID, store); err != nil {
 		return fmt.Errorf("remove device: %w", err)
 	}
 

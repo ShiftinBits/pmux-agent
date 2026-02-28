@@ -85,19 +85,26 @@ func Run(ctx context.Context, paths config.Paths) error {
 		// Non-fatal: agent can still run, just harder to manage
 	}
 
-	// Load identity
-	identity, err := auth.LoadIdentity(paths.KeysDir)
-	if err != nil {
-		return fmt.Errorf("load identity: %w", err)
-	}
-	logger.Info("identity loaded", "deviceID", identity.DeviceID)
-
 	// Load config for server URL, socket name, and timing settings
 	cfg, err := config.LoadConfig(paths.ConfigFile)
 	if err != nil {
 		logger.Warn("failed to load config, using defaults", "error", err)
 		cfg = config.Defaults()
 	}
+
+	// Create secret store for secure key storage
+	store, err := auth.NewSecretStore(paths.KeysDir, cfg.Identity.SecretBackend)
+	if err != nil {
+		return fmt.Errorf("initialize secret store: %w", err)
+	}
+	logger.Info("secret store initialized", "backend", store.Backend())
+
+	// Load identity
+	identity, err := auth.LoadIdentity(paths.KeysDir, store)
+	if err != nil {
+		return fmt.Errorf("load identity: %w", err)
+	}
+	logger.Info("identity loaded", "deviceID", identity.DeviceID)
 
 	// Create tmux client targeting the configured socket
 	tmuxClient := tmux.NewClient(cfg.Tmux.SocketName)
@@ -129,7 +136,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 
 	// Load paired device for connection validation
 	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
-	pairedDevice, err := auth.LoadPairedDevice(pairedDevicesPath)
+	pairedDevice, err := auth.LoadPairedDevice(pairedDevicesPath, store)
 	if err == nil && pairedDevice != nil {
 		peerManager.AllowedDeviceID = pairedDevice.DeviceID
 	}

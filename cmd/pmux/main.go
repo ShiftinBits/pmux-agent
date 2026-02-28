@@ -39,6 +39,12 @@ func loadEffectiveConfig() config.Config {
 	return cfg
 }
 
+// initSecretStore creates a SecretStore using the config's secret_backend setting.
+// Uses the keys directory for the encrypted file fallback.
+func initSecretStore(paths config.Paths, cfg config.Config) (auth.SecretStore, error) {
+	return auth.NewSecretStore(paths.KeysDir, cfg.Identity.SecretBackend)
+}
+
 func main() {
 	args := os.Args[1:]
 
@@ -70,7 +76,7 @@ func main() {
 
 	// No args: default to new session (or attach if server running)
 	if len(args) == 0 {
-		ensureAgent()
+		ensureAgent(cfg)
 		if err := proxy.ExecTmux(socketName); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 			os.Exit(1)
@@ -110,7 +116,7 @@ func main() {
 	}
 
 	// Everything else: ensure agent is running, then passthrough to tmux -L <socket>
-	ensureAgent()
+	ensureAgent(cfg)
 	if err := proxy.ExecTmux(socketName, args...); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -118,13 +124,18 @@ func main() {
 }
 
 // ensureAgent starts the background agent if it's not already running.
-func ensureAgent() {
+func ensureAgent(cfg config.Config) {
 	paths, err := config.DefaultPaths()
 	if err != nil {
 		return // Non-fatal: agent is optional if not initialized
 	}
 
-	if err := agent.EnsureRunning(paths); err != nil {
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		return // Non-fatal: can't check identity without store
+	}
+
+	if err := agent.EnsureRunning(paths, store); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to start host: %v\n", err)
 	}
 }
@@ -193,14 +204,28 @@ func handleInit() {
 		os.Exit(1)
 	}
 
+	// Ensure directories exist before creating secret store
+	if err := paths.EnsureDirs(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load config (may not exist yet, defaults are fine)
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to initialize secret store: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Check if identity already exists
-	if auth.HasIdentity(paths.KeysDir) {
-		id, err := auth.LoadIdentity(paths.KeysDir)
+	if auth.HasIdentity(paths.KeysDir, store) {
+		id, err := auth.LoadIdentity(paths.KeysDir, store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ failed to load existing identity: %v\n", err)
 			os.Exit(1)
 		}
-		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		fmt.Printf("Identity already exists.\n")
 		fmt.Printf("Device ID: %s\n", id.DeviceID)
 		if cfg.Name != "" {
@@ -209,13 +234,7 @@ func handleInit() {
 		return
 	}
 
-	// Create directories and generate identity
-	if err := paths.EnsureDirs(); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
-		os.Exit(1)
-	}
-
-	id, err := auth.GenerateIdentity(paths.KeysDir)
+	id, err := auth.GenerateIdentity(paths.KeysDir, store)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to generate identity: %v\n", err)
 		os.Exit(1)
@@ -241,7 +260,7 @@ func handleInit() {
 	fmt.Printf("\nIdentity generated.\n")
 	fmt.Printf("Device ID: %s\n", id.DeviceID)
 	fmt.Printf("Host name: %s\n", input)
-	fmt.Printf("Keys saved to: %s\n", paths.KeysDir)
+	fmt.Printf("Keys saved to: %s (backend: %s)\n", paths.KeysDir, store.Backend())
 }
 
 func handleConfig() {
@@ -267,13 +286,22 @@ func handlePair() {
 		os.Exit(1)
 	}
 
+	// Load config to get server URL, host name, and secret backend
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to initialize secret store: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Must have identity first
-	if !auth.HasIdentity(paths.KeysDir) {
+	if !auth.HasIdentity(paths.KeysDir, store) {
 		fmt.Fprintf(os.Stderr, "⚠ no identity found. Run 'pmux init' first.\n")
 		os.Exit(1)
 	}
 
-	id, err := auth.LoadIdentity(paths.KeysDir)
+	id, err := auth.LoadIdentity(paths.KeysDir, store)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to load identity: %v\n", err)
 		os.Exit(1)
@@ -281,7 +309,7 @@ func handlePair() {
 
 	// Check for existing pairing
 	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
-	existingDevice, err := auth.LoadPairedDevice(pairedDevicesPath)
+	existingDevice, err := auth.LoadPairedDevice(pairedDevicesPath, store)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load paired devices: %v\n", err)
 		os.Exit(1)
@@ -309,8 +337,6 @@ func handlePair() {
 		}
 	}
 
-	// Load config to get server URL and host name
-	cfg, _ := config.LoadConfig(paths.ConfigFile)
 	serverURL := cfg.ServerURL()
 
 	// Generate X25519 ephemeral keypair for key exchange
@@ -401,7 +427,7 @@ func handlePair() {
 		DeviceID:     pairComplete.MobileDeviceID,
 		SharedSecret: sharedSecret,
 		PairedAt:     time.Now(),
-	})
+	}, store)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to save paired device: %v\n", err)
 		os.Exit(1)
@@ -413,11 +439,18 @@ func handlePair() {
 func handleUnpair(args []string) {
 	paths, err := config.DefaultPaths()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		fmt.Fprintf(os.Stderr, "��� %v\n", err)
 		os.Exit(1)
 	}
 
-	if err := agent.RunUnpair(args, paths.PairedDevices, os.Stdin, os.Stdout); err != nil {
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to initialize secret store: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := agent.RunUnpair(args, paths.PairedDevices, store, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -430,7 +463,14 @@ func handleDevices() {
 		os.Exit(1)
 	}
 
-	if err := agent.RunDevices(paths.PairedDevices, os.Stdout); err != nil {
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to initialize secret store: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := agent.RunDevices(paths.PairedDevices, store, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}

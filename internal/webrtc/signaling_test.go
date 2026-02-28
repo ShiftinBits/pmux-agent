@@ -21,7 +21,8 @@ import (
 func testSetup(t *testing.T) (*auth.Identity, *slog.Logger) {
 	t.Helper()
 	keysDir := t.TempDir()
-	id, err := auth.GenerateIdentity(keysDir)
+	store := auth.NewMemorySecretStore()
+	id, err := auth.GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}

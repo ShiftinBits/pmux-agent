@@ -14,9 +14,10 @@ func TestRunDevices_NoPairedDevices(t *testing.T) {
 	// Create temp dir with no paired devices file
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
-	if err := RunDevices(path, &buf); err != nil {
+	if err := RunDevices(path, store, &buf); err != nil {
 		t.Fatalf("RunDevices: %v", err)
 	}
 
@@ -29,26 +30,26 @@ func TestRunDevices_NoPairedDevices(t *testing.T) {
 func TestRunDevices_WithDevices(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := auth.NewMemorySecretStore()
 
 	// Use time.Local for LastSeen so the formatted date matches regardless of
 	// the system timezone (time.Unix uses local time for formatting).
 	lastSeenTime := time.Date(2025, 6, 20, 14, 30, 0, 0, time.Local)
 
-	// Write test devices
+	// Write test devices using SavePairedDevices (metadata only)
+	// and store shared secrets separately
 	devices := []auth.PairedDevice{
 		{
-			DeviceID:     "abc123def456abc123def456abc123de",
-			Name:         "My Phone",
-			SharedSecret: "dGVzdA==",
-			PairedAt:     time.Date(2025, 6, 15, 0, 0, 0, 0, time.UTC),
-			LastSeen:     lastSeenTime.Unix(),
+			DeviceID: "abc123def456abc123def456abc123de",
+			Name:     "My Phone",
+			PairedAt: time.Date(2025, 6, 15, 0, 0, 0, 0, time.UTC),
+			LastSeen: lastSeenTime.Unix(),
 		},
 		{
-			DeviceID:     "xyz789012345xyz789012345xyz78901",
-			Name:         "",
-			SharedSecret: "dGVzdA==",
-			PairedAt:     time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC),
-			LastSeen:     0,
+			DeviceID: "xyz789012345xyz789012345xyz78901",
+			Name:     "",
+			PairedAt: time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC),
+			LastSeen: 0,
 		},
 	}
 	if err := auth.SavePairedDevices(path, devices); err != nil {
@@ -56,7 +57,7 @@ func TestRunDevices_WithDevices(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := RunDevices(path, &buf); err != nil {
+	if err := RunDevices(path, store, &buf); err != nil {
 		t.Fatalf("RunDevices: %v", err)
 	}
 
@@ -105,12 +106,12 @@ func TestRunDevices_WithDevices(t *testing.T) {
 func TestRunDevices_DeviceIDTruncation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "paired_devices.json")
+	store := auth.NewMemorySecretStore()
 
 	devices := []auth.PairedDevice{
 		{
-			DeviceID:     "short",
-			SharedSecret: "dGVzdA==",
-			PairedAt:     time.Now(),
+			DeviceID: "short",
+			PairedAt: time.Now(),
 		},
 	}
 	if err := auth.SavePairedDevices(path, devices); err != nil {
@@ -118,7 +119,7 @@ func TestRunDevices_DeviceIDTruncation(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := RunDevices(path, &buf); err != nil {
+	if err := RunDevices(path, store, &buf); err != nil {
 		t.Fatalf("RunDevices: %v", err)
 	}
 

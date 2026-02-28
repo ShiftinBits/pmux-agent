@@ -31,9 +31,9 @@ func signalActivity(pid int) {
 // EnsureRunning checks if the agent is already running and starts it if not.
 // Returns nil if the agent is running (or was started successfully).
 // Does nothing if no identity exists (agent can't authenticate without one).
-func EnsureRunning(paths config.Paths) error {
+func EnsureRunning(paths config.Paths, store auth.SecretStore) error {
 	// No identity — agent can't authenticate
-	if !auth.HasIdentity(paths.KeysDir) {
+	if !auth.HasIdentity(paths.KeysDir, store) {
 		return nil
 	}
 

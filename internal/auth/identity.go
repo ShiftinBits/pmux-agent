@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,9 +15,8 @@ import (
 )
 
 const (
-	privateKeyFile = "ed25519.key"
-	publicKeyFile  = "ed25519.pub"
-	keyFilePerms   = 0600
+	publicKeyFile = "ed25519.pub"
+	keyFilePerms  = 0600
 )
 
 // Identity holds an Ed25519 keypair and the derived device ID.
@@ -26,9 +26,9 @@ type Identity struct {
 	DeviceID   string // hex-encoded SHA-256 fingerprint of public key (first 16 bytes)
 }
 
-// GenerateIdentity creates a new Ed25519 keypair and saves it to keysDir.
-// The private key file is written with 0600 permissions.
-func GenerateIdentity(keysDir string) (*Identity, error) {
+// GenerateIdentity creates a new Ed25519 keypair, stores the private key in the
+// SecretStore, and saves the public key to keysDir on disk.
+func GenerateIdentity(keysDir string, store SecretStore) (*Identity, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate Ed25519 keypair: %w", err)
@@ -40,33 +40,37 @@ func GenerateIdentity(keysDir string) (*Identity, error) {
 		DeviceID:   deriveDeviceID(pub),
 	}
 
-	if err := id.save(keysDir); err != nil {
-		return nil, err
+	// Store private key in the secure store
+	if err := store.Set(SecretKeyEd25519Private, []byte(priv)); err != nil {
+		return nil, fmt.Errorf("store private key: %w", err)
+	}
+
+	// Save public key to disk (not secret, needed for display/diagnostics)
+	pubPath := filepath.Join(keysDir, publicKeyFile)
+	if err := os.WriteFile(pubPath, pub, keyFilePerms); err != nil {
+		return nil, fmt.Errorf("write public key: %w", err)
 	}
 
 	return id, nil
 }
 
-// LoadIdentity loads an existing Ed25519 keypair from keysDir.
-// If key file permissions are more permissive than 0600, they are
-// automatically tightened and a warning is logged.
-func LoadIdentity(keysDir string) (*Identity, error) {
-	privPath := filepath.Join(keysDir, privateKeyFile)
+// LoadIdentity loads an existing Ed25519 keypair. The private key is retrieved
+// from the SecretStore and the public key is read from keysDir on disk.
+func LoadIdentity(keysDir string, store SecretStore) (*Identity, error) {
 	pubPath := filepath.Join(keysDir, publicKeyFile)
 
-	// Check and fix permissions before reading
-	if err := enforceKeyFilePerms(privPath); err != nil {
-		return nil, fmt.Errorf("enforce private key permissions: %w", err)
-	}
+	// Check and fix permissions on public key file
 	if err := enforceKeyFilePerms(pubPath); err != nil {
 		return nil, fmt.Errorf("enforce public key permissions: %w", err)
 	}
 
-	privBytes, err := os.ReadFile(privPath)
+	// Load private key from secure store
+	privBytes, err := store.Get(SecretKeyEd25519Private)
 	if err != nil {
-		return nil, fmt.Errorf("read private key: %w", err)
+		return nil, fmt.Errorf("load private key from %s backend: %w", store.Backend(), err)
 	}
 
+	// Load public key from disk
 	pubBytes, err := os.ReadFile(pubPath)
 	if err != nil {
 		return nil, fmt.Errorf("read public key: %w", err)
@@ -112,14 +116,18 @@ func enforceKeyFilePerms(path string) error {
 	return nil
 }
 
-// HasIdentity checks whether an Ed25519 keypair exists in keysDir.
-func HasIdentity(keysDir string) bool {
-	privPath := filepath.Join(keysDir, privateKeyFile)
+// HasIdentity checks whether an Ed25519 keypair exists.
+// The private key is checked in the SecretStore and the public key on disk.
+func HasIdentity(keysDir string, store SecretStore) bool {
+	// Check public key on disk
 	pubPath := filepath.Join(keysDir, publicKeyFile)
+	if _, err := os.Stat(pubPath); err != nil {
+		return false
+	}
 
-	_, errPriv := os.Stat(privPath)
-	_, errPub := os.Stat(pubPath)
-	return errPriv == nil && errPub == nil
+	// Check private key in secure store
+	_, err := store.Get(SecretKeyEd25519Private)
+	return !errors.Is(err, ErrSecretNotFound) && err == nil
 }
 
 // SignChallenge signs the token exchange challenge: deviceId + timestamp.
@@ -133,22 +141,6 @@ func (id *Identity) SignChallenge(deviceID string, timestamp string) string {
 // PublicKeyBase64 returns the base64-encoded public key for server registration.
 func (id *Identity) PublicKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(id.PublicKey)
-}
-
-// save writes the keypair to disk with appropriate permissions.
-func (id *Identity) save(keysDir string) error {
-	privPath := filepath.Join(keysDir, privateKeyFile)
-	pubPath := filepath.Join(keysDir, publicKeyFile)
-
-	if err := os.WriteFile(privPath, id.PrivateKey, keyFilePerms); err != nil {
-		return fmt.Errorf("write private key: %w", err)
-	}
-
-	if err := os.WriteFile(pubPath, id.PublicKey, keyFilePerms); err != nil {
-		return fmt.Errorf("write public key: %w", err)
-	}
-
-	return nil
 }
 
 // deriveDeviceID computes a hex-encoded fingerprint from an Ed25519 public key.

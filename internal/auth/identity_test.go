@@ -7,14 +7,14 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 func TestGenerateIdentity(t *testing.T) {
 	keysDir := t.TempDir()
+	store := NewMemorySecretStore()
 
-	id, err := GenerateIdentity(keysDir)
+	id, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
@@ -39,37 +39,48 @@ func TestGenerateIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("writes key files to disk", func(t *testing.T) {
-		privPath := filepath.Join(keysDir, privateKeyFile)
+	t.Run("stores private key in SecretStore", func(t *testing.T) {
+		privBytes, err := store.Get(SecretKeyEd25519Private)
+		if err != nil {
+			t.Fatalf("store.Get(private key) error: %v", err)
+		}
+		if len(privBytes) != ed25519.PrivateKeySize {
+			t.Errorf("stored private key size = %d, want %d", len(privBytes), ed25519.PrivateKeySize)
+		}
+	})
+
+	t.Run("writes public key file to disk", func(t *testing.T) {
 		pubPath := filepath.Join(keysDir, publicKeyFile)
 
-		privInfo, err := os.Stat(privPath)
-		if err != nil {
-			t.Fatalf("private key file not found: %v", err)
-		}
 		pubInfo, err := os.Stat(pubPath)
 		if err != nil {
 			t.Fatalf("public key file not found: %v", err)
 		}
 
-		if privInfo.Mode().Perm() != keyFilePerms {
-			t.Errorf("private key permissions = %o, want %o", privInfo.Mode().Perm(), keyFilePerms)
-		}
 		if pubInfo.Mode().Perm() != keyFilePerms {
 			t.Errorf("public key permissions = %o, want %o", pubInfo.Mode().Perm(), keyFilePerms)
+		}
+	})
+
+	t.Run("does not write private key to disk", func(t *testing.T) {
+		// The old privateKeyFile ("ed25519.key") should NOT exist
+		privPath := filepath.Join(keysDir, "ed25519.key")
+		if _, err := os.Stat(privPath); !os.IsNotExist(err) {
+			t.Error("private key file should NOT exist on disk")
 		}
 	})
 }
 
 func TestLoadIdentity(t *testing.T) {
 	keysDir := t.TempDir()
+	store := NewMemorySecretStore()
 
-	original, err := GenerateIdentity(keysDir)
+	original, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
 
-	loaded, err := LoadIdentity(keysDir)
+	loaded, err := LoadIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("LoadIdentity() error: %v", err)
 	}
@@ -93,33 +104,33 @@ func TestLoadIdentity(t *testing.T) {
 func TestLoadIdentity_Errors(t *testing.T) {
 	tests := []struct {
 		name    string
-		setup   func(dir string)
+		setup   func(dir string, store *MemorySecretStore)
 		wantErr string
 	}{
 		{
-			name:    "missing private key",
-			setup:   func(dir string) {},
-			wantErr: "enforce private key permissions",
-		},
-		{
-			name: "missing public key",
-			setup: func(dir string) {
-				os.WriteFile(filepath.Join(dir, privateKeyFile), make([]byte, ed25519.PrivateKeySize), keyFilePerms)
-			},
+			name:    "missing public key",
+			setup:   func(dir string, store *MemorySecretStore) {},
 			wantErr: "enforce public key permissions",
 		},
 		{
+			name: "missing private key in store",
+			setup: func(dir string, store *MemorySecretStore) {
+				os.WriteFile(filepath.Join(dir, publicKeyFile), make([]byte, ed25519.PublicKeySize), keyFilePerms)
+			},
+			wantErr: "load private key from",
+		},
+		{
 			name: "invalid private key size",
-			setup: func(dir string) {
-				os.WriteFile(filepath.Join(dir, privateKeyFile), []byte("short"), keyFilePerms)
+			setup: func(dir string, store *MemorySecretStore) {
+				store.Set(SecretKeyEd25519Private, []byte("short"))
 				os.WriteFile(filepath.Join(dir, publicKeyFile), make([]byte, ed25519.PublicKeySize), keyFilePerms)
 			},
 			wantErr: "invalid private key size",
 		},
 		{
 			name: "invalid public key size",
-			setup: func(dir string) {
-				os.WriteFile(filepath.Join(dir, privateKeyFile), make([]byte, ed25519.PrivateKeySize), keyFilePerms)
+			setup: func(dir string, store *MemorySecretStore) {
+				store.Set(SecretKeyEd25519Private, make([]byte, ed25519.PrivateKeySize))
 				os.WriteFile(filepath.Join(dir, publicKeyFile), []byte("short"), keyFilePerms)
 			},
 			wantErr: "invalid public key size",
@@ -129,41 +140,59 @@ func TestLoadIdentity_Errors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			tt.setup(dir)
+			store := NewMemorySecretStore()
+			tt.setup(dir, store)
 
-			_, err := LoadIdentity(dir)
+			_, err := LoadIdentity(dir, store)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
+			if !containsSubstring(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
 }
 
+// containsSubstring is a helper for substring matching.
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || findSubstring(s, substr))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 func TestHasIdentity(t *testing.T) {
 	t.Run("returns false for empty directory", func(t *testing.T) {
 		dir := t.TempDir()
-		if HasIdentity(dir) {
+		store := NewMemorySecretStore()
+		if HasIdentity(dir, store) {
 			t.Error("HasIdentity() = true, want false")
 		}
 	})
 
-	t.Run("returns false when only private key exists", func(t *testing.T) {
+	t.Run("returns false when only public key exists on disk", func(t *testing.T) {
 		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, privateKeyFile), make([]byte, 64), keyFilePerms)
-		if HasIdentity(dir) {
-			t.Error("HasIdentity() = true, want false (only private key)")
+		store := NewMemorySecretStore()
+		os.WriteFile(filepath.Join(dir, publicKeyFile), make([]byte, ed25519.PublicKeySize), keyFilePerms)
+		if HasIdentity(dir, store) {
+			t.Error("HasIdentity() = true, want false (no private key in store)")
 		}
 	})
 
 	t.Run("returns true after generation", func(t *testing.T) {
 		dir := t.TempDir()
-		if _, err := GenerateIdentity(dir); err != nil {
+		store := NewMemorySecretStore()
+		if _, err := GenerateIdentity(dir, store); err != nil {
 			t.Fatalf("GenerateIdentity() error: %v", err)
 		}
-		if !HasIdentity(dir) {
+		if !HasIdentity(dir, store) {
 			t.Error("HasIdentity() = false, want true")
 		}
 	})
@@ -171,7 +200,8 @@ func TestHasIdentity(t *testing.T) {
 
 func TestSignChallenge(t *testing.T) {
 	keysDir := t.TempDir()
-	id, err := GenerateIdentity(keysDir)
+	store := NewMemorySecretStore()
+	id, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
@@ -216,7 +246,8 @@ func TestSignChallenge(t *testing.T) {
 
 func TestPublicKeyBase64(t *testing.T) {
 	keysDir := t.TempDir()
-	id, err := GenerateIdentity(keysDir)
+	store := NewMemorySecretStore()
+	id, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
@@ -239,49 +270,20 @@ func TestPublicKeyBase64(t *testing.T) {
 
 func TestLoadIdentity_FixesInsecurePermissions(t *testing.T) {
 	keysDir := t.TempDir()
+	store := NewMemorySecretStore()
 
-	// Generate identity — files should be 0600
-	_, err := GenerateIdentity(keysDir)
+	// Generate identity
+	_, err := GenerateIdentity(keysDir, store)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
 
-	privPath := filepath.Join(keysDir, privateKeyFile)
 	pubPath := filepath.Join(keysDir, publicKeyFile)
 
 	t.Run("initial permissions are 0600", func(t *testing.T) {
-		privInfo, _ := os.Stat(privPath)
 		pubInfo, _ := os.Stat(pubPath)
-		if privInfo.Mode().Perm() != 0600 {
-			t.Errorf("private key permissions = %o, want 0600", privInfo.Mode().Perm())
-		}
 		if pubInfo.Mode().Perm() != 0600 {
 			t.Errorf("public key permissions = %o, want 0600", pubInfo.Mode().Perm())
-		}
-	})
-
-	t.Run("fixes insecure private key permissions on load", func(t *testing.T) {
-		// Make private key world-readable
-		if err := os.Chmod(privPath, 0644); err != nil {
-			t.Fatalf("chmod error: %v", err)
-		}
-
-		// Verify it was changed
-		info, _ := os.Stat(privPath)
-		if info.Mode().Perm() != 0644 {
-			t.Fatalf("chmod did not take effect")
-		}
-
-		// LoadIdentity should fix it
-		_, err := LoadIdentity(keysDir)
-		if err != nil {
-			t.Fatalf("LoadIdentity() error: %v", err)
-		}
-
-		// Verify permissions were fixed back to 0600
-		info, _ = os.Stat(privPath)
-		if info.Mode().Perm() != 0600 {
-			t.Errorf("private key permissions after load = %o, want 0600", info.Mode().Perm())
 		}
 	})
 
@@ -291,37 +293,22 @@ func TestLoadIdentity_FixesInsecurePermissions(t *testing.T) {
 			t.Fatalf("chmod error: %v", err)
 		}
 
+		// Verify it was changed
+		info, _ := os.Stat(pubPath)
+		if info.Mode().Perm() != 0644 {
+			t.Fatalf("chmod did not take effect")
+		}
+
 		// LoadIdentity should fix it
-		_, err := LoadIdentity(keysDir)
+		_, err := LoadIdentity(keysDir, store)
 		if err != nil {
 			t.Fatalf("LoadIdentity() error: %v", err)
 		}
 
 		// Verify permissions were fixed back to 0600
-		info, _ := os.Stat(pubPath)
+		info, _ = os.Stat(pubPath)
 		if info.Mode().Perm() != 0600 {
 			t.Errorf("public key permissions after load = %o, want 0600", info.Mode().Perm())
-		}
-	})
-
-	t.Run("fixes both insecure permissions simultaneously", func(t *testing.T) {
-		// Make both keys world-readable
-		os.Chmod(privPath, 0755)
-		os.Chmod(pubPath, 0666)
-
-		// LoadIdentity should fix both
-		_, err := LoadIdentity(keysDir)
-		if err != nil {
-			t.Fatalf("LoadIdentity() error: %v", err)
-		}
-
-		privInfo, _ := os.Stat(privPath)
-		pubInfo, _ := os.Stat(pubPath)
-		if privInfo.Mode().Perm() != 0600 {
-			t.Errorf("private key permissions = %o, want 0600", privInfo.Mode().Perm())
-		}
-		if pubInfo.Mode().Perm() != 0600 {
-			t.Errorf("public key permissions = %o, want 0600", pubInfo.Mode().Perm())
 		}
 	})
 }
@@ -329,12 +316,14 @@ func TestLoadIdentity_FixesInsecurePermissions(t *testing.T) {
 func TestGenerateIdentity_Uniqueness(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
+	store1 := NewMemorySecretStore()
+	store2 := NewMemorySecretStore()
 
-	id1, err := GenerateIdentity(dir1)
+	id1, err := GenerateIdentity(dir1, store1)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() 1 error: %v", err)
 	}
-	id2, err := GenerateIdentity(dir2)
+	id2, err := GenerateIdentity(dir2, store2)
 	if err != nil {
 		t.Fatalf("GenerateIdentity() 2 error: %v", err)
 	}
@@ -343,4 +332,3 @@ func TestGenerateIdentity_Uniqueness(t *testing.T) {
 		t.Error("two generated identities should have different device IDs")
 	}
 }
-

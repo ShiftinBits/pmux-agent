@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -22,7 +23,7 @@ type X25519Keypair struct {
 type PairedDevice struct {
 	DeviceID     string    `json:"deviceId"`
 	Name         string    `json:"name,omitempty"`
-	SharedSecret string    `json:"sharedSecret"` // base64-encoded X25519 shared secret
+	SharedSecret string    `json:"-"` // base64-encoded X25519 shared secret (stored in SecretStore, not on disk)
 	PairedAt     time.Time `json:"pairedAt"`
 	// LastSeen is an int64 Unix timestamp (not time.Time) so that the zero
 	// value 0 cleanly means "never seen" and omitempty suppresses it in JSON.
@@ -32,10 +33,10 @@ type PairedDevice struct {
 
 // QRPayload holds the data encoded in the pairing QR code.
 type QRPayload struct {
-	PairingCode        string
+	PairingCode       string
 	HostX25519PubKey  string
 	HostDeviceID      string
-	ServerURL          string
+	ServerURL         string
 }
 
 // GenerateX25519Keypair creates a new ephemeral X25519 keypair for pairing.
@@ -90,8 +91,9 @@ func BuildQRPayload(pairingCode string, x25519PubKeyBase64 string, hostDeviceID 
 	return pairingCode + "|" + x25519PubKeyBase64 + "|" + hostDeviceID + "|" + serverURL, nil
 }
 
-// LoadPairedDevices reads the paired devices list from disk.
-func LoadPairedDevices(path string) ([]PairedDevice, error) {
+// LoadPairedDevices reads the paired devices list from disk and retrieves
+// shared secrets from the SecretStore.
+func LoadPairedDevices(path string, store SecretStore) ([]PairedDevice, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -104,10 +106,25 @@ func LoadPairedDevices(path string) ([]PairedDevice, error) {
 	if err := json.Unmarshal(data, &devices); err != nil {
 		return nil, fmt.Errorf("parse paired devices: %w", err)
 	}
+
+	// Retrieve shared secrets from the secure store
+	for i := range devices {
+		secretBytes, err := store.Get(SharedSecretKey(devices[i].DeviceID))
+		if err != nil {
+			if errors.Is(err, ErrSecretNotFound) {
+				// No shared secret stored yet — leave empty
+				continue
+			}
+			return nil, fmt.Errorf("load shared secret for device %s: %w", devices[i].DeviceID, err)
+		}
+		devices[i].SharedSecret = base64.StdEncoding.EncodeToString(secretBytes)
+	}
+
 	return devices, nil
 }
 
 // SavePairedDevices writes the paired devices list to disk.
+// Shared secrets are NOT written to the JSON file (stored in SecretStore instead).
 func SavePairedDevices(path string, devices []PairedDevice) error {
 	data, err := json.MarshalIndent(devices, "", "  ")
 	if err != nil {
@@ -119,9 +136,10 @@ func SavePairedDevices(path string, devices []PairedDevice) error {
 	return nil
 }
 
-// RemovePairedDevice removes a device by ID from the stored paired devices list.
-func RemovePairedDevice(path string, deviceID string) error {
-	devices, err := LoadPairedDevices(path)
+// RemovePairedDevice removes a device by ID from the stored paired devices list
+// and deletes its shared secret from the SecretStore.
+func RemovePairedDevice(path string, deviceID string, store SecretStore) error {
+	devices, err := LoadPairedDevices(path, store)
 	if err != nil {
 		return err
 	}
@@ -133,12 +151,17 @@ func RemovePairedDevice(path string, deviceID string) error {
 		}
 	}
 
+	// Delete shared secret from secure store
+	if err := store.Delete(SharedSecretKey(deviceID)); err != nil {
+		return fmt.Errorf("delete shared secret for device %s: %w", deviceID, err)
+	}
+
 	return SavePairedDevices(path, filtered)
 }
 
 // LoadPairedDevice returns the single paired device, or nil if none.
-func LoadPairedDevice(path string) (*PairedDevice, error) {
-	devices, err := LoadPairedDevices(path)
+func LoadPairedDevice(path string, store SecretStore) (*PairedDevice, error) {
+	devices, err := LoadPairedDevices(path, store)
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +172,20 @@ func LoadPairedDevice(path string) (*PairedDevice, error) {
 }
 
 // AddPairedDevice stores a paired device, replacing any existing pairing.
+// The shared secret is stored in the SecretStore; metadata is written to the JSON file.
 // Single-pairing mode: only one device can be paired at a time.
-func AddPairedDevice(path string, device PairedDevice) error {
+func AddPairedDevice(path string, device PairedDevice, store SecretStore) error {
+	// Store shared secret in the secure store
+	if device.SharedSecret != "" {
+		secretBytes, err := base64.StdEncoding.DecodeString(device.SharedSecret)
+		if err != nil {
+			return fmt.Errorf("decode shared secret: %w", err)
+		}
+		if err := store.Set(SharedSecretKey(device.DeviceID), secretBytes); err != nil {
+			return fmt.Errorf("store shared secret: %w", err)
+		}
+	}
+
 	// Single-pairing: always replace the entire list with just this device
 	return SavePairedDevices(path, []PairedDevice{device})
 }
