@@ -266,6 +266,17 @@ func (c *Client) ResizeWindow(windowTarget string, cols, rows int) error {
 	return nil
 }
 
+// ResizeWindowAuto tells tmux to auto-adjust a window to fit the currently
+// attached clients. When no mobile is connected, this restores the window
+// to the local terminal's size. Uses the -A flag of resize-window.
+func (c *Client) ResizeWindowAuto(windowTarget string) error {
+	out, err := c.run("resize-window", "-A", "-t", windowTarget)
+	if err != nil {
+		return fmt.Errorf("resize-window -A: %w: %s", err, out)
+	}
+	return nil
+}
+
 // SendKeys sends literal input to a tmux pane using the -l flag.
 func (c *Client) SendKeys(paneID string, data []byte) error {
 	out, err := c.run("send-keys", "-t", paneID, "-l", string(data))

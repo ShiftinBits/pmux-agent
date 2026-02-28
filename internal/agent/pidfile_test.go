@@ -9,7 +9,7 @@ import (
 
 func TestWritePIDFile_WritesCurrentPID(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	if err := WritePIDFile(pidFile); err != nil {
 		t.Fatalf("WritePIDFile failed: %v", err)
@@ -33,7 +33,7 @@ func TestWritePIDFile_WritesCurrentPID(t *testing.T) {
 
 func TestWritePIDFile_Permissions(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	if err := WritePIDFile(pidFile); err != nil {
 		t.Fatalf("WritePIDFile failed: %v", err)
@@ -52,7 +52,7 @@ func TestWritePIDFile_Permissions(t *testing.T) {
 }
 
 func TestWritePIDFile_InvalidPath(t *testing.T) {
-	err := WritePIDFile("/nonexistent/directory/host.pid")
+	err := WritePIDFile("/nonexistent/directory/agent.pid")
 	if err == nil {
 		t.Error("expected error writing PID file to nonexistent directory")
 	}
@@ -60,7 +60,7 @@ func TestWritePIDFile_InvalidPath(t *testing.T) {
 
 func TestReadPIDFile_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	// Write current PID
 	if err := WritePIDFile(pidFile); err != nil {
@@ -80,7 +80,7 @@ func TestReadPIDFile_RoundTrip(t *testing.T) {
 
 func TestReadPIDFile_MissingFile(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	_, err := ReadPIDFile(pidFile)
 	if err == nil {
@@ -90,7 +90,7 @@ func TestReadPIDFile_MissingFile(t *testing.T) {
 
 func TestReadPIDFile_InvalidContent(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte("not-a-number"), 0600)
 
@@ -102,7 +102,7 @@ func TestReadPIDFile_InvalidContent(t *testing.T) {
 
 func TestReadPIDFile_NegativePID(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte("-1"), 0600)
 
@@ -114,7 +114,7 @@ func TestReadPIDFile_NegativePID(t *testing.T) {
 
 func TestReadPIDFile_ZeroPID(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte("0"), 0600)
 
@@ -126,7 +126,7 @@ func TestReadPIDFile_ZeroPID(t *testing.T) {
 
 func TestReadPIDFile_WhitespaceHandling(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	pid := os.Getpid()
 	// Write PID with trailing newline (common in PID files)
@@ -167,7 +167,7 @@ func TestIsProcessRunning_PID1(t *testing.T) {
 
 func TestRemovePIDFile_ExistingFile(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte("12345"), 0600)
 
@@ -180,7 +180,7 @@ func TestRemovePIDFile_ExistingFile(t *testing.T) {
 
 func TestRemovePIDFile_NonExistent(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	// Should not panic or error
 	RemovePIDFile(pidFile)
@@ -188,7 +188,7 @@ func TestRemovePIDFile_NonExistent(t *testing.T) {
 
 func TestCleanStalePIDFile_NoFile(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	err := CleanStalePIDFile(pidFile)
 	if err != nil {
@@ -198,7 +198,7 @@ func TestCleanStalePIDFile_NoFile(t *testing.T) {
 
 func TestCleanStalePIDFile_StalePID(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	// Write a PID that doesn't exist
 	os.WriteFile(pidFile, []byte("9999999"), 0600)
@@ -216,7 +216,7 @@ func TestCleanStalePIDFile_StalePID(t *testing.T) {
 
 func TestCleanStalePIDFile_RunningPID(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	// Write our own PID — definitely running
 	os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0600)
@@ -234,7 +234,7 @@ func TestCleanStalePIDFile_RunningPID(t *testing.T) {
 
 func TestCleanStalePIDFile_InvalidContent(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte("garbage"), 0600)
 
@@ -251,7 +251,7 @@ func TestCleanStalePIDFile_InvalidContent(t *testing.T) {
 
 func TestCleanStalePIDFile_EmptyFile(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	os.WriteFile(pidFile, []byte(""), 0600)
 
@@ -268,7 +268,7 @@ func TestCleanStalePIDFile_EmptyFile(t *testing.T) {
 
 func TestWritePIDFile_OverwritesExisting(t *testing.T) {
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "host.pid")
+	pidFile := filepath.Join(dir, "agent.pid")
 
 	// Write a fake PID first
 	os.WriteFile(pidFile, []byte("99999"), 0600)

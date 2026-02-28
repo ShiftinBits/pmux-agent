@@ -11,7 +11,7 @@ import (
 
 const (
 	// pidFileName is the name of the PID file within the config directory.
-	pidFileName = "host.pid"
+	pidFileName = "agent.pid"
 	// pidFilePerms is the file permission mode for the PID file (owner read/write only).
 	pidFilePerms = 0600
 )
@@ -78,7 +78,7 @@ func CleanStalePIDFile(path string) error {
 	}
 
 	if IsProcessRunning(pid) {
-		return fmt.Errorf("host is still running (PID %d)", pid)
+		return fmt.Errorf("agent is still running (PID %d)", pid)
 	}
 
 	// Process is not running — stale PID file, remove it

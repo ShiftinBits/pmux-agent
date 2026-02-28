@@ -136,7 +136,7 @@ func ensureAgent(cfg config.Config) {
 	}
 
 	if err := agent.EnsureRunning(paths, store); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to start host: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: failed to start agent: %v\n", err)
 	}
 }
 
@@ -509,7 +509,7 @@ func handleHostStatus() {
 	}
 
 	// Show last 5 lines of host log
-	logFile := filepath.Join(paths.ConfigDir, "host.log")
+	logFile := filepath.Join(paths.ConfigDir, "agent.log")
 	lines, err := tailFile(logFile, 5)
 	if err == nil && len(lines) > 0 {
 		fmt.Println("\nRecent log:")

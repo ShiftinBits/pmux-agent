@@ -15,7 +15,7 @@ import (
 func TestPIDFilePath(t *testing.T) {
 	paths := config.Paths{ConfigDir: "/tmp/test-pmux"}
 	got := PIDFilePath(paths)
-	want := "/tmp/test-pmux/host.pid"
+	want := "/tmp/test-pmux/agent.pid"
 	if got != want {
 		t.Errorf("PIDFilePath = %q, want %q", got, want)
 	}
