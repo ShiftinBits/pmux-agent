@@ -547,16 +547,16 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 		t.Errorf("expected 1 peer after rejection, got %d", pm.PeerCount())
 	}
 
-	// Verify error message was sent
-	errors := sender.messagesOfType("error")
+	// Verify rejection message was sent
+	rejections := sender.messagesOfType("connection_rejected")
 	found := false
-	for _, e := range errors {
-		if e.TargetDeviceID == "m2" && e.Error == "max connections reached" {
+	for _, e := range rejections {
+		if e.TargetDeviceID == "m2" && e.Reason == "already_connected" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected error message sent to m2")
+		t.Error("expected connection_rejected with reason already_connected sent to m2")
 	}
 
 	pm.CloseAll()
@@ -579,16 +579,16 @@ func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
 		t.Errorf("expected 0 peers, got %d", pm.PeerCount())
 	}
 
-	// Verify rejection error sent
-	errors := sender.messagesOfType("error")
+	// Verify rejection message sent
+	rejections := sender.messagesOfType("connection_rejected")
 	found := false
-	for _, e := range errors {
-		if e.TargetDeviceID == "rogue-device-456" && e.Error == "not_paired" {
+	for _, e := range rejections {
+		if e.TargetDeviceID == "rogue-device-456" && e.Reason == "not_paired" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected not_paired error message sent to rogue device")
+		t.Error("expected connection_rejected with reason not_paired sent to rogue device")
 	}
 
 	// Now connect with the correct (paired) device — should succeed

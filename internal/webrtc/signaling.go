@@ -43,6 +43,7 @@ type SignalingMessage struct {
 	Token          string `json:"token,omitempty"`
 	Status         string `json:"status,omitempty"`
 	Error          string `json:"error,omitempty"`
+	Reason         string `json:"reason,omitempty"`
 	TargetDeviceID string `json:"targetDeviceId,omitempty"`
 	DeviceID       string `json:"deviceId,omitempty"`
 

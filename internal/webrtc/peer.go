@@ -194,8 +194,8 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		pm.logger.Warn("connection rejected: device not paired",
 			"mobile", mobileDeviceID, "expected", pm.AllowedDeviceID)
 		if err := pm.signaling.Send(SignalingMessage{
-			Type:           "error",
-			Error:          "not_paired",
+			Type:           "connection_rejected",
+			Reason:         "not_paired",
 			TargetDeviceID: mobileDeviceID,
 		}); err != nil {
 			pm.logger.Warn("failed to send rejection", "error", err)
@@ -212,8 +212,8 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	if !isReconnect && currentCount >= pm.MaxPeers {
 		pm.logger.Warn("max peer connections reached", "max", pm.MaxPeers, "mobile", mobileDeviceID)
 		if err := pm.signaling.Send(SignalingMessage{
-			Type:           "error",
-			Error:          "max connections reached",
+			Type:           "connection_rejected",
+			Reason:         "already_connected",
 			TargetDeviceID: mobileDeviceID,
 		}); err != nil {
 			pm.logger.Warn("failed to send rejection to mobile", "error", err, "mobile", mobileDeviceID)
