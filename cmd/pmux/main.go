@@ -21,6 +21,7 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"github.com/shiftinbits/pmux-agent/internal/proxy"
+	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 const version = "0.1.0-dev"
@@ -454,7 +455,15 @@ func handleDevices() {
 // handleAgent routes "pmux agent <subcommand>" to the appropriate handler.
 func handleAgent(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: pmux agent <run|status|stop>")
+		fmt.Fprintln(os.Stderr, "Usage: pmux agent <command>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Commands:")
+		fmt.Fprintln(os.Stderr, "  run        Run the agent in the foreground")
+		fmt.Fprintln(os.Stderr, "  start      Start the agent")
+		fmt.Fprintln(os.Stderr, "  stop       Stop the agent")
+		fmt.Fprintln(os.Stderr, "  status     Show agent status")
+		fmt.Fprintln(os.Stderr, "  install    Install as OS service (launchd/systemd)")
+		fmt.Fprintln(os.Stderr, "  uninstall  Remove OS service registration")
 		os.Exit(1)
 	}
 
@@ -478,12 +487,18 @@ func handleAgent(args []string) {
 			}
 		}
 		runAgent(cpuProfile, memProfile)
-	case "status":
-		handleAgentStatus()
+	case "start":
+		handleAgentStart()
 	case "stop":
 		handleAgentStop()
+	case "status":
+		handleAgentStatus()
+	case "install":
+		handleAgentInstall()
+	case "uninstall":
+		handleAgentUninstall()
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown agent subcommand: %s\nUsage: pmux agent <run|status|stop>\n", args[0])
+		fmt.Fprintf(os.Stderr, "Unknown agent command: %s\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -510,6 +525,15 @@ func handleAgentStatus() {
 	}
 
 	fmt.Printf("Agent is running (PID %d)\n", pid)
+
+	// Service installation status
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if mgr.IsInstalled() {
+		fmt.Println("Service: installed")
+	} else {
+		fmt.Println("Service: not installed")
+	}
 
 	// Try to get process uptime via ps
 	out, err := exec.Command("ps", "-o", "etime=", "-p", fmt.Sprintf("%d", pid)).Output()
@@ -538,6 +562,20 @@ func handleAgentStop() {
 		os.Exit(1)
 	}
 
+	// Try service manager first (prevents auto-restart)
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if mgr.IsInstalled() {
+		if err := mgr.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ service stop failed: %v\n", err)
+			// Fall through to direct stop
+		} else {
+			fmt.Println("Agent stopped")
+			return
+		}
+	}
+
+	// Direct stop via PID file
 	pidFile := agent.PIDFilePath(paths)
 
 	pid, err := agent.ReadPIDFile(pidFile)
@@ -552,10 +590,9 @@ func handleAgentStop() {
 		os.Exit(0)
 	}
 
-	// Send SIGTERM for graceful shutdown
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to find process %d: %v\n", pid, err)
+	process, ferr := os.FindProcess(pid)
+	if ferr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to find process %d: %v\n", pid, ferr)
 		os.Exit(1)
 	}
 
@@ -601,6 +638,83 @@ func handleAgentStop() {
 	}
 }
 
+func handleAgentStart() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if already running
+	pidFile := agent.PIDFilePath(paths)
+	if pid, err := agent.ReadPIDFile(pidFile); err == nil && agent.IsProcessRunning(pid) {
+		fmt.Printf("Agent is already running (PID %d)\n", pid)
+		return
+	}
+
+	// Try service manager first
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if mgr.IsInstalled() {
+		if err := mgr.Start(); err == nil {
+			fmt.Println("Agent started (via service manager)")
+			return
+		}
+		// Fall through to direct spawn
+	}
+
+	// Direct spawn
+	cfg := loadEffectiveConfig()
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := agent.EnsureRunning(paths, store); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to start agent: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Agent started")
+}
+
+func handleAgentInstall() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ could not resolve binary path: %v\n", err)
+		os.Exit(1)
+	}
+
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if err := mgr.Install(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to install service: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Service installed. Agent is running.")
+}
+
+func handleAgentUninstall() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if err := mgr.Uninstall(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to uninstall service: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Service uninstalled.")
+}
+
 // tailFile reads the last n lines from a file.
 func tailFile(path string, n int) ([]string, error) {
 	f, err := os.Open(path)
@@ -624,15 +738,19 @@ func printHelp() {
 	fmt.Println(`pmux — PocketMux terminal access agent
 
 PocketMux commands:
-  init            Generate identity and register with signaling server
-  pair            Pair with a mobile device (displays QR code)
-  config          Show effective configuration with sources
-  devices         List paired mobile devices
-  unpair          Remove a paired mobile device
-  agent status    Show agent process status and recent logs
-  agent stop      Stop the background agent process
-  --version       Show version
-  --help          Show this help
+  init              Generate identity and configure agent
+  pair              Pair with a mobile device (displays QR code)
+  config            Show effective configuration with sources
+  devices           List paired mobile devices
+  unpair            Remove a paired mobile device
+  agent run         Run the agent in the foreground
+  agent start       Start the agent
+  agent stop        Stop the agent
+  agent status      Show agent status and recent logs
+  agent install     Install as OS service (auto-start on login)
+  agent uninstall   Remove OS service registration
+  --version         Show version
+  --help            Show this help
 
 All other commands are passed through to tmux -L pmux.
 Run 'pmux' with no args to start a new session.
@@ -642,5 +760,5 @@ Examples:
   pmux new-session -s work      Named session
   pmux attach -t work           Attach to session
   pmux ls                       List sessions
-  pmux kill-server              Stop tmux server + agent`)
+  pmux kill-server              Stop tmux server`)
 }
