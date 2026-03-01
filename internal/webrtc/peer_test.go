@@ -1085,6 +1085,51 @@ func TestPeerManager_ClosePeerCancelsDisconnectTimer(t *testing.T) {
 	}
 }
 
+func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	var disconnectedMu sync.Mutex
+	var disconnectedPeers []string
+
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil)
+	pm.API = fastAPI(t)
+	pm.OnPeerDisconnect = func(deviceID string) {
+		disconnectedMu.Lock()
+		disconnectedPeers = append(disconnectedPeers, deviceID)
+		disconnectedMu.Unlock()
+	}
+
+	// Connect a peer
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: "mobile-fail",
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	if pm.PeerCount() != 1 {
+		t.Fatalf("expected 1 peer, got %d", pm.PeerCount())
+	}
+
+	// Simulate failed state → should trigger OnPeerDisconnect
+	pm.handlePeerStateChange("mobile-fail", webrtc.PeerConnectionStateFailed)
+	time.Sleep(500 * time.Millisecond)
+
+	disconnectedMu.Lock()
+	found := false
+	for _, id := range disconnectedPeers {
+		if id == "mobile-fail" {
+			found = true
+		}
+	}
+	disconnectedMu.Unlock()
+	if !found {
+		t.Error("OnPeerDisconnect should have been called for mobile-fail")
+	}
+
+	pm.CloseAll()
+}
+
 // TestBasicDataChannel verifies that two fastAPI peer connections can
 // establish a DataChannel using gathered-complete SDP exchange.
 func TestBasicDataChannel(t *testing.T) {

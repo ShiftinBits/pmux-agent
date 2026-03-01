@@ -72,6 +72,11 @@ type PeerManager struct {
 	// When set, only this device is allowed to connect; others are rejected.
 	AllowedDeviceID string
 
+	// OnPeerDisconnect is called when a peer connection enters a terminal state
+	// (Failed or Closed). Set by agent.go to point at Handler.PeerDisconnected,
+	// which triggers bridge teardown and pane size restore.
+	OnPeerDisconnect func(deviceID string)
+
 	mu               sync.Mutex
 	peers            map[string]*Peer          // keyed by mobile device ID
 	disconnectTimers map[string]*time.Timer    // grace timers for disconnected peers
@@ -484,19 +489,33 @@ func (pm *PeerManager) handlePeerStateChange(deviceID string, state webrtc.PeerC
 		})
 
 	case webrtc.PeerConnectionStateFailed:
-		// Connection unrecoverable — cancel timer and close peer immediately.
+		// Connection unrecoverable — cancel timer, notify handler, and close.
 		if timer, ok := pm.disconnectTimers[deviceID]; ok {
 			timer.Stop()
 			delete(pm.disconnectTimers, deviceID)
 		}
 		pm.logger.Info("peer connection failed, closing peer", "mobile", deviceID)
-		go pm.ClosePeer(deviceID)
+		go func() {
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			pm.ClosePeer(deviceID)
+		}()
 
 	case webrtc.PeerConnectionStateClosed:
-		// Peer already closed — cancel any lingering timer.
+		// Peer connection closed — cancel timer and notify handler.
 		if timer, ok := pm.disconnectTimers[deviceID]; ok {
 			timer.Stop()
 			delete(pm.disconnectTimers, deviceID)
+		}
+		// Only notify if the peer is still tracked (avoids double-fire after Failed→Closed).
+		if _, ok := pm.peers[deviceID]; ok {
+			go func() {
+				if pm.OnPeerDisconnect != nil {
+					pm.OnPeerDisconnect(deviceID)
+				}
+				pm.ClosePeer(deviceID)
+			}()
 		}
 	}
 }
@@ -538,13 +557,23 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	offer, err := peer.conn.CreateOffer(&webrtc.OfferOptions{ICERestart: true})
 	if err != nil {
 		pm.logger.Error("ICE restart: failed to create offer", "error", err, "mobile", deviceID)
-		go pm.ClosePeer(deviceID)
+		go func() {
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			pm.ClosePeer(deviceID)
+		}()
 		return
 	}
 
 	if err := peer.conn.SetLocalDescription(offer); err != nil {
 		pm.logger.Error("ICE restart: failed to set local description", "error", err, "mobile", deviceID)
-		go pm.ClosePeer(deviceID)
+		go func() {
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			pm.ClosePeer(deviceID)
+		}()
 		return
 	}
 
@@ -554,7 +583,12 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 		SDP:            offer.SDP,
 	}); err != nil {
 		pm.logger.Error("ICE restart: failed to send SDP offer", "error", err, "mobile", deviceID)
-		go pm.ClosePeer(deviceID)
+		go func() {
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			pm.ClosePeer(deviceID)
+		}()
 		return
 	}
 
