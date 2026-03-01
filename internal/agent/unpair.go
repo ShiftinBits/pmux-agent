@@ -8,55 +8,23 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 )
 
-// RunUnpair removes a paired device by device ID prefix.
-// Takes io.Reader for input (confirmation prompt) and io.Writer for output.
+// RunUnpair removes the paired mobile device after confirmation.
 //
 // TODO: When the agent is running, closing the DataChannel to the unpaired
 // device and notifying the signaling server would give immediate feedback.
 // For now, the device is only removed from local storage; the agent will
 // reject messages from the device on its next connection attempt.
-func RunUnpair(args []string, pairedDevicesPath string, store auth.SecretStore, r io.Reader, w io.Writer) error {
-	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-		fmt.Fprintln(w, "Usage: pmux unpair <device-id-prefix>")
-		return nil
-	}
-
-	prefix := args[0]
-	devices, err := auth.LoadPairedDevices(pairedDevicesPath, store)
+func RunUnpair(pairedDevicesPath string, store auth.SecretStore, r io.Reader, w io.Writer) error {
+	device, err := auth.LoadPairedDevice(pairedDevicesPath, store)
 	if err != nil {
-		return fmt.Errorf("load paired devices: %w", err)
+		return fmt.Errorf("load paired device: %w", err)
 	}
 
-	// Find matching devices by prefix
-	var matches []auth.PairedDevice
-	for _, d := range devices {
-		if strings.HasPrefix(d.DeviceID, prefix) {
-			matches = append(matches, d)
-		}
-	}
-
-	if len(matches) == 0 {
-		fmt.Fprintf(w, "No device found matching '%s'.\n", prefix)
+	if device == nil {
+		fmt.Fprintln(w, "No device paired.")
 		return nil
 	}
 
-	if len(matches) > 1 {
-		fmt.Fprintf(w, "Ambiguous prefix '%s'. Matching devices:\n", prefix)
-		for _, d := range matches {
-			id := d.DeviceID
-			if len(id) > 12 {
-				id = id[:12] + "..."
-			}
-			name := d.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			fmt.Fprintf(w, "  %s  %s\n", id, name)
-		}
-		return nil
-	}
-
-	device := matches[0]
 	name := device.Name
 	if name == "" {
 		name = "(unnamed)"
@@ -67,7 +35,6 @@ func RunUnpair(args []string, pairedDevicesPath string, store auth.SecretStore, 
 		deviceIDShort = deviceIDShort[:12] + "..."
 	}
 
-	// Confirmation prompt
 	fmt.Fprintf(w, "Unpair device '%s' (%s)?\nThis device will need to scan a new QR code to reconnect. [y/N] ", name, deviceIDShort)
 	var response string
 	if _, err := fmt.Fscanln(r, &response); err != nil {
@@ -81,7 +48,6 @@ func RunUnpair(args []string, pairedDevicesPath string, store auth.SecretStore, 
 		return nil
 	}
 
-	// Remove from storage
 	if err := auth.RemovePairedDevice(pairedDevicesPath, device.DeviceID, store); err != nil {
 		return fmt.Errorf("remove device: %w", err)
 	}
