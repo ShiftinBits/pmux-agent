@@ -36,7 +36,7 @@ func testCleanupHandler() *Handler {
 	tc := tmux.NewClient("pmux-cleanup-test-unused")
 	return NewHandler(tc, func(peerID string, msg protocol.Message) error {
 		return nil
-	}, func(data []byte) {}, slog.Default())
+	}, slog.Default())
 }
 
 func TestConnectionCleaner_IdlePeerDetectedAndClosed(t *testing.T) {

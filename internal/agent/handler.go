@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
@@ -13,16 +14,12 @@ import (
 // SendFunc sends a protocol message to a specific peer.
 type SendFunc func(peerID string, msg protocol.Message) error
 
-// BroadcastRawFunc sends raw pre-encoded bytes to all connected peers.
-type BroadcastRawFunc func(data []byte)
-
 // Handler processes protocol messages from mobile clients and dispatches
 // them to the appropriate tmux operations.
 type Handler struct {
 	tmux         *tmux.Client
 	sizeTracker  *tmux.PaneSizeTracker
 	send         SendFunc
-	broadcastRaw BroadcastRawFunc
 	logger       *slog.Logger
 
 	mu           sync.Mutex
@@ -30,15 +27,15 @@ type Handler struct {
 	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
 	paneForPeer  map[string]string           // peerID -> paneID (for restore on detach)
 	lastPingTime map[string]time.Time        // peerID -> last ping received
+	tmuxRunning  atomic.Bool                 // whether the tmux server is currently running
 }
 
 // NewHandler creates a protocol message handler.
-func NewHandler(tmuxClient *tmux.Client, send SendFunc, broadcastRaw BroadcastRawFunc, logger *slog.Logger) *Handler {
+func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Handler {
 	return &Handler{
 		tmux:         tmuxClient,
 		sizeTracker:  tmux.NewPaneSizeTracker(tmuxClient),
 		send:         send,
-		broadcastRaw: broadcastRaw,
 		logger:       logger,
 		bridges:      make(map[string]*tmux.PaneBridge),
 		cancels:      make(map[string]context.CancelFunc),
@@ -47,23 +44,9 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, broadcastRaw BroadcastRa
 	}
 }
 
-// BroadcastEmptySessions encodes a SessionsEvent with an empty session list
-// and sends it to all connected peers. Used during graceful shutdown to notify
-// mobile clients that the tmux server has exited.
-func (h *Handler) BroadcastEmptySessions() {
-	msg := &protocol.SessionsEvent{
-		Type:     "sessions",
-		Sessions: []protocol.TmuxSession{},
-	}
-
-	data, err := protocol.Encode(msg)
-	if err != nil {
-		h.logger.Error("failed to encode empty sessions event", "error", err)
-		return
-	}
-
-	h.logger.Info("broadcasting empty sessions to all peers")
-	h.broadcastRaw(data)
+// SetTmuxRunning updates whether the tmux server is currently running.
+func (h *Handler) SetTmuxRunning(running bool) {
+	h.tmuxRunning.Store(running)
 }
 
 // HandleMessage processes an incoming protocol message from a peer.
