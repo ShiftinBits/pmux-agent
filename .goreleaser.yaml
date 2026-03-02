@@ -1,0 +1,116 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+env:
+  - GO111MODULE=on
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: pmux-linux
+    main: ./cmd/pmux
+    binary: pmux
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+
+  - id: pmux-darwin
+    main: ./cmd/pmux
+    binary: pmux
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+
+universal_binaries:
+  - id: pmux-darwin-universal
+    ids:
+      - pmux-darwin
+    name_template: pmux
+    replace: true
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    name_template: >-
+      {{- .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "all" }}universal
+      {{- else if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end -}}
+    format_overrides:
+      - goos: darwin
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^build:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: New Features
+      regexp: '^.*?feat(\(.+\))?!?:.+$'
+      order: 100
+    - title: Bug Fixes
+      regexp: '^.*?(fix|refactor)(\(.+\))?!?:.+$'
+      order: 200
+    - title: Other
+      order: 9999
+
+# macOS code signing and notarization (env-gated, skipped in snapshots)
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - pmux-darwin-universal
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+      notarize:
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+        timeout: 20m
+
+# Publish Homebrew cask to tap repo
+homebrew_casks:
+  - name: pmux
+    ids:
+      - default
+    repository:
+      owner: ShiftinBits
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://pocketmux.com"
+    description: "Secure remote tmux access from mobile"
+    license: MIT
+    commit_msg_template: "chore: update pmux to {{ .Tag }}"
