@@ -111,7 +111,7 @@ homebrew_casks:
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: "https://pocketmux.com"
-    description: "Secure remote tmux access from mobile"
+    homepage: "https://pmux.io"
+    description: "Secure remote tmux access from the PocketMux mobile app"
     license: MIT
     commit_msg_template: "chore: update pmux to {{ .Tag }}"
