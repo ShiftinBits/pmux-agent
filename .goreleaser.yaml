@@ -100,9 +100,10 @@ notarize:
         wait: true
         timeout: 20m
 
-# Publish Homebrew cask to tap repo
+# Publish Homebrew cask to tap repo (env-gated, skipped if token not set)
 homebrew_casks:
   - name: pmux
+    skip_upload: '{{ if not (isEnvSet "HOMEBREW_TAP_GITHUB_TOKEN") }}true{{ end }}'
     ids:
       - default
     repository:
