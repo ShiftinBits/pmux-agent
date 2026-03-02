@@ -44,7 +44,7 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client) (string,
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024)) // 64KB max
 	if err != nil {
 		return "", fmt.Errorf("read token response: %w", err)
 	}

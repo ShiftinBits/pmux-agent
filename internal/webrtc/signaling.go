@@ -199,8 +199,8 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		}
 
 		sc.logger.Info("reconnecting to signaling server", "backoff", backoff)
-		// Only increase backoff if we actually waited most of the duration.
-		// After system sleep, the timer fires immediately with stale elapsed time.
+		// Safety net: only increase backoff if monotonic elapsed time approximates
+		// the intended wait. Protects against hypothetical runtime timer anomalies.
 		if time.Since(backoffStart) >= backoff/2 {
 			backoff = time.Duration(math.Min(float64(backoff)*backoffFactor, float64(maxBackoff)))
 		}
@@ -367,7 +367,7 @@ func (sc *SignalingClient) ensureToken() error {
 	}
 
 	sc.jwt = token
-	sc.jwtExpiry = time.Now().Add(JWTLifetime)
+	sc.jwtExpiry = time.Now().Add(JWTLifetime).Round(0) // strip monotonic for wall-clock comparison
 	return nil
 }
 

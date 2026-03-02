@@ -153,9 +153,9 @@ func spawn(pidFile string) error {
 	// Redirect stderr to agent log so early startup errors (before the
 	// agent opens its own log handler) are captured for debugging.
 	logPath := filepath.Join(filepath.Dir(pidFile), "agent.log")
-	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if logErr == nil {
 		cmd.Stderr = logFile
-		// logFile fd is inherited by the child; closed when child exits.
 	} else {
 		cmd.Stderr = nil
 	}
@@ -163,7 +163,16 @@ func spawn(pidFile string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		return fmt.Errorf("start agent: %w", err)
+	}
+
+	// Close parent's copy of the log fd. The child inherited its own copy
+	// via cmd.Start() which is unaffected by this close.
+	if logFile != nil {
+		logFile.Close()
 	}
 
 	// Write the child process PID so subsequent pmux commands can detect

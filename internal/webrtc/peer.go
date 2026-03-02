@@ -481,7 +481,7 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024)) // 64KB max
 	if err != nil {
 		return nil, fmt.Errorf("read TURN response: %w", err)
 	}
@@ -546,6 +546,7 @@ func (pm *PeerManager) handlePeerStateChange(deviceID string, state webrtc.PeerC
 			timer.Stop()
 			delete(pm.disconnectTimers, deviceID)
 		}
+		delete(pm.disconnectTimes, deviceID)
 		// Only notify if the peer is still tracked (avoids double-fire and WaitGroup race during CloseAll).
 		if _, ok := pm.peers[deviceID]; ok {
 			pm.logger.Info("peer connection failed, closing peer", "mobile", deviceID)
@@ -558,6 +559,7 @@ func (pm *PeerManager) handlePeerStateChange(deviceID string, state webrtc.PeerC
 			timer.Stop()
 			delete(pm.disconnectTimers, deviceID)
 		}
+		delete(pm.disconnectTimes, deviceID)
 		// Only notify if the peer is still tracked (avoids double-fire after Failed→Closed).
 		if _, ok := pm.peers[deviceID]; ok {
 			pm.scheduleCleanup(deviceID)
@@ -588,10 +590,11 @@ func (pm *PeerManager) onDisconnectTimerFired(deviceID string) {
 
 	// After system sleep, the monotonic timer fires immediately but actual
 	// disconnect may have been brief. Re-schedule if wall-clock time is insufficient.
-	if hasTime && time.Since(disconnectTime) < pcDisconnectedTimeout/2 {
+	elapsed := time.Since(disconnectTime)
+	if hasTime && elapsed < pcDisconnectedTimeout/2 {
 		pm.logger.Debug("disconnect timer fired early (system sleep?), rescheduling",
-			"mobile", deviceID, "elapsed", time.Since(disconnectTime))
-		remaining := pcDisconnectedTimeout - time.Since(disconnectTime)
+			"mobile", deviceID, "elapsed", elapsed)
+		remaining := pcDisconnectedTimeout - elapsed
 		pm.mu.Lock()
 		pm.disconnectTimes[deviceID] = disconnectTime
 		pm.disconnectTimers[deviceID] = time.AfterFunc(remaining, func() {

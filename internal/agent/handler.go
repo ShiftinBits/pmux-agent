@@ -66,7 +66,9 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Ha
 // SetContext sets the agent lifecycle context for deriving per-peer contexts.
 // Called by agent.Run() after creating the cancelable agent context.
 func (h *Handler) SetContext(ctx context.Context) {
+	h.mu.Lock()
 	h.ctx = ctx
+	h.mu.Unlock()
 }
 
 // HandleMessage processes an incoming protocol message from a peer.
@@ -123,7 +125,8 @@ func (h *Handler) GetStalePeers(timeout time.Duration) []string {
 func (h *Handler) handleListSessions(peerID string) {
 	sessions, err := h.tmux.ListAll()
 	if err != nil {
-		h.sendError(peerID, "list_sessions_failed", err.Error())
+		h.logger.Debug("list sessions failed", "peer", peerID, "error", err)
+		h.sendError(peerID, "list_sessions_failed", "failed to list sessions")
 		return
 	}
 
@@ -189,13 +192,17 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 				h.logger.Warn("failed to restore pane size after attach failure", "error", restoreErr, "pane", req.PaneID)
 			}
 		}
-		h.sendError(peerID, "attach_failed", err.Error())
+		h.logger.Debug("attach pane failed", "peer", peerID, "pane", req.PaneID, "error", err)
+		h.sendError(peerID, "attach_failed", "failed to attach pane")
 		return
 	}
 
 	// Create a per-peer context derived from the agent lifecycle context.
 	// When the agent shuts down, all per-peer streams are automatically canceled.
-	ctx, cancel := context.WithCancel(h.ctx)
+	h.mu.Lock()
+	parentCtx := h.ctx
+	h.mu.Unlock()
+	ctx, cancel := context.WithCancel(parentCtx)
 
 	h.mu.Lock()
 	h.bridges[peerID] = bridge
@@ -243,7 +250,8 @@ func (h *Handler) handleInput(peerID string, req *protocol.InputRequest) {
 	}
 
 	if _, err := bridge.Write(req.Data); err != nil {
-		h.sendError(peerID, "input_failed", err.Error())
+		h.logger.Debug("input write failed", "peer", peerID, "error", err)
+		h.sendError(peerID, "input_failed", "failed to send input")
 	}
 }
 
@@ -267,7 +275,8 @@ func (h *Handler) handleResize(peerID string, req *protocol.ResizeRequest) {
 	}
 
 	if err := bridge.Resize(req.Cols, req.Rows); err != nil {
-		h.sendError(peerID, "resize_failed", err.Error())
+		h.logger.Debug("resize failed", "peer", peerID, "error", err)
+		h.sendError(peerID, "resize_failed", "failed to resize pane")
 	}
 }
 
@@ -293,7 +302,8 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 	}
 
 	if err := h.tmux.KillSession(req.Session); err != nil {
-		h.sendError(peerID, "kill_session_failed", err.Error())
+		h.logger.Debug("kill session failed", "peer", peerID, "session", req.Session, "error", err)
+		h.sendError(peerID, "kill_session_failed", "failed to kill session")
 		return
 	}
 
