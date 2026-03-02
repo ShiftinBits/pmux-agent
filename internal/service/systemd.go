@@ -34,6 +34,7 @@ func (m *systemdManager) unitPath() string {
 }
 
 func (m *systemdManager) generateUnit() string {
+	logPath := filepath.Join(m.configDir, "agent.log")
 	return fmt.Sprintf(`[Unit]
 Description=PocketMux Agent
 After=network-online.target
@@ -46,10 +47,12 @@ Restart=on-failure
 RestartSec=5s
 StartLimitBurst=5
 StartLimitIntervalSec=60
+StandardOutput=append:%s
+StandardError=append:%s
 
 [Install]
 WantedBy=default.target
-`, m.pmuxPath)
+`, m.pmuxPath, logPath, logPath)
 }
 
 func (m *systemdManager) writeUnit() error {

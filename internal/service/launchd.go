@@ -119,18 +119,42 @@ func (m *launchdManager) Uninstall() error {
 
 func (m *launchdManager) Start() error {
 	uid := os.Getuid()
-	cmd := exec.Command("launchctl", "kickstart", fmt.Sprintf("gui/%d/%s", uid, launchdLabel))
+	domain := fmt.Sprintf("gui/%d", uid)
+	target := fmt.Sprintf("%s/%s", domain, launchdLabel)
+
+	// Try kickstart first (works if service is loaded but not running).
+	cmd := exec.Command("launchctl", "kickstart", target)
+	if _, err := cmd.CombinedOutput(); err == nil {
+		return nil
+	}
+
+	// Service not loaded — re-bootstrap from plist.
+	if err := m.writePlist(); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+	cmd = exec.Command("launchctl", "bootstrap", domain, m.plistPath())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl kickstart: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("launchctl bootstrap: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
 
 func (m *launchdManager) Stop() error {
+	// Use bootout to fully unload the service from the launchd domain.
+	// "launchctl kill SIGTERM" only sends a signal — launchd restarts the
+	// service immediately due to KeepAlive. bootout unloads the job so it
+	// stays stopped until Start()/Install() re-bootstraps it.
 	uid := os.Getuid()
-	cmd := exec.Command("launchctl", "kill", "SIGTERM", fmt.Sprintf("gui/%d/%s", uid, launchdLabel))
+	target := fmt.Sprintf("gui/%d/%s", uid, launchdLabel)
+	cmd := exec.Command("launchctl", "bootout", target)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl kill: %s: %w", strings.TrimSpace(string(out)), err)
+		outStr := strings.TrimSpace(string(out))
+		// Not loaded / not found is not an error when stopping.
+		if strings.Contains(outStr, "Could not find specified service") ||
+			strings.Contains(outStr, "No such process") {
+			return nil
+		}
+		return fmt.Errorf("launchctl bootout: %s: %w", outStr, err)
 	}
 	return nil
 }
