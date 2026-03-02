@@ -36,6 +36,7 @@ type Handler struct {
 	sizeTracker  *tmux.PaneSizeTracker
 	send         SendFunc
 	logger       *slog.Logger
+	ctx          context.Context // agent lifecycle context
 
 	mu           sync.Mutex
 	bridges      map[string]*tmux.PaneBridge // per-peer attached bridge
@@ -52,11 +53,18 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Ha
 		sizeTracker:  tmux.NewPaneSizeTracker(tmuxClient),
 		send:         send,
 		logger:       logger,
+		ctx:          context.Background(), // overridden by SetContext in agent.go
 		bridges:      make(map[string]*tmux.PaneBridge),
 		cancels:      make(map[string]context.CancelFunc),
 		paneForPeer:  make(map[string]string),
 		lastPingTime: make(map[string]time.Time),
 	}
+}
+
+// SetContext sets the agent lifecycle context for deriving per-peer contexts.
+// Called by agent.Run() after creating the cancelable agent context.
+func (h *Handler) SetContext(ctx context.Context) {
+	h.ctx = ctx
 }
 
 // SetTmuxRunning updates whether the tmux server is currently running.
@@ -188,8 +196,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		return
 	}
 
-	// Create a per-peer context so streamOutput can be cleanly canceled on detach.
-	ctx, cancel := context.WithCancel(context.Background())
+	// Create a per-peer context derived from the agent lifecycle context.
+	// When the agent shuts down, all per-peer streams are automatically canceled.
+	ctx, cancel := context.WithCancel(h.ctx)
 
 	h.mu.Lock()
 	h.bridges[peerID] = bridge

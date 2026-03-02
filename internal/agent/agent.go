@@ -134,6 +134,9 @@ func Run(ctx context.Context, paths config.Paths) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Propagate agent context to handler so per-peer contexts are canceled on shutdown.
+	handler.SetContext(ctx)
+
 	// Handle SIGUSR1 to wake signaling client from dormancy.
 	// The supervisor sends SIGUSR1 on every pmux CLI invocation so that a
 	// dormant agent resumes reconnection without requiring a manual restart.

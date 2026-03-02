@@ -76,6 +76,7 @@ type PeerManager struct {
 	peers            map[string]*Peer          // keyed by mobile device ID
 	disconnectTimers map[string]*time.Timer    // grace timers for disconnected peers
 	cleanupWg        sync.WaitGroup            // tracks background cleanup goroutines
+	closed           bool                       // true after CloseAll() returns
 }
 
 // Peer represents a single WebRTC peer connection to a mobile device.
@@ -148,6 +149,7 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 // goroutines (from state change handlers) to finish.
 func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
+	pm.closed = true
 	peers := make([]*Peer, 0, len(pm.peers))
 	for _, p := range pm.peers {
 		peers = append(peers, p)
@@ -181,7 +183,11 @@ func (pm *PeerManager) CloseAll() {
 // scheduleCleanup spawns a tracked goroutine that notifies the disconnect
 // handler and closes the peer. Safe to call while pm.mu is held because
 // ClosePeer runs asynchronously in the spawned goroutine.
+// Caller must hold pm.mu.
 func (pm *PeerManager) scheduleCleanup(deviceID string) {
+	if pm.closed {
+		return
+	}
 	pm.cleanupWg.Add(1)
 	go func() {
 		defer pm.cleanupWg.Done()
@@ -666,9 +672,23 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		defer func() {
+			if r := recover(); r != nil {
+				p.logger.Error("panic in DataChannel message handler",
+					"recover", r, "device", p.DeviceID)
+			}
+		}()
+
 		decoded, err := protocol.Decode(msg.Data)
 		if err != nil {
 			p.logger.Debug("failed to decode DataChannel message", "error", err)
+			return
+		}
+
+		// Only accept request-direction messages from mobile.
+		if !protocol.IsRequest(decoded) {
+			p.logger.Debug("ignoring non-request message from mobile",
+				"type", decoded.MessageType(), "device", p.DeviceID)
 			return
 		}
 

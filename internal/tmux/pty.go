@@ -227,28 +227,32 @@ func (pb *PaneBridge) Resize(cols, rows int) error {
 // return io.EOF because the pipe write end is closed.
 func (pb *PaneBridge) Close() error {
 	pb.mu.Lock()
-	defer pb.mu.Unlock()
-
 	if pb.closed {
+		pb.mu.Unlock()
 		return nil
 	}
 	pb.closed = true
+	pb.mu.Unlock()
 
 	// Disable pipe-pane (empty command removes the pipe)
 	pb.client.run("pipe-pane", "-t", pb.paneID) //nolint:errcheck
 
-	// Signal the relay goroutine to stop and wait for it to exit.
-	// The relay checks done between non-blocking poll intervals.
+	// Signal the relay goroutine to stop.
 	close(pb.done)
 
-	// Close the relay pipe write end — this causes pipeR.Read() to
-	// return io.EOF, unblocking any goroutine blocked on Read().
+	// Close the relay pipe write end — unblocks pipeR.Read() (io.EOF)
+	// and causes the relay's pipeW.Write() to fail.
 	pb.pipeW.Close()
+
+	// Wait for relay goroutine to exit before closing the FIFO fd.
+	// The relay calls syscall.Read(fifoFd), so we must not close that
+	// fd while the relay is still running.
+	<-pb.relayDone
 
 	// Close the read end of the relay pipe
 	pb.pipeR.Close()
 
-	// Close the raw FIFO fd
+	// Close the raw FIFO fd (safe now — relay has exited)
 	syscall.Close(pb.fifoFd)
 
 	// Remove temp directory and FIFO
