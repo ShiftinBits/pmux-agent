@@ -160,8 +160,9 @@ func Run(ctx context.Context, paths config.Paths) error {
 		}
 	}()
 
-	// Monitor tmux server state (does not shut down the agent — just tracks state)
-	go monitorTmux(ctx, tmuxClient, handler.SetTmuxRunning, tmuxMonitorInterval, logger)
+	// Monitor tmux server state (does not shut down the agent — just tracks state).
+	// The callback is currently unused; a future version may propagate state to mobile.
+	go monitorTmux(ctx, tmuxClient, func(bool) {}, tmuxMonitorInterval, logger)
 
 	// Start connection cleaner to detect and close idle peers (no ping in 60s).
 	// WithStateChecker adds a safety-net sweep that also closes peers with

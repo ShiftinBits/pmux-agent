@@ -99,8 +99,12 @@ func (c *Client) ListSessions() ([]protocol.TmuxSession, error) {
 	format := "#{session_id}|#{session_name}|#{session_created}|#{session_last_activity}|#{session_attached}"
 	out, err := c.run("list-sessions", "-F", format)
 	if err != nil {
-		// "no server running" or "no sessions" is not an error — return empty
-		if strings.Contains(out, "no server running") || strings.Contains(out, "no sessions") {
+		// "no server running" or "no sessions" is not an error — return empty.
+		// Also treat empty output with an error as "no sessions" — this can
+		// happen when the tmux server has just exited.
+		if strings.Contains(out, "no server running") ||
+			strings.Contains(out, "no sessions") ||
+			strings.TrimSpace(out) == "" {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("list-sessions: %w: %s", err, out)

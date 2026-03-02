@@ -57,7 +57,7 @@ func main() {
 	// No args: default to new session (or attach if server running)
 	if len(args) == 0 {
 		ensureAgent(cfg)
-		if err := proxy.ExecTmux(socketName); err != nil {
+		if err := proxy.ExecTmux(socketName, cfg.Tmux.TmuxPath); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 			os.Exit(1)
 		}
@@ -94,7 +94,7 @@ func main() {
 
 	// Everything else: ensure agent is running, then passthrough to tmux -L <socket>
 	ensureAgent(cfg)
-	if err := proxy.ExecTmux(socketName, args...); err != nil {
+	if err := proxy.ExecTmux(socketName, cfg.Tmux.TmuxPath, args...); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -109,7 +109,8 @@ func ensureAgent(cfg config.Config) {
 
 	store, err := initSecretStore(paths, cfg)
 	if err != nil {
-		return // Non-fatal: can't check identity without store
+		fmt.Fprintf(os.Stderr, "warning: agent not started (secret store unavailable: %v)\n", err)
+		return
 	}
 
 	exe, _ := os.Executable()

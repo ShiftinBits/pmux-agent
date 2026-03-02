@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"regexp"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
@@ -47,7 +46,6 @@ type Handler struct {
 	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
 	paneForPeer  map[string]string           // peerID -> paneID (for restore on detach)
 	lastPingTime map[string]time.Time        // peerID -> last ping received
-	tmuxRunning  atomic.Bool                 // whether the tmux server is currently running
 }
 
 // NewHandler creates a protocol message handler.
@@ -69,11 +67,6 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Ha
 // Called by agent.Run() after creating the cancelable agent context.
 func (h *Handler) SetContext(ctx context.Context) {
 	h.ctx = ctx
-}
-
-// SetTmuxRunning updates whether the tmux server is currently running.
-func (h *Handler) SetTmuxRunning(running bool) {
-	h.tmuxRunning.Store(running)
 }
 
 // HandleMessage processes an incoming protocol message from a peer.
@@ -395,9 +388,12 @@ func (h *Handler) sendMsg(peerID string, msg protocol.Message) error {
 }
 
 func (h *Handler) sendError(peerID string, code string, message string) {
-	h.sendMsg(peerID, &protocol.ErrorEvent{
+	if err := h.sendMsg(peerID, &protocol.ErrorEvent{
 		Type:    "error",
 		Code:    code,
 		Message: message,
-	})
+	}); err != nil {
+		h.logger.Warn("failed to send error to peer",
+			"peer", peerID, "code", code, "sendError", err)
+	}
 }
