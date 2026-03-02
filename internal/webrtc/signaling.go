@@ -75,7 +75,6 @@ type SignalingClient struct {
 	jwt       string
 	jwtExpiry time.Time
 	closed    bool
-	closeCh   chan struct{}
 
 	// Dormancy: after DormancyTimeout of continuous reconnection failures,
 	// stop retrying until an activity signal is received.
@@ -99,7 +98,6 @@ func NewSignalingClient(identity *auth.Identity, serverURL string, handler Messa
 		handler:          handler,
 		logger:           logger,
 		PresenceInterval: DefaultPresenceInterval,
-		closeCh:          make(chan struct{}),
 		activitySignal:   make(chan struct{}, 1),
 		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
 	}
@@ -184,6 +182,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		sc.logger.Warn("signaling connection lost", "error", err)
 
 		// Wait with exponential backoff before reconnecting
+		backoffStart := time.Now()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -200,7 +199,11 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		}
 
 		sc.logger.Info("reconnecting to signaling server", "backoff", backoff)
-		backoff = time.Duration(math.Min(float64(backoff)*backoffFactor, float64(maxBackoff)))
+		// Only increase backoff if we actually waited most of the duration.
+		// After system sleep, the timer fires immediately with stale elapsed time.
+		if time.Since(backoffStart) >= backoff/2 {
+			backoff = time.Duration(math.Min(float64(backoff)*backoffFactor, float64(maxBackoff)))
+		}
 	}
 }
 
@@ -236,7 +239,6 @@ func (sc *SignalingClient) Close() {
 		return
 	}
 	sc.closed = true
-	close(sc.closeCh)
 
 	if sc.conn != nil {
 		sc.conn.WriteMessage(websocket.CloseMessage,
@@ -264,10 +266,6 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		return false, fmt.Errorf("connect to signaling server: %w", err)
 	}
 
-	sc.mu.Lock()
-	sc.conn = conn
-	sc.mu.Unlock()
-
 	defer func() {
 		conn.Close()
 		sc.mu.Lock()
@@ -275,7 +273,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		sc.mu.Unlock()
 	}()
 
-	// Authenticate
+	// Authenticate before exposing conn to Send()/Close().
 	if err := sc.authenticate(conn); err != nil {
 		// Invalidate cached JWT so the next reconnect attempt forces a
 		// fresh token exchange instead of reusing a rejected token.
@@ -284,6 +282,11 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		sc.mu.Unlock()
 		return false, err
 	}
+
+	// Now authenticated — make visible to other goroutines.
+	sc.mu.Lock()
+	sc.conn = conn
+	sc.mu.Unlock()
 
 	sc.logger.Info("connected to signaling server")
 
@@ -296,9 +299,11 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	// Start token refresh loop
 	go sc.tokenRefreshLoop(presenceCtx)
 
-	// Close conn when context is canceled to unblock readLoop promptly
+	// Close conn when context is canceled (or connection ends) to unblock readLoop.
+	// Uses presenceCtx so this goroutine exits when connectAndServe returns,
+	// preventing a goroutine leak if ctx outlives this connection.
 	go func() {
-		<-ctx.Done()
+		<-presenceCtx.Done()
 		conn.Close()
 	}()
 
@@ -318,9 +323,11 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn) error {
 		return fmt.Errorf("marshal auth message: %w", err)
 	}
 
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return fmt.Errorf("send auth message: %w", err)
 	}
+	conn.SetWriteDeadline(time.Time{}) // clear deadline
 
 	// Wait for auth response
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -393,26 +400,56 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 	}
 }
 
-// tokenRefreshLoop refreshes the JWT before it expires.
+// tokenRefreshLoop polls periodically to check if the JWT needs refreshing.
+// Uses wall-clock time.Now() comparisons instead of monotonic time.After()
+// to correctly detect expired tokens after system sleep/wake.
 func (sc *SignalingClient) tokenRefreshLoop(ctx context.Context) {
+	const (
+		pollInterval  = 30 * time.Second
+		minBackoff    = 1 * time.Minute
+		maxRefBackoff = 15 * time.Minute
+		backoffMul    = 2.0
+	)
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	failBackoff := time.Duration(0)
+	var lastFailure time.Time
+
 	for {
-		sc.mu.Lock()
-		timeUntilRefresh := time.Until(sc.jwtExpiry) - TokenRefreshMargin
-		sc.mu.Unlock()
-
-		if timeUntilRefresh <= 0 {
-			timeUntilRefresh = 1 * time.Minute
-		}
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(timeUntilRefresh):
-			if err := sc.ensureToken(); err != nil {
-				sc.logger.Warn("failed to refresh JWT", "error", err)
+		case <-ticker.C:
+		}
+
+		// If in backoff, check if enough wall-clock time has passed.
+		if failBackoff > 0 && time.Since(lastFailure) < failBackoff {
+			continue
+		}
+
+		// Check if refresh is needed using wall-clock comparison.
+		sc.mu.Lock()
+		needsRefresh := sc.jwtExpiry.Before(time.Now().Add(TokenRefreshMargin))
+		sc.mu.Unlock()
+
+		if !needsRefresh {
+			continue
+		}
+
+		if err := sc.ensureToken(); err != nil {
+			sc.logger.Warn("failed to refresh JWT", "error", err)
+			lastFailure = time.Now()
+			if failBackoff == 0 {
+				failBackoff = minBackoff
 			} else {
-				sc.logger.Debug("JWT refreshed")
+				failBackoff = time.Duration(math.Min(
+					float64(failBackoff)*backoffMul, float64(maxRefBackoff)))
 			}
+		} else {
+			sc.logger.Debug("JWT refreshed")
+			failBackoff = 0
 		}
 	}
 }
