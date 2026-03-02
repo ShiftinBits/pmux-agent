@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,10 @@ const bufferedAmountLowThreshold = 4096
 // the "disconnected" state before attempting an ICE restart. This grace period
 // allows transient network interruptions to recover without intervention.
 const pcDisconnectedTimeout = 10 * time.Second
+
+// turnCacheTTL is how long TURN credentials are cached before re-fetching.
+// TURN credentials typically have a 24h TTL, so 10 minutes is conservative.
+const turnCacheTTL = 10 * time.Minute
 
 // TurnCredentials holds STUN/TURN server credentials from the signaling server.
 type TurnCredentials struct {
@@ -77,6 +82,8 @@ type PeerManager struct {
 	disconnectTimers map[string]*time.Timer    // grace timers for disconnected peers
 	cleanupWg        sync.WaitGroup            // tracks background cleanup goroutines
 	closed           bool                       // true after CloseAll() returns
+	turnCache        []webrtc.ICEServer        // cached TURN credentials
+	turnCacheTime    time.Time                 // when turnCache was last populated
 }
 
 // Peer represents a single WebRTC peer connection to a mobile device.
@@ -443,7 +450,18 @@ func (pm *PeerManager) handleICECandidate(mobileDeviceID string, candidate strin
 }
 
 // fetchTurnCredentials calls the server API to get TURN credentials.
+// Results are cached for turnCacheTTL to avoid redundant HTTP requests
+// during rapid reconnection cycles.
 func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
+	// Return cached credentials if fresh.
+	pm.mu.Lock()
+	if len(pm.turnCache) > 0 && time.Since(pm.turnCacheTime) < turnCacheTTL {
+		cached := pm.turnCache
+		pm.mu.Unlock()
+		return cached, nil
+	}
+	pm.mu.Unlock()
+
 	url := pm.serverURL + "/turn/credentials"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -451,7 +469,7 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+pm.jwt())
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("TURN credentials request: %w", err)
@@ -472,13 +490,19 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		return nil, fmt.Errorf("parse TURN credentials: %w", err)
 	}
 
-	return []webrtc.ICEServer{
-		{
-			URLs:       creds.URLs,
-			Username:   creds.Username,
-			Credential: creds.Credential,
-		},
-	}, nil
+	servers := []webrtc.ICEServer{{
+		URLs:       creds.URLs,
+		Username:   creds.Username,
+		Credential: creds.Credential,
+	}}
+
+	// Cache the result.
+	pm.mu.Lock()
+	pm.turnCache = servers
+	pm.turnCacheTime = time.Now()
+	pm.mu.Unlock()
+
+	return servers, nil
 }
 
 // handlePeerStateChange is the PeerStateHandler callback for managing disconnect
@@ -675,7 +699,8 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 		defer func() {
 			if r := recover(); r != nil {
 				p.logger.Error("panic in DataChannel message handler",
-					"recover", r, "device", p.DeviceID)
+					"recover", r, "device", p.DeviceID,
+					"stack", string(debug.Stack()))
 			}
 		}()
 

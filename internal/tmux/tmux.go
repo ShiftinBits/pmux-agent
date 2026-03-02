@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -284,8 +285,14 @@ func (c *Client) ResizeWindowAuto(windowTarget string) error {
 }
 
 // SendKeys sends literal input to a tmux pane using the -l flag.
+// Null bytes are stripped because execve truncates argv strings at \x00,
+// which would silently discard trailing input.
 func (c *Client) SendKeys(paneID string, data []byte) error {
-	out, err := c.run("send-keys", "-t", paneID, "-l", string(data))
+	clean := bytes.ReplaceAll(data, []byte{0}, nil)
+	if len(clean) == 0 {
+		return nil
+	}
+	out, err := c.run("send-keys", "-t", paneID, "-l", string(clean))
 	if err != nil {
 		return fmt.Errorf("send-keys: %w: %s", err, out)
 	}

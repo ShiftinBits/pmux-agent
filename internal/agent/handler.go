@@ -20,6 +20,10 @@ const (
 
 	// minResizeDimension is the lower bound for resize column/row values.
 	minResizeDimension = 1
+
+	// maxInputSize is the maximum allowed input request data size.
+	// 16 KB is well within OS ARG_MAX limits for tmux send-keys via execve.
+	maxInputSize = 16 * 1024
 )
 
 // validTmuxTarget matches tmux pane/session/window IDs like %0, $1, @2,
@@ -230,6 +234,12 @@ func (h *Handler) handleDetach(peerID string) {
 }
 
 func (h *Handler) handleInput(peerID string, req *protocol.InputRequest) {
+	if len(req.Data) > maxInputSize {
+		h.sendError(peerID, "input_too_large",
+			fmt.Sprintf("input size %d exceeds %d byte limit", len(req.Data), maxInputSize))
+		return
+	}
+
 	h.mu.Lock()
 	bridge := h.bridges[peerID]
 	h.mu.Unlock()

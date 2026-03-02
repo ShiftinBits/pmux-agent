@@ -123,10 +123,16 @@ func Run(ctx context.Context, paths config.Paths) error {
 	peerManager.MaxPeers = cfg.Connection.MaxMobileConnections
 	peerManager.OnPeerDisconnect = handler.PeerDisconnected
 
-	// Load paired device for connection validation
+	// Load paired device for connection validation.
+	// On error (corrupt file, decryption failure), reject all connections
+	// rather than falling through with an empty AllowedDeviceID (which would
+	// allow any device to connect).
 	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
 	pairedDevice, err := auth.LoadPairedDevice(pairedDevicesPath, store)
-	if err == nil && pairedDevice != nil {
+	if err != nil {
+		logger.Warn("failed to load paired device, rejecting all connections", "error", err)
+		peerManager.AllowedDeviceID = "!invalid-load-error"
+	} else if pairedDevice != nil {
 		peerManager.AllowedDeviceID = pairedDevice.DeviceID
 	}
 

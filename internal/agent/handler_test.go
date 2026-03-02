@@ -420,6 +420,48 @@ func TestHandler_ResizeWithoutAttach(t *testing.T) {
 	}
 }
 
+func TestHandler_InputTooLarge(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+	sessionName := "input-limit-test"
+	_, err := tc.CreateSession(sessionName, "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type: "attach", PaneID: paneID, Cols: 80, Rows: 24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+
+	// Reset catcher so we only see the error from the oversized input
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	largeData := make([]byte, maxInputSize+1)
+	h.HandleMessage("peer1", &protocol.InputRequest{Type: "input", Data: largeData})
+
+	msgs := catcher.get()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	errMsg, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+	if !ok {
+		t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+	}
+	if errMsg.Code != "input_too_large" {
+		t.Errorf("code = %q, want input_too_large", errMsg.Code)
+	}
+
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
 func TestHandler_PeerDisconnected(t *testing.T) {
 	h, tc, _ := testHandler(t)
 
