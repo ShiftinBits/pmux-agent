@@ -501,6 +501,95 @@ func TestHandler_PeerDisconnected(t *testing.T) {
 	}
 }
 
+func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	_, err := tc.CreateSession("reattach-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	// Seed pane with content so capture-pane returns non-empty initial content.
+	if err := tc.SendKeys(paneID, []byte("echo REATTACH_MARKER")); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// First attach — should receive initial content
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type:   "attach",
+		PaneID: paneID,
+		Cols:   80,
+		Rows:   24,
+	})
+
+	// Wait for attached confirmation and give time for initial content
+	catcher.waitFor(t, "attached", 2*time.Second)
+	time.Sleep(200 * time.Millisecond)
+
+	msgs := catcher.get()
+	hasOutput := false
+	for _, m := range msgs {
+		if _, ok := m.Msg.(*protocol.OutputEvent); ok {
+			hasOutput = true
+			break
+		}
+	}
+	if !hasOutput {
+		t.Fatal("expected initial OutputEvent on first attach")
+	}
+
+	// Detach
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+	catcher.waitFor(t, "detached", 2*time.Second)
+
+	// Reset catcher to isolate reattach messages
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	// Reattach with reattach=true — should NOT receive initial content
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type:     "attach",
+		PaneID:   paneID,
+		Cols:     80,
+		Rows:     24,
+		Reattach: true,
+	})
+
+	// Wait for attached confirmation and give time for any initial content
+	catcher.waitFor(t, "attached", 2*time.Second)
+	time.Sleep(200 * time.Millisecond)
+
+	reattachMsgs := catcher.get()
+	for _, m := range reattachMsgs {
+		if _, ok := m.Msg.(*protocol.OutputEvent); ok {
+			t.Error("did not expect initial OutputEvent on reattach")
+		}
+	}
+
+	// Should still have attached event
+	foundAttached := false
+	for _, m := range reattachMsgs {
+		if _, ok := m.Msg.(*protocol.AttachedEvent); ok {
+			foundAttached = true
+			break
+		}
+	}
+	if !foundAttached {
+		t.Error("expected AttachedEvent on reattach")
+	}
+
+	// Clean up
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
 // TestHandler_GoroutineLeak verifies that repeated connect/attach/detach/disconnect
 // cycles do not leak goroutines. Each cycle creates a tmux session, attaches a
 // peer, sends messages, detaches, and disconnects. After all cycles, the

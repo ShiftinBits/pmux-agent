@@ -216,12 +216,14 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		PaneID: req.PaneID,
 	})
 
-	// Send initial pane content
-	if initial := bridge.InitialContent(); initial != "" {
-		h.sendMsg(peerID, &protocol.OutputEvent{
-			Type: "output",
-			Data: []byte(initial),
-		})
+	// Send initial pane content (skip on reattach — mobile already has buffer)
+	if !req.Reattach {
+		if initial := bridge.InitialContent(); initial != "" {
+			h.sendMsg(peerID, &protocol.OutputEvent{
+				Type: "output",
+				Data: []byte(initial),
+			})
+		}
 	}
 
 	// Start streaming output in background with context for lifecycle management
