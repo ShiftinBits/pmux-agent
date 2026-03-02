@@ -1,26 +1,34 @@
 name: Release
+
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
+
+permissions:
+  contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-      - name: Build all platforms
-        run: make build-all
-      - name: Generate checksums
-        run: cd bin && sha256sum pmux-* > checksums.txt
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          go-version: "1.24"
+
+      - uses: goreleaser/goreleaser-action@v6
         with:
-          files: |
-            bin/pmux-*
-            bin/checksums.txt
-          generate_release_notes: true
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
