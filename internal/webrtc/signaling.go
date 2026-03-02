@@ -153,9 +153,9 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		}
 
 		connected, err := sc.connectAndServe(ctx)
-		if err == nil {
-			// Graceful shutdown (context canceled)
-			return nil
+		if err == nil || ctx.Err() != nil {
+			// Context canceled — actual graceful shutdown.
+			return ctx.Err()
 		}
 
 		// Reset backoff and failure tracking after a successful connection
@@ -416,9 +416,10 @@ func (sc *SignalingClient) readLoop(conn *websocket.Conn) error {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return nil
-			}
+			// All read errors — including server-initiated normal closes
+			// (1000/1001) — are treated as disconnections. The reconnection
+			// loop in Run() will reconnect. The only true "graceful exit" is
+			// context cancellation, which closes the conn from the outside.
 			return fmt.Errorf("read signaling message: %w", err)
 		}
 
