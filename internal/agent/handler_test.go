@@ -590,6 +590,85 @@ func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
 }
 
+func TestHandler_PaneClosedOnExit(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	// Create two sessions — second one keeps tmux server alive when pane exits
+	_, err := tc.CreateSession("pane-exit-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, err = tc.CreateSession("keepalive", "")
+	if err != nil {
+		t.Fatalf("CreateSession (keepalive): %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+
+	var paneID string
+	for _, s := range sessions {
+		if s.Name == "pane-exit-test" {
+			paneID = s.Windows[0].Panes[0].ID
+			break
+		}
+	}
+	if paneID == "" {
+		t.Fatal("could not find pane for pane-exit-test")
+	}
+
+	// Attach to the pane
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type:   "attach",
+		PaneID: paneID,
+		Cols:   80,
+		Rows:   24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+
+	// Reset catcher to isolate pane_closed messages
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	// Kill the pane via tmux to simulate shell exit (^D / exit).
+	// Using kill-pane is more reliable across shells than send-keys "exit".
+	exec.Command("tmux", "-L", handlerTestSocket, "kill-pane", "-t", paneID).Run() //nolint:errcheck
+
+	// Wait for pane_closed event
+	paneClosed := catcher.waitFor(t, "pane_closed", 5*time.Second)
+	paneClosedEvent, ok := paneClosed.(*protocol.PaneClosedEvent)
+	if !ok {
+		t.Fatalf("expected PaneClosedEvent, got %T", paneClosed)
+	}
+	if paneClosedEvent.PaneID != paneID {
+		t.Errorf("paneId = %q, want %q", paneClosedEvent.PaneID, paneID)
+	}
+
+	// Should also receive a sessions event with updated tree
+	sessionsMsg := catcher.waitFor(t, "sessions", 5*time.Second)
+	sessionsEvent, ok := sessionsMsg.(*protocol.SessionsEvent)
+	if !ok {
+		t.Fatalf("expected SessionsEvent after pane_closed, got %T", sessionsMsg)
+	}
+	// The pane-exit-test session should be gone (it had only one pane)
+	for _, s := range sessionsEvent.Sessions {
+		if s.Name == "pane-exit-test" {
+			t.Error("expected pane-exit-test session to be gone after pane exit")
+		}
+	}
+
+	// Verify bridge is cleaned up
+	h.mu.Lock()
+	bridge := h.bridges["peer1"]
+	h.mu.Unlock()
+	if bridge != nil {
+		t.Error("expected bridge to be nil after pane exit")
+	}
+}
+
 // TestHandler_GoroutineLeak verifies that repeated connect/attach/detach/disconnect
 // cycles do not leak goroutines. Each cycle creates a tmux session, attaches a
 // peer, sends messages, detaches, and disconnects. After all cycles, the

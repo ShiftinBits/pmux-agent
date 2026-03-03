@@ -228,6 +228,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 
 	// Start streaming output in background with context for lifecycle management
 	go h.streamOutput(ctx, peerID, bridge)
+
+	// Start pane existence watcher — detects pane closure when the process exits
+	go h.watchPane(ctx, peerID, req.PaneID)
 }
 
 func (h *Handler) handleDetach(peerID string) {
@@ -317,6 +320,7 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 
 // streamOutput reads from a PaneBridge and sends output events to the peer.
 // Exits when the context is canceled, the bridge is closed, or sending fails.
+// When the bridge returns EOF (pane exited), sends pane_closed + sessions events.
 func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
 	buf := make([]byte, 4096)
 	filter := tmux.NewTitleFilter() // Strip tmux title escapes for xterm.js
@@ -329,10 +333,13 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 
 		n, err := bridge.Read(buf)
 		if err != nil {
-			// Distinguish between context cancellation and bridge errors
+			// Distinguish between context cancellation and pane exit (EOF)
 			if ctx.Err() != nil {
 				h.logger.Debug("streamOutput stopped by context", "peer", peerID)
+				return
 			}
+			// Pane exited — notify mobile and clean up
+			h.handlePaneExit(peerID)
 			return
 		}
 
@@ -354,6 +361,61 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 			h.logger.Debug("output stream send failed, stopping", "peer", peerID, "error", err)
 			h.detachPeer(peerID)
 			return
+		}
+	}
+}
+
+// handlePaneExit is called when streamOutput detects that a pane has exited.
+// It sends a pane_closed event followed by a fresh sessions tree, then cleans up.
+func (h *Handler) handlePaneExit(peerID string) {
+	h.mu.Lock()
+	paneID := h.paneForPeer[peerID]
+	h.mu.Unlock()
+
+	if paneID == "" {
+		return
+	}
+
+	h.logger.Info("pane exited, notifying peer", "peer", peerID, "pane", paneID)
+
+	// Send pane_closed event
+	h.sendMsg(peerID, &protocol.PaneClosedEvent{
+		Type:   "pane_closed",
+		PaneID: paneID,
+	})
+
+	// Send fresh session tree so mobile can navigate to the new active pane
+	sessions, err := h.tmux.ListAll()
+	if err != nil {
+		h.logger.Warn("failed to list sessions after pane close", "error", err)
+	} else {
+		h.sendMsg(peerID, &protocol.SessionsEvent{
+			Type:     "sessions",
+			Sessions: sessions,
+		})
+	}
+
+	// Clean up bridge and state
+	h.detachPeer(peerID)
+}
+
+// watchPane periodically checks whether the attached pane still exists in tmux.
+// When the pane is gone (process exited, session killed, etc.), it triggers
+// handlePaneExit to notify the mobile client. This is needed because the
+// PaneBridge FIFO uses O_RDWR and never returns EOF on pane closure.
+func (h *Handler) watchPane(ctx context.Context, peerID, paneID string) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !h.tmux.PaneExists(paneID) {
+				h.handlePaneExit(peerID)
+				return
+			}
 		}
 	}
 }

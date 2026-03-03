@@ -317,3 +317,12 @@ func (c *Client) CapturePane(paneID string) (string, error) {
 	}
 	return out, nil
 }
+
+// PaneExists returns true if a pane with the given ID exists in the tmux server.
+func (c *Client) PaneExists(paneID string) bool {
+	out, err := c.run("display-message", "-t", paneID, "-p", "#{pane_id}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == paneID
+}
