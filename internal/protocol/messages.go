@@ -109,6 +109,14 @@ type SessionEndedEvent struct {
 
 func (m *SessionEndedEvent) MessageType() string { return "session_ended" }
 
+// PaneClosedEvent reports that a specific pane has exited.
+type PaneClosedEvent struct {
+	Type   string `msgpack:"type"`
+	PaneID string `msgpack:"paneId"`
+}
+
+func (m *PaneClosedEvent) MessageType() string { return "pane_closed" }
+
 // ErrorEvent reports an error to the mobile client.
 type ErrorEvent struct {
 	Type    string `msgpack:"type"`

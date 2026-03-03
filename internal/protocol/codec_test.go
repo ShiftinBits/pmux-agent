@@ -330,6 +330,25 @@ func TestRoundTripSessionEnded(t *testing.T) {
 	}
 }
 
+func TestRoundTripPaneClosed(t *testing.T) {
+	msg := &PaneClosedEvent{Type: "pane_closed", PaneID: "%7"}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*PaneClosedEvent)
+	if !ok {
+		t.Fatalf("expected *PaneClosedEvent, got %T", decoded)
+	}
+	if got.PaneID != "%7" {
+		t.Errorf("paneId = %q, want %%7", got.PaneID)
+	}
+}
+
 func TestRoundTripError(t *testing.T) {
 	msg := &ErrorEvent{Type: "error", Code: "PANE_NOT_FOUND", Message: "Pane %99 does not exist"}
 	data, err := Encode(msg)
@@ -460,6 +479,7 @@ func TestIsEvent(t *testing.T) {
 		&AttachedEvent{Type: "attached"},
 		&DetachedEvent{Type: "detached"},
 		&SessionEndedEvent{Type: "session_ended"},
+		&PaneClosedEvent{Type: "pane_closed"},
 		&ErrorEvent{Type: "error"},
 		&PongEvent{Type: "pong"},
 	}
@@ -644,6 +664,11 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 	case *SessionEndedEvent:
 		if m.Session != expected.Session {
 			t.Errorf("session = %q, want %q", m.Session, expected.Session)
+		}
+
+	case *PaneClosedEvent:
+		if m.PaneID != expected.PaneID {
+			t.Errorf("paneId = %q, want %q", m.PaneID, expected.PaneID)
 		}
 
 	case *ErrorEvent:

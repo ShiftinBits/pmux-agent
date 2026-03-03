@@ -73,6 +73,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &DetachedEvent{}
 	case "session_ended":
 		msg = &SessionEndedEvent{}
+	case "pane_closed":
+		msg = &PaneClosedEvent{}
 	case "error":
 		msg = &ErrorEvent{}
 	case "pong":
@@ -104,7 +106,7 @@ func IsRequest(msg Message) bool {
 func IsEvent(msg Message) bool {
 	switch msg.(type) {
 	case *SessionsEvent, *OutputEvent, *AttachedEvent, *DetachedEvent,
-		*SessionEndedEvent, *ErrorEvent, *PongEvent:
+		*SessionEndedEvent, *PaneClosedEvent, *ErrorEvent, *PongEvent:
 		return true
 	}
 	return false
