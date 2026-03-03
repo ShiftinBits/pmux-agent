@@ -424,6 +424,84 @@ func TestHandler_ResizeWithoutAttach(t *testing.T) {
 	}
 }
 
+func TestHandler_DuplicateResizeSuppressed(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	_, err := tc.CreateSession("resize-dedup", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	// Attach at 80x24
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type: "attach", PaneID: paneID, Cols: 80, Rows: 24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+	time.Sleep(100 * time.Millisecond)
+
+	// Drain messages from attach
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	// Send resize with same dimensions — should be suppressed (no error, no action)
+	h.HandleMessage("peer1", &protocol.ResizeRequest{
+		Type: "resize", Cols: 80, Rows: 24,
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	msgs := catcher.get()
+	for _, m := range msgs {
+		if errMsg, ok := m.Msg.(*protocol.ErrorEvent); ok {
+			t.Errorf("unexpected error on same-dimension resize: %s", errMsg.Code)
+		}
+	}
+
+	// Send resize with different dimensions — should succeed
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	h.HandleMessage("peer1", &protocol.ResizeRequest{
+		Type: "resize", Cols: 60, Rows: 20,
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	// No error means resize succeeded
+	msgs = catcher.get()
+	for _, m := range msgs {
+		if errMsg, ok := m.Msg.(*protocol.ErrorEvent); ok {
+			t.Errorf("unexpected error on new-dimension resize: %s", errMsg.Code)
+		}
+	}
+
+	// Send same 60x20 again — should be suppressed
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	h.HandleMessage("peer1", &protocol.ResizeRequest{
+		Type: "resize", Cols: 60, Rows: 20,
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	msgs = catcher.get()
+	for _, m := range msgs {
+		if errMsg, ok := m.Msg.(*protocol.ErrorEvent); ok {
+			t.Errorf("unexpected error on duplicate resize: %s", errMsg.Code)
+		}
+	}
+
+	// Clean up
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
 func TestHandler_InputTooLarge(t *testing.T) {
 	h, tc, catcher := testHandler(t)
 	sessionName := "input-limit-test"
@@ -505,7 +583,7 @@ func TestHandler_PeerDisconnected(t *testing.T) {
 	}
 }
 
-func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
+func TestHandler_AttachReattachInitialContent(t *testing.T) {
 	h, tc, catcher := testHandler(t)
 
 	_, err := tc.CreateSession("reattach-test", "")
@@ -525,7 +603,9 @@ func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// First attach — should receive initial content
+	// First attach (fresh) — should NOT receive initial content.
+	// The resize triggers SIGWINCH which re-renders the prompt at the correct
+	// width; that output arrives via the pipe-pane stream, not capture-pane.
 	h.HandleMessage("peer1", &protocol.AttachRequest{
 		Type:   "attach",
 		PaneID: paneID,
@@ -538,15 +618,10 @@ func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	msgs := catcher.get()
-	hasOutput := false
 	for _, m := range msgs {
 		if _, ok := m.Msg.(*protocol.OutputEvent); ok {
-			hasOutput = true
-			break
+			t.Fatal("did not expect initial OutputEvent on fresh attach")
 		}
-	}
-	if !hasOutput {
-		t.Fatal("expected initial OutputEvent on first attach")
 	}
 
 	// Detach
@@ -558,7 +633,8 @@ func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
 	catcher.messages = nil
 	catcher.mu.Unlock()
 
-	// Reattach with reattach=true — should NOT receive initial content
+	// Reattach with reattach=true — SHOULD receive initial content so the
+	// mobile can restore the buffer from where it left off.
 	h.HandleMessage("peer1", &protocol.AttachRequest{
 		Type:     "attach",
 		PaneID:   paneID,
@@ -567,15 +643,20 @@ func TestHandler_AttachReattachSkipsInitialContent(t *testing.T) {
 		Reattach: true,
 	})
 
-	// Wait for attached confirmation and give time for any initial content
+	// Wait for attached confirmation and give time for initial content
 	catcher.waitFor(t, "attached", 2*time.Second)
 	time.Sleep(200 * time.Millisecond)
 
 	reattachMsgs := catcher.get()
+	hasOutput := false
 	for _, m := range reattachMsgs {
 		if _, ok := m.Msg.(*protocol.OutputEvent); ok {
-			t.Error("did not expect initial OutputEvent on reattach")
+			hasOutput = true
+			break
 		}
+	}
+	if !hasOutput {
+		t.Error("expected initial OutputEvent on reattach")
 	}
 
 	// Should still have attached event

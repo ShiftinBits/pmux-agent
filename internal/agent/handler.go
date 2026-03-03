@@ -42,10 +42,11 @@ type Handler struct {
 	ctx          context.Context // agent lifecycle context
 
 	mu           sync.Mutex
-	bridges      map[string]*tmux.PaneBridge // per-peer attached bridge
+	bridges      map[string]*tmux.PaneBridge  // per-peer attached bridge
 	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
-	paneForPeer  map[string]string           // peerID -> paneID (for restore on detach)
-	lastPingTime map[string]time.Time        // peerID -> last ping received
+	paneForPeer  map[string]string            // peerID -> paneID (for restore on detach)
+	lastPingTime map[string]time.Time         // peerID -> last ping received
+	lastDims     map[string][2]int            // peerID -> [cols, rows] to skip redundant resizes
 }
 
 // NewHandler creates a protocol message handler.
@@ -60,6 +61,7 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Ha
 		cancels:      make(map[string]context.CancelFunc),
 		paneForPeer:  make(map[string]string),
 		lastPingTime: make(map[string]time.Time),
+		lastDims:     make(map[string][2]int),
 	}
 }
 
@@ -211,27 +213,29 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	// Detach from any existing pane first
 	h.detachPeer(peerID)
 
-	// Track attach and resize for mobile.
-	// On success, pass 0,0 to AttachPane so it skips its redundant resize.
-	// On failure, pass the real dimensions so AttachPane resizes as fallback.
+	// Resize the pane's window to mobile dimensions BEFORE opening the bridge.
+	// This ensures the SIGWINCH re-render happens while pipe-pane is NOT active,
+	// so the escape-sequence-heavy re-render (with cursor positioning relative
+	// to the computer's terminal state) is discarded. The shell ends up at the
+	// correct mobile width, and all future output via pipe-pane will be rendered
+	// at that width without staircase artifacts.
 	sizeTracked := false
-	attachCols, attachRows := req.Cols, req.Rows
 	if err := h.sizeTracker.TrackAndResize(req.PaneID, req.Cols, req.Rows); err != nil {
 		h.logger.Warn("failed to track/resize pane", "error", err, "pane", req.PaneID)
 	} else {
-		attachCols, attachRows = 0, 0
 		sizeTracked = true
 	}
 
-	bridge, err := h.tmux.AttachPane(req.PaneID, attachCols, attachRows)
+	bridge, err := h.tmux.AttachPane(req.PaneID, 0, 0)
 	if err != nil {
-		// Clean up size tracking if attach fails to prevent leaked state.
+		h.logger.Debug("attach pane failed", "peer", peerID, "pane", req.PaneID, "error", err)
+
+		// Undo size tracking if we resized but couldn't attach.
 		if sizeTracked {
 			if restoreErr := h.sizeTracker.RestoreIfLast(req.PaneID); restoreErr != nil {
-				h.logger.Warn("failed to restore pane size after attach failure", "error", restoreErr, "pane", req.PaneID)
+				h.logger.Warn("failed to restore pane size after attach failure", "error", restoreErr)
 			}
 		}
-		h.logger.Debug("attach pane failed", "peer", peerID, "pane", req.PaneID, "error", err)
 
 		// If the pane no longer exists, send pane_closed + fresh sessions
 		// instead of a generic attach_failed. This handles the case where a
@@ -266,6 +270,7 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	h.bridges[peerID] = bridge
 	h.cancels[peerID] = cancel
 	h.paneForPeer[peerID] = req.PaneID
+	h.lastDims[peerID] = [2]int{req.Cols, req.Rows}
 	h.mu.Unlock()
 
 	// Send attached confirmation
@@ -274,8 +279,12 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		PaneID: req.PaneID,
 	})
 
-	// Send initial pane content (skip on reattach — mobile already has buffer)
-	if !req.Reattach {
+	// Skip initial capture-pane content on fresh attach — the captured buffer
+	// contains prompts reflowed from the computer's wider terminal, producing
+	// staircase indentation. The shell is already at the correct mobile width
+	// (resized above), so all new output via pipe-pane will render correctly.
+	// On reattach, send initial content so the mobile can restore its buffer.
+	if req.Reattach {
 		if initial := bridge.InitialContent(); initial != "" {
 			h.sendMsg(peerID, &protocol.OutputEvent{
 				Type: "output",
@@ -330,6 +339,7 @@ func (h *Handler) handleResize(peerID string, req *protocol.ResizeRequest) {
 
 	h.mu.Lock()
 	bridge := h.bridges[peerID]
+	last := h.lastDims[peerID]
 	h.mu.Unlock()
 
 	if bridge == nil {
@@ -337,10 +347,21 @@ func (h *Handler) handleResize(peerID string, req *protocol.ResizeRequest) {
 		return
 	}
 
+	// Skip resize when dimensions are unchanged to avoid unnecessary
+	// tmux resize-window calls and SIGWINCH signals.
+	if last[0] == req.Cols && last[1] == req.Rows {
+		return
+	}
+
 	if err := bridge.Resize(req.Cols, req.Rows); err != nil {
 		h.logger.Debug("resize failed", "peer", peerID, "error", err)
 		h.sendError(peerID, "resize_failed", "failed to resize pane")
+		return
 	}
+
+	h.mu.Lock()
+	h.lastDims[peerID] = [2]int{req.Cols, req.Rows}
+	h.mu.Unlock()
 }
 
 func (h *Handler) handlePing(peerID string) {
@@ -501,6 +522,7 @@ func (h *Handler) detachPeer(peerID string) {
 		delete(h.bridges, peerID)
 		delete(h.cancels, peerID)
 		delete(h.paneForPeer, peerID)
+		delete(h.lastDims, peerID)
 	}
 	h.mu.Unlock()
 
