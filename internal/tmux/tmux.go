@@ -261,16 +261,6 @@ func (c *Client) KillSession(session string) error {
 	return nil
 }
 
-// ResizePane resizes a tmux pane to the given dimensions.
-// For a single-pane window, use ResizeWindow instead (pane fills window).
-func (c *Client) ResizePane(paneID string, cols, rows int) error {
-	out, err := c.run("resize-pane", "-t", paneID, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
-	if err != nil {
-		return fmt.Errorf("resize-pane: %w: %s", err, out)
-	}
-	return nil
-}
-
 // ResizeWindow resizes a tmux window to the given dimensions.
 // This is the preferred way to resize when a mobile client connects,
 // as the single pane fills the entire window.

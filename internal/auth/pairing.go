@@ -34,14 +34,6 @@ type PairedDevice struct {
 	LastSeen int64 `json:"lastSeen,omitempty"`
 }
 
-// QRPayload holds the data encoded in the pairing QR code.
-type QRPayload struct {
-	PairingCode       string
-	HostX25519PubKey  string
-	HostDeviceID      string
-	ServerURL         string
-}
-
 // GenerateX25519Keypair creates a new ephemeral X25519 keypair for pairing.
 func GenerateX25519Keypair() (*X25519Keypair, error) {
 	curve := ecdh.X25519()

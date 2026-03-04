@@ -438,8 +438,8 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	path := filepath.Join(dir, "config.toml")
 
 	want := Config{Name: "my-workstation"}
-	if err := SaveConfig(path, want); err != nil {
-		t.Fatalf("SaveConfig() error: %v", err)
+	if err := saveConfig(path, want); err != nil {
+		t.Fatalf("saveConfig() error: %v", err)
 	}
 
 	got, err := LoadConfig(path)
@@ -451,12 +451,12 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	}
 }
 
-func TestSaveConfig_FilePermissions(t *testing.T) {
+func TestSaveConfigFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	if err := SaveConfig(path, Config{Name: "test"}); err != nil {
-		t.Fatalf("SaveConfig() error: %v", err)
+	if err := saveConfig(path, Config{Name: "test"}); err != nil {
+		t.Fatalf("saveConfig() error: %v", err)
 	}
 
 	info, err := os.Stat(path)

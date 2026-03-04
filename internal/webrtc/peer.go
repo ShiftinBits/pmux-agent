@@ -242,23 +242,6 @@ func (pm *PeerManager) PeerStates() map[string]string {
 	return states
 }
 
-// BroadcastRaw sends raw bytes to all connected peers' DataChannels.
-// Errors on individual peers are logged but do not stop the broadcast.
-func (pm *PeerManager) BroadcastRaw(data []byte) {
-	pm.mu.Lock()
-	peers := make([]*Peer, 0, len(pm.peers))
-	for _, p := range pm.peers {
-		peers = append(peers, p)
-	}
-	pm.mu.Unlock()
-
-	for _, p := range peers {
-		if err := p.SendRaw(data); err != nil {
-			pm.logger.Debug("broadcast send failed", "peer", p.DeviceID, "error", err)
-		}
-	}
-}
-
 // SendTo sends a protocol message to a specific peer via their DataChannel.
 func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 	pm.mu.Lock()
