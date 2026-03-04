@@ -3,14 +3,17 @@ package auth
 import (
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
+	"golang.org/x/crypto/hkdf"
 )
 
 // X25519Keypair holds an ephemeral X25519 keypair for key exchange during pairing.
@@ -72,12 +75,20 @@ func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, e
 		return "", fmt.Errorf("parse peer X25519 public key: %w", err)
 	}
 
-	secret, err := kp.PrivateKey.ECDH(peerPub)
+	raw, err := kp.PrivateKey.ECDH(peerPub)
 	if err != nil {
 		return "", fmt.Errorf("compute X25519 shared secret: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(secret), nil
+	// Derive key material using HKDF (RFC 5869) — raw X25519 output
+	// is not uniformly distributed and should never be used directly.
+	hkdfReader := hkdf.New(sha256.New, raw, nil, []byte("pocketmux-pairing-v1"))
+	derived := make([]byte, 32)
+	if _, err := io.ReadFull(hkdfReader, derived); err != nil {
+		return "", fmt.Errorf("derive shared secret via HKDF: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(derived), nil
 }
 
 // BuildQRPayload creates a pipe-delimited payload for the pairing QR code.

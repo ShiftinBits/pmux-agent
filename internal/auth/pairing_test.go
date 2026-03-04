@@ -104,6 +104,24 @@ func TestComputeSharedSecret(t *testing.T) {
 			t.Error("expected error for wrong key size")
 		}
 	})
+
+	t.Run("output differs from raw ECDH (HKDF applied)", func(t *testing.T) {
+		derived, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
+		if err != nil {
+			t.Fatalf("ComputeSharedSecret() error: %v", err)
+		}
+
+		// Compute raw ECDH directly (without HKDF)
+		peerBytes, _ := base64.StdEncoding.DecodeString(bob.PublicKeyBase64())
+		curve := alice.PrivateKey.Curve()
+		peerPub, _ := curve.NewPublicKey(peerBytes)
+		raw, _ := alice.PrivateKey.ECDH(peerPub)
+		rawB64 := base64.StdEncoding.EncodeToString(raw)
+
+		if derived == rawB64 {
+			t.Error("derived secret should differ from raw ECDH output (HKDF not applied)")
+		}
+	})
 }
 
 func TestBuildQRPayload(t *testing.T) {
