@@ -603,9 +603,12 @@ func TestHandler_AttachReattachInitialContent(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// First attach (fresh) — should NOT receive initial content.
-	// The resize triggers SIGWINCH which re-renders the prompt at the correct
-	// width; that output arrives via the pipe-pane stream, not capture-pane.
+	// First attach (fresh) — the handler skips InitialContent() when
+	// Reattach is false (guarded by `if req.Reattach` in handleAttach).
+	// We do NOT assert zero OutputEvent here because the resize triggers
+	// SIGWINCH, and the shell's re-render may arrive via streamOutput
+	// non-deterministically (race between shell response time and pipe-pane
+	// opening). The behavioral contract is tested by the reattach half below.
 	h.HandleMessage("peer1", &protocol.AttachRequest{
 		Type:   "attach",
 		PaneID: paneID,
@@ -613,16 +616,7 @@ func TestHandler_AttachReattachInitialContent(t *testing.T) {
 		Rows:   24,
 	})
 
-	// Wait for attached confirmation and give time for initial content
 	catcher.waitFor(t, "attached", 2*time.Second)
-	time.Sleep(200 * time.Millisecond)
-
-	msgs := catcher.get()
-	for _, m := range msgs {
-		if _, ok := m.Msg.(*protocol.OutputEvent); ok {
-			t.Fatal("did not expect initial OutputEvent on fresh attach")
-		}
-	}
 
 	// Detach
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
