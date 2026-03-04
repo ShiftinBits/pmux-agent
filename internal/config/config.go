@@ -451,8 +451,8 @@ func (p Paths) EnsureDirs() error {
 	return nil
 }
 
-// SaveConfig writes the config to a TOML file with 0600 permissions.
-func SaveConfig(path string, cfg Config) error {
+// saveConfig writes the config to a TOML file with 0600 permissions.
+func saveConfig(path string, cfg Config) error {
 	data, err := toml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
