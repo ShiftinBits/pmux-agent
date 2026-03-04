@@ -7,9 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -40,8 +40,11 @@ const (
 	// machineIDApp is the application-specific key for HMAC of machine ID.
 	machineIDApp = "pocketmux-agent-v1"
 
-	// fallbackHMACKey is used when no machine ID is available.
-	fallbackHMACKey = "pocketmux-fallback"
+	// fallbackKeyFileName is the file used to store a generated machine ID fallback.
+	fallbackKeyFileName = "machine-id.key"
+
+	// fallbackKeySize is the size of the generated fallback key in bytes.
+	fallbackKeySize = 32
 )
 
 // FileSecretStore stores secrets in an encrypted file on disk.
@@ -173,7 +176,7 @@ func (f *FileSecretStore) encrypt() ([]byte, error) {
 	}
 
 	// Derive encryption key
-	machineID, err := getMachineID()
+	machineID, err := getMachineID(filepath.Dir(f.filePath))
 	if err != nil {
 		return nil, fmt.Errorf("get machine ID: %w", err)
 	}
@@ -221,7 +224,7 @@ func (f *FileSecretStore) decrypt(data []byte) error {
 	ciphertext := data[1+saltSize+nonceSize:]
 
 	// Derive decryption key
-	machineID, err := getMachineID()
+	machineID, err := getMachineID(filepath.Dir(f.filePath))
 	if err != nil {
 		return fmt.Errorf("get machine ID: %w", err)
 	}
@@ -256,8 +259,8 @@ func deriveKey(machineID []byte, salt []byte) []byte {
 
 // getMachineID returns a machine-bound identifier for key derivation.
 // It tries platform-specific sources in order of preference, falling back to
-// a weaker hostname+UID-based identifier if no machine ID is available.
-func getMachineID() ([]byte, error) {
+// a random persistent key if no machine ID is available.
+func getMachineID(keysDir string) ([]byte, error) {
 	// Try platform-specific machine ID sources
 	id, err := readMachineID()
 	if err == nil && len(id) > 0 {
@@ -265,19 +268,46 @@ func getMachineID() ([]byte, error) {
 		return hmacSHA256(id, machineIDApp), nil
 	}
 
-	// Fallback: hostname + user ID
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, fmt.Errorf("no machine ID and hostname unavailable: %w", err)
+	// Fallback: generate and persist a random key
+	return fallbackMachineID(keysDir)
+}
+
+// fallbackMachineID generates or reads a persistent random key used when no
+// platform machine ID is available. The key is stored at keysDir/machine-id.key
+// with mode 0600.
+func fallbackMachineID(keysDir string) ([]byte, error) {
+	keyPath := filepath.Join(keysDir, "machine-id.key")
+
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
+		if len(data) != fallbackKeySize {
+			return nil, fmt.Errorf("corrupt fallback machine ID key at %s: expected %d bytes, got %d", keyPath, fallbackKeySize, len(data))
+		}
+		return hmacSHA256(data, machineIDApp), nil
 	}
 
-	u, err := user.Current()
-	if err != nil {
-		return nil, fmt.Errorf("no machine ID and user unavailable: %w", err)
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read fallback machine ID key: %w", err)
 	}
 
-	fallbackInput := []byte(hostname + ":" + u.Uid)
-	return hmacSHA256(fallbackInput, fallbackHMACKey), nil
+	// Generate new random key
+	key := make([]byte, fallbackKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate fallback machine ID key: %w", err)
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return nil, fmt.Errorf("create keys directory for fallback key: %w", err)
+	}
+
+	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		return nil, fmt.Errorf("write fallback machine ID key: %w", err)
+	}
+
+	slog.Warn("no platform machine ID available, using generated fallback", "path", keyPath)
+
+	return hmacSHA256(key, machineIDApp), nil
 }
 
 // readMachineID reads the machine ID from platform-specific sources.

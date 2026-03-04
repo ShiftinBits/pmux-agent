@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -211,4 +214,84 @@ func TestNewSecretStore_InvalidBackend(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid backend, got nil")
 	}
+}
+
+func TestFallbackMachineID(t *testing.T) {
+	t.Run("generates and persists a 32-byte key", func(t *testing.T) {
+		dir := t.TempDir()
+
+		id1, err := fallbackMachineID(dir)
+		if err != nil {
+			t.Fatalf("fallbackMachineID() error: %v", err)
+		}
+		if len(id1) == 0 {
+			t.Fatal("fallbackMachineID() returned empty result")
+		}
+
+		// Verify the key file exists with correct size
+		keyPath := filepath.Join(dir, "machine-id.key")
+		data, err := os.ReadFile(keyPath)
+		if err != nil {
+			t.Fatalf("reading key file: %v", err)
+		}
+		if len(data) != 32 {
+			t.Errorf("key file size = %d, want 32", len(data))
+		}
+
+		// Verify file permissions (Unix only)
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			t.Fatalf("stat key file: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("key file permissions = %o, want 0600", perm)
+		}
+	})
+
+	t.Run("returns same value on subsequent calls", func(t *testing.T) {
+		dir := t.TempDir()
+
+		id1, err := fallbackMachineID(dir)
+		if err != nil {
+			t.Fatalf("first call error: %v", err)
+		}
+
+		id2, err := fallbackMachineID(dir)
+		if err != nil {
+			t.Fatalf("second call error: %v", err)
+		}
+
+		if !bytes.Equal(id1, id2) {
+			t.Error("fallbackMachineID() returned different values on subsequent calls")
+		}
+	})
+
+	t.Run("rejects corrupt key file", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Write a key file with wrong size
+		keyPath := filepath.Join(dir, "machine-id.key")
+		if err := os.WriteFile(keyPath, []byte("too-short"), 0600); err != nil {
+			t.Fatalf("writing corrupt key: %v", err)
+		}
+
+		_, err := fallbackMachineID(dir)
+		if err == nil {
+			t.Fatal("expected error for corrupt key file, got nil")
+		}
+	})
+
+	t.Run("creates directory if missing", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "nested", "keys")
+
+		_, err := fallbackMachineID(dir)
+		if err != nil {
+			t.Fatalf("fallbackMachineID() error: %v", err)
+		}
+
+		keyPath := filepath.Join(dir, "machine-id.key")
+		if _, err := os.Stat(keyPath); err != nil {
+			t.Errorf("key file not created at %s: %v", keyPath, err)
+		}
+	})
 }
