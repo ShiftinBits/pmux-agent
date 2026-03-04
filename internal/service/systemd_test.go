@@ -56,6 +56,14 @@ func TestSystemdManager_Install_WritesUnit(t *testing.T) {
 	if !strings.Contains(string(data), "PocketMux Agent") {
 		t.Error("written unit missing description")
 	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat unit: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("unit file permissions = %o, want 0600", info.Mode().Perm())
+	}
 }
 
 func TestSystemdManager_IsInstalled(t *testing.T) {

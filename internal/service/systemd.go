@@ -60,7 +60,7 @@ func (m *systemdManager) writeUnit() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create systemd user directory: %w", err)
 	}
-	return os.WriteFile(path, []byte(m.generateUnit()), 0644)
+	return os.WriteFile(path, []byte(m.generateUnit()), 0600)
 }
 
 func (m *systemdManager) Install() error {
