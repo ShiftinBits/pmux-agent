@@ -33,6 +33,9 @@ func signalActivity(pid int) {
 // Returns nil if the agent is running (or was started successfully).
 // Does nothing if no identity exists (agent can't authenticate without one).
 // If mgr is non-nil and a service is installed, tries the service manager first.
+//
+// Uses flock on the PID file to serialize concurrent callers, preventing
+// duplicate agent spawns from racing pmux commands.
 func EnsureRunning(paths config.Paths, store auth.SecretStore, mgr service.Manager) error {
 	// No identity — agent can't authenticate
 	if !auth.HasIdentity(paths.KeysDir, store) {
@@ -41,9 +44,23 @@ func EnsureRunning(paths config.Paths, store auth.SecretStore, mgr service.Manag
 
 	pidFile := PIDFilePath(paths)
 
-	// TODO: There's a TOCTOU race between the running check and spawn. Two concurrent
-	// pmux commands could both pass the check and spawn two agents. Use file
-	// locking (syscall.Flock) in a future phase to make this atomic.
+	// Open (or create) the PID file for locking. The file must exist before
+	// we can flock it, and we need a read/write handle for both the lock and
+	// the subsequent PID write in spawn.
+	f, err := os.OpenFile(pidFile, os.O_CREATE|os.O_RDWR, pidFilePerms)
+	if err != nil {
+		return fmt.Errorf("open PID file for locking: %w", err)
+	}
+	defer f.Close() // Releases the flock
+
+	// Acquire an exclusive lock. Concurrent callers block here until the
+	// holder releases (via Close). This makes the check-and-spawn atomic.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquire PID file lock: %w", err)
+	}
+
+	// Re-read PID under the lock — another process may have spawned
+	// while we were waiting for the lock.
 	pid, err := ReadPIDFile(pidFile)
 	if err == nil && IsProcessRunning(pid) {
 		signalActivity(pid)
