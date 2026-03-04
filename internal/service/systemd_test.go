@@ -62,7 +62,7 @@ func TestSystemdManager_Install_WritesUnit(t *testing.T) {
 		t.Fatalf("stat unit: %v", err)
 	}
 	if info.Mode().Perm() != 0600 {
-		t.Errorf("unit file permissions = %o, want 0600", info.Mode().Perm())
+		t.Errorf("unit file permissions = %04o, want 0600", info.Mode().Perm())
 	}
 }
 
