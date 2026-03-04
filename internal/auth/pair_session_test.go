@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -30,9 +32,11 @@ func TestInitiatePairing(t *testing.T) {
 			}
 
 			var body struct {
-				DeviceID       string `json:"deviceId"`
-				PublicKey      string `json:"publicKey"`
-				X25519PubKey   string `json:"x25519PublicKey"`
+				DeviceID     string `json:"deviceId"`
+				PublicKey    string `json:"publicKey"`
+				X25519PubKey string `json:"x25519PublicKey"`
+				Timestamp    string `json:"timestamp"`
+				Signature    string `json:"signature"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode request body: %v", err)
@@ -45,6 +49,26 @@ func TestInitiatePairing(t *testing.T) {
 			}
 			if body.X25519PubKey == "" {
 				t.Error("x25519PublicKey is empty")
+			}
+			if body.Timestamp == "" {
+				t.Error("timestamp is empty")
+			}
+			if body.Signature == "" {
+				t.Error("signature is empty")
+			}
+
+			// Verify the signature is correct
+			pubKeyBytes, err := base64.StdEncoding.DecodeString(body.PublicKey)
+			if err != nil {
+				t.Fatalf("decode publicKey: %v", err)
+			}
+			sigBytes, err := base64.StdEncoding.DecodeString(body.Signature)
+			if err != nil {
+				t.Fatalf("decode signature: %v", err)
+			}
+			message := []byte(body.DeviceID + body.Timestamp)
+			if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), message, sigBytes) {
+				t.Error("signature verification failed")
 			}
 
 			w.WriteHeader(http.StatusOK)

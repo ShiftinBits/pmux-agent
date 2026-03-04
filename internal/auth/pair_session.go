@@ -65,16 +65,23 @@ type PairCompleteMessage struct {
 // The name parameter is an optional human-readable host name sent to the server
 // so it can be displayed on paired mobile devices.
 func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client, name string) (*PairInitiateResponse, error) {
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	signature := id.SignChallenge(id.DeviceID, timestamp)
+
 	reqBody := struct {
-		DeviceID       string `json:"deviceId"`
-		PublicKey      string `json:"publicKey"`
-		X25519PubKey   string `json:"x25519PublicKey"`
-		Name           string `json:"name,omitempty"`
+		DeviceID     string `json:"deviceId"`
+		PublicKey    string `json:"publicKey"`
+		X25519PubKey string `json:"x25519PublicKey"`
+		Name         string `json:"name,omitempty"`
+		Timestamp    string `json:"timestamp"`
+		Signature    string `json:"signature"`
 	}{
 		DeviceID:     id.DeviceID,
 		PublicKey:    id.PublicKeyBase64(),
 		X25519PubKey: x25519PubKeyBase64,
 		Name:         name,
+		Timestamp:    timestamp,
+		Signature:    signature,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
