@@ -92,11 +92,9 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 		return nil, fmt.Errorf("start pipe-pane: %w", err)
 	}
 
-	// Resize pane's window if dimensions are specified.
+	// Resize pane if dimensions are specified.
 	if cols > 0 && rows > 0 {
-		if wt, err := c.windowForPane(paneID); err == nil {
-			_ = c.ResizeWindow(wt, cols, rows)
-		}
+		_ = c.ResizePane(paneID, cols, rows)
 	}
 
 	pb := &PaneBridge{
@@ -206,7 +204,8 @@ func (pb *PaneBridge) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// Resize changes the pane dimensions by resizing the containing window.
+// Resize changes the pane dimensions. Only the target pane is resized;
+// other panes in the same window adjust to fill remaining space.
 func (pb *PaneBridge) Resize(cols, rows int) error {
 	pb.mu.Lock()
 	if pb.closed {
@@ -215,11 +214,7 @@ func (pb *PaneBridge) Resize(cols, rows int) error {
 	}
 	pb.mu.Unlock()
 
-	windowTarget, err := pb.client.windowForPane(pb.paneID)
-	if err != nil {
-		return fmt.Errorf("find window for resize: %w", err)
-	}
-	return pb.client.ResizeWindow(windowTarget, cols, rows)
+	return pb.client.ResizePane(pb.paneID, cols, rows)
 }
 
 // Close detaches from the pane, disabling pipe-pane and cleaning up

@@ -5,11 +5,12 @@ import (
 	"sync"
 )
 
-// PaneSizeTracker tracks mobile attach counts per pane and auto-restores
-// the window size when the last mobile client detaches.
+// PaneSizeTracker tracks mobile attach counts per pane and restores
+// original pane dimensions when the last mobile client detaches.
 type PaneSizeTracker struct {
 	mu          sync.Mutex
-	attachCount map[string]int // paneID -> number of mobiles attached
+	attachCount map[string]int    // paneID -> number of mobiles attached
+	origSize    map[string][2]int // paneID -> [cols, rows] before first mobile attach
 	client      *Client
 }
 
@@ -17,22 +18,30 @@ type PaneSizeTracker struct {
 func NewPaneSizeTracker(client *Client) *PaneSizeTracker {
 	return &PaneSizeTracker{
 		attachCount: make(map[string]int),
+		origSize:    make(map[string][2]int),
 		client:      client,
 	}
 }
 
-// TrackAndResize resizes the pane's window to the given mobile dimensions
-// and increments the attach count. The count is only incremented on success
-// so that RestoreIfLast never operates on a phantom attach.
+// TrackAndResize resizes the target pane to the given mobile dimensions
+// and increments the attach count. On first attach, the original pane
+// dimensions are saved for later restoration.
+// The count is only incremented on success so that RestoreIfLast never
+// operates on a phantom attach.
 func (t *PaneSizeTracker) TrackAndResize(paneID string, cols, rows int) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	windowTarget, err := t.client.windowForPane(paneID)
-	if err != nil {
-		return fmt.Errorf("find window for pane: %w", err)
+	// Save original dimensions on first attach
+	if t.attachCount[paneID] == 0 {
+		origCols, origRows, err := t.client.PaneDimensions(paneID)
+		if err != nil {
+			return fmt.Errorf("save original pane size: %w", err)
+		}
+		t.origSize[paneID] = [2]int{origCols, origRows}
 	}
-	if err := t.client.ResizeWindow(windowTarget, cols, rows); err != nil {
+
+	if err := t.client.ResizePane(paneID, cols, rows); err != nil {
 		return err
 	}
 
@@ -40,9 +49,8 @@ func (t *PaneSizeTracker) TrackAndResize(paneID string, cols, rows int) error {
 	return nil
 }
 
-// RestoreIfLast decrements the attach count and auto-resizes the window
-// when the last mobile client detaches. Uses resize-window -A to let tmux
-// adjust the window to the current terminal client's size.
+// RestoreIfLast decrements the attach count and restores the pane to its
+// original dimensions when the last mobile client detaches.
 // Returns nil if the pane was already cleaned up or no longer exists.
 func (t *PaneSizeTracker) RestoreIfLast(paneID string) error {
 	t.mu.Lock()
@@ -60,10 +68,16 @@ func (t *PaneSizeTracker) RestoreIfLast(paneID string) error {
 
 	delete(t.attachCount, paneID)
 
-	windowTarget, err := t.client.windowForPane(paneID)
-	if err != nil {
-		// Pane may have been killed — skip restore
+	orig, hasOrig := t.origSize[paneID]
+	delete(t.origSize, paneID)
+
+	if !hasOrig {
 		return nil
 	}
-	return t.client.ResizeWindowAuto(windowTarget)
+
+	// Restore original pane dimensions. If the pane was killed, ignore the error.
+	if err := t.client.ResizePane(paneID, orig[0], orig[1]); err != nil {
+		return nil //nolint:nilerr // pane may have been killed
+	}
+	return nil
 }

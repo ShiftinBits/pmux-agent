@@ -286,8 +286,6 @@ func (c *Client) KillSession(session string) error {
 }
 
 // ResizeWindow resizes a tmux window to the given dimensions.
-// This is the preferred way to resize when a mobile client connects,
-// as the single pane fills the entire window.
 func (c *Client) ResizeWindow(windowTarget string, cols, rows int) error {
 	out, err := c.run("resize-window", "-t", windowTarget, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
 	if err != nil {
@@ -297,14 +295,79 @@ func (c *Client) ResizeWindow(windowTarget string, cols, rows int) error {
 }
 
 // ResizeWindowAuto tells tmux to auto-adjust a window to fit the currently
-// attached clients. When no mobile is connected, this restores the window
-// to the local terminal's size. Uses the -A flag of resize-window.
+// attached clients. Uses the -A flag of resize-window.
 func (c *Client) ResizeWindowAuto(windowTarget string) error {
 	out, err := c.run("resize-window", "-A", "-t", windowTarget)
 	if err != nil {
 		return fmt.Errorf("resize-window -A: %w: %s", err, out)
 	}
 	return nil
+}
+
+// ResizePane resizes a specific pane to the given dimensions.
+// For multi-pane windows, only the target pane is resized and other panes
+// in the same window adjust to fill remaining space.
+// For single-pane windows, the containing window is resized instead
+// (since the pane fills the window and resize-pane alone cannot shrink it).
+func (c *Client) ResizePane(paneID string, cols, rows int) error {
+	if err := validateTarget(paneID); err != nil {
+		return fmt.Errorf("resize-pane: %w", err)
+	}
+
+	count, err := c.windowPaneCount(paneID)
+	if err != nil {
+		return fmt.Errorf("resize-pane: %w", err)
+	}
+
+	if count <= 1 {
+		// Single pane fills window — resize-pane can't shrink below window size,
+		// so resize the window directly.
+		wt, err := c.windowForPane(paneID)
+		if err != nil {
+			return fmt.Errorf("resize-pane: %w", err)
+		}
+		return c.ResizeWindow(wt, cols, rows)
+	}
+
+	out, err := c.run("resize-pane", "-t", paneID, "-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
+	if err != nil {
+		return fmt.Errorf("resize-pane: %w: %s", err, out)
+	}
+	return nil
+}
+
+// windowPaneCount returns the number of panes in the window containing the given pane.
+func (c *Client) windowPaneCount(paneID string) (int, error) {
+	out, err := c.run("display-message", "-t", paneID, "-p", "#{window_panes}")
+	if err != nil {
+		return 0, fmt.Errorf("window pane count: %w: %s", err, out)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("window pane count: parse error: %q", out)
+	}
+	return n, nil
+}
+
+// PaneDimensions returns the current (cols, rows) of a pane.
+func (c *Client) PaneDimensions(paneID string) (int, int, error) {
+	if err := validateTarget(paneID); err != nil {
+		return 0, 0, fmt.Errorf("pane-dimensions: %w", err)
+	}
+	out, err := c.run("display-message", "-t", paneID, "-p", "#{pane_width}:#{pane_height}")
+	if err != nil {
+		return 0, 0, fmt.Errorf("pane-dimensions: %w: %s", err, out)
+	}
+	parts := strings.SplitN(strings.TrimSpace(out), ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("pane-dimensions: unexpected output: %q", out)
+	}
+	cols, err1 := strconv.Atoi(parts[0])
+	rows, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, fmt.Errorf("pane-dimensions: parse error: %q", out)
+	}
+	return cols, rows, nil
 }
 
 // SendKeys sends literal input to a tmux pane using the -l flag.

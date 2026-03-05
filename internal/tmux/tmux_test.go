@@ -295,6 +295,67 @@ func TestResizeWindow(t *testing.T) {
 	}
 }
 
+func TestResizePane(t *testing.T) {
+	c := testClient(t)
+
+	_, err := c.CreateSession("resize-pane-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession() error: %v", err)
+	}
+
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() error: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	if err := c.ResizePane(paneID, 50, 15); err != nil {
+		t.Fatalf("ResizePane() error: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	sessions, err = c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() after resize error: %v", err)
+	}
+	pane := sessions[0].Windows[0].Panes[0]
+	if pane.Size.Cols != 50 {
+		t.Errorf("cols = %d, want 50", pane.Size.Cols)
+	}
+	if pane.Size.Rows != 15 {
+		t.Errorf("rows = %d, want 15", pane.Size.Rows)
+	}
+}
+
+func TestPaneDimensions(t *testing.T) {
+	c := testClient(t)
+
+	_, err := c.CreateSession("dims-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession() error: %v", err)
+	}
+
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() error: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+	expectedCols := sessions[0].Windows[0].Panes[0].Size.Cols
+	expectedRows := sessions[0].Windows[0].Panes[0].Size.Rows
+
+	cols, rows, err := c.PaneDimensions(paneID)
+	if err != nil {
+		t.Fatalf("PaneDimensions() error: %v", err)
+	}
+	if cols != expectedCols {
+		t.Errorf("cols = %d, want %d", cols, expectedCols)
+	}
+	if rows != expectedRows {
+		t.Errorf("rows = %d, want %d", rows, expectedRows)
+	}
+}
+
 func TestClient_ResizeWindowAuto(t *testing.T) {
 	skipIfNoTmux(t)
 	tc := testClient(t)
