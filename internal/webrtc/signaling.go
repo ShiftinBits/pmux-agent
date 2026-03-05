@@ -68,8 +68,8 @@ type SignalingClient struct {
 	logger    *slog.Logger
 	handler   MessageHandler
 
-	// HostName is the host's display name sent in WebSocket auth messages.
-	HostName string
+	// hostName is the host's display name sent in WebSocket auth messages.
+	hostName string
 
 	// PresenceInterval controls how often heartbeats are sent. Defaults to 30s.
 	PresenceInterval time.Duration
@@ -101,7 +101,7 @@ func NewSignalingClient(identity *auth.Identity, serverURL string, hostName stri
 		serverURL:        strings.TrimRight(serverURL, "/"),
 		handler:          handler,
 		logger:           logger,
-		HostName:         hostName,
+		hostName:         hostName,
 		PresenceInterval: DefaultPresenceInterval,
 		activitySignal:   make(chan struct{}, 1),
 		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
@@ -322,7 +322,7 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn) error {
 	jwt := sc.jwt
 	sc.mu.Unlock()
 
-	authMsg := SignalingMessage{Type: "auth", Token: jwt, Name: sc.HostName}
+	authMsg := SignalingMessage{Type: "auth", Token: jwt, Name: sc.hostName}
 	data, err := json.Marshal(authMsg)
 	if err != nil {
 		return fmt.Errorf("marshal auth message: %w", err)
