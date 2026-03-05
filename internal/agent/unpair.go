@@ -10,10 +10,10 @@ import (
 
 // RunUnpair removes the paired mobile device after confirmation.
 //
-// TODO: When the agent is running, closing the DataChannel to the unpaired
-// device and notifying the signaling server would give immediate feedback.
-// For now, the device is only removed from local storage; the agent will
-// reject messages from the device on its next connection attempt.
+// Known limitation: unpair only removes the device from local storage.
+// The agent will reject messages from the device on its next connection
+// attempt. Actively closing the DataChannel and notifying the signaling
+// server is tracked in SB-357.
 func RunUnpair(pairedDevicesPath string, store auth.SecretStore, r io.Reader, w io.Writer) error {
 	device, err := auth.LoadPairedDevice(pairedDevicesPath, store)
 	if err != nil {
