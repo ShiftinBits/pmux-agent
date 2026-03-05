@@ -24,13 +24,13 @@ func TestGenerateIdentity(t *testing.T) {
 		if len(id.PrivateKey) != ed25519.PrivateKeySize {
 			t.Errorf("private key size = %d, want %d", len(id.PrivateKey), ed25519.PrivateKeySize)
 		}
-		if len(id.PublicKey) != ed25519.PublicKeySize {
-			t.Errorf("public key size = %d, want %d", len(id.PublicKey), ed25519.PublicKeySize)
+		if len(id.Ed25519PublicKey) != ed25519.PublicKeySize {
+			t.Errorf("public key size = %d, want %d", len(id.Ed25519PublicKey), ed25519.PublicKeySize)
 		}
 	})
 
 	t.Run("derives device ID from public key", func(t *testing.T) {
-		hash := sha256.Sum256(id.PublicKey)
+		hash := sha256.Sum256(id.Ed25519PublicKey)
 		expected := hex.EncodeToString(hash[:16])
 		if id.DeviceID != expected {
 			t.Errorf("DeviceID = %q, want %q", id.DeviceID, expected)
@@ -90,7 +90,7 @@ func TestLoadIdentity(t *testing.T) {
 		if !original.PrivateKey.Equal(loaded.PrivateKey) {
 			t.Error("loaded private key does not match original")
 		}
-		if !original.PublicKey.Equal(loaded.PublicKey) {
+		if !original.Ed25519PublicKey.Equal(loaded.Ed25519PublicKey) {
 			t.Error("loaded public key does not match original")
 		}
 	})
@@ -224,7 +224,7 @@ func TestSignChallenge(t *testing.T) {
 	t.Run("signature verifies with public key", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
 		message := []byte(deviceID + timestamp)
-		if !ed25519.Verify(id.PublicKey, message, sigBytes) {
+		if !ed25519.Verify(id.Ed25519PublicKey, message, sigBytes) {
 			t.Error("signature verification failed")
 		}
 	})
@@ -232,7 +232,7 @@ func TestSignChallenge(t *testing.T) {
 	t.Run("signature fails with wrong message", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
 		wrongMessage := []byte("wrong-device-id" + timestamp)
-		if ed25519.Verify(id.PublicKey, wrongMessage, sigBytes) {
+		if ed25519.Verify(id.Ed25519PublicKey, wrongMessage, sigBytes) {
 			t.Error("signature should not verify with wrong message")
 		}
 	})
@@ -245,7 +245,7 @@ func TestSignChallenge(t *testing.T) {
 	})
 }
 
-func TestPublicKeyBase64(t *testing.T) {
+func TestEd25519PublicKeyBase64(t *testing.T) {
 	keysDir := t.TempDir()
 	store := NewMemorySecretStore()
 	id, err := GenerateIdentity(keysDir, store)
@@ -253,7 +253,7 @@ func TestPublicKeyBase64(t *testing.T) {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
 
-	b64 := id.PublicKeyBase64()
+	b64 := id.Ed25519PublicKeyBase64()
 	decoded, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		t.Fatalf("base64 decode error: %v", err)
@@ -264,7 +264,7 @@ func TestPublicKeyBase64(t *testing.T) {
 	}
 
 	pubKey := ed25519.PublicKey(decoded)
-	if !pubKey.Equal(id.PublicKey) {
+	if !pubKey.Equal(id.Ed25519PublicKey) {
 		t.Error("decoded public key does not match original")
 	}
 }

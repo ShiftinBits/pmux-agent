@@ -33,7 +33,7 @@ func TestInitiatePairing(t *testing.T) {
 
 			var body struct {
 				DeviceID     string `json:"deviceId"`
-				PublicKey    string `json:"publicKey"`
+				Ed25519PublicKey string `json:"ed25519PublicKey"`
 				X25519PubKey string `json:"x25519PublicKey"`
 				Timestamp    string `json:"timestamp"`
 				Signature    string `json:"signature"`
@@ -44,8 +44,8 @@ func TestInitiatePairing(t *testing.T) {
 			if body.DeviceID != id.DeviceID {
 				t.Errorf("deviceId = %q, want %q", body.DeviceID, id.DeviceID)
 			}
-			if body.PublicKey == "" {
-				t.Error("publicKey is empty")
+			if body.Ed25519PublicKey == "" {
+				t.Error("ed25519PublicKey is empty")
 			}
 			if body.X25519PubKey == "" {
 				t.Error("x25519PublicKey is empty")
@@ -58,7 +58,7 @@ func TestInitiatePairing(t *testing.T) {
 			}
 
 			// Verify the signature is correct
-			pubKeyBytes, err := base64.StdEncoding.DecodeString(body.PublicKey)
+			pubKeyBytes, err := base64.StdEncoding.DecodeString(body.Ed25519PublicKey)
 			if err != nil {
 				t.Fatalf("decode publicKey: %v", err)
 			}

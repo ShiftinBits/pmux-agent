@@ -21,9 +21,9 @@ const (
 
 // Identity holds an Ed25519 keypair and the derived device ID.
 type Identity struct {
-	PrivateKey ed25519.PrivateKey
-	PublicKey  ed25519.PublicKey
-	DeviceID   string // hex-encoded SHA-256 fingerprint of public key (first 16 bytes)
+	PrivateKey       ed25519.PrivateKey
+	Ed25519PublicKey ed25519.PublicKey
+	DeviceID         string // hex-encoded SHA-256 fingerprint of public key (first 16 bytes)
 }
 
 // GenerateIdentity creates a new Ed25519 keypair, stores the private key in the
@@ -35,9 +35,9 @@ func GenerateIdentity(keysDir string, store SecretStore) (*Identity, error) {
 	}
 
 	id := &Identity{
-		PrivateKey: priv,
-		PublicKey:  pub,
-		DeviceID:   deriveDeviceID(pub),
+		PrivateKey:       priv,
+		Ed25519PublicKey: pub,
+		DeviceID:         deriveDeviceID(pub),
 	}
 
 	// Store private key in the secure store
@@ -87,9 +87,9 @@ func LoadIdentity(keysDir string, store SecretStore, logger *slog.Logger) (*Iden
 	pub := ed25519.PublicKey(pubBytes)
 
 	return &Identity{
-		PrivateKey: priv,
-		PublicKey:  pub,
-		DeviceID:   deriveDeviceID(pub),
+		PrivateKey:       priv,
+		Ed25519PublicKey: pub,
+		DeviceID:         deriveDeviceID(pub),
 	}, nil
 }
 
@@ -138,9 +138,9 @@ func (id *Identity) SignChallenge(deviceID string, timestamp string) string {
 	return base64.StdEncoding.EncodeToString(sig)
 }
 
-// PublicKeyBase64 returns the base64-encoded public key for server registration.
-func (id *Identity) PublicKeyBase64() string {
-	return base64.StdEncoding.EncodeToString(id.PublicKey)
+// Ed25519PublicKeyBase64 returns the base64-encoded Ed25519 public key for server registration.
+func (id *Identity) Ed25519PublicKeyBase64() string {
+	return base64.StdEncoding.EncodeToString(id.Ed25519PublicKey)
 }
 
 // deriveDeviceID computes a hex-encoded fingerprint from an Ed25519 public key.
