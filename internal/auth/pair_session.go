@@ -69,19 +69,19 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 	signature := id.SignChallenge(id.DeviceID, timestamp)
 
 	reqBody := struct {
-		DeviceID     string `json:"deviceId"`
+		DeviceID         string `json:"deviceId"`
 		Ed25519PublicKey string `json:"ed25519PublicKey"`
-		X25519PubKey string `json:"x25519PublicKey"`
-		Name         string `json:"name,omitempty"`
-		Timestamp    string `json:"timestamp"`
-		Signature    string `json:"signature"`
+		X25519PubKey     string `json:"x25519PublicKey"`
+		Name             string `json:"name,omitempty"`
+		Timestamp        string `json:"timestamp"`
+		Signature        string `json:"signature"`
 	}{
-		DeviceID:     id.DeviceID,
+		DeviceID:         id.DeviceID,
 		Ed25519PublicKey: id.Ed25519PublicKeyBase64(),
-		X25519PubKey: x25519PubKeyBase64,
-		Name:         name,
-		Timestamp:    timestamp,
-		Signature:    signature,
+		X25519PubKey:     x25519PubKeyBase64,
+		Name:             name,
+		Timestamp:        timestamp,
+		Signature:        signature,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {

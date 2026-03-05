@@ -21,9 +21,9 @@ const (
 
 // Identity holds an Ed25519 keypair and the derived device ID.
 type Identity struct {
-	PrivateKey ed25519.PrivateKey
+	PrivateKey       ed25519.PrivateKey
 	Ed25519PublicKey ed25519.PublicKey
-	DeviceID   string // hex-encoded SHA-256 fingerprint of public key (first 16 bytes)
+	DeviceID         string // hex-encoded SHA-256 fingerprint of public key (first 16 bytes)
 }
 
 // GenerateIdentity creates a new Ed25519 keypair, stores the private key in the
@@ -35,9 +35,9 @@ func GenerateIdentity(keysDir string, store SecretStore) (*Identity, error) {
 	}
 
 	id := &Identity{
-		PrivateKey: priv,
+		PrivateKey:       priv,
 		Ed25519PublicKey: pub,
-		DeviceID:   deriveDeviceID(pub),
+		DeviceID:         deriveDeviceID(pub),
 	}
 
 	// Store private key in the secure store
@@ -87,9 +87,9 @@ func LoadIdentity(keysDir string, store SecretStore, logger *slog.Logger) (*Iden
 	pub := ed25519.PublicKey(pubBytes)
 
 	return &Identity{
-		PrivateKey: priv,
+		PrivateKey:       priv,
 		Ed25519PublicKey: pub,
-		DeviceID:   deriveDeviceID(pub),
+		DeviceID:         deriveDeviceID(pub),
 	}, nil
 }
 
