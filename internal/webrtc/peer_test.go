@@ -575,7 +575,7 @@ func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
 	pm.API = fastAPI(t)
-	pm.AllowedDeviceID = "paired-device-123"
+	pm.SetAllowedDeviceID("paired-device-123")
 
 	// Attempt connection from a different (unpaired) device
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "rogue-device-456"})

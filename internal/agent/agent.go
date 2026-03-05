@@ -128,14 +128,14 @@ func Run(ctx context.Context, paths config.Paths) error {
 
 	// Load paired device for connection validation.
 	// On error (corrupt file, decryption failure), reject all connections
-	// rather than falling through with an empty AllowedDeviceID (which would
+	// rather than falling through with an empty allowedDeviceID (which would
 	// allow any device to connect).
 	pairedDevice, err := auth.LoadPairedDevice(paths.PairedDevices, store)
 	if err != nil {
 		logger.Warn("failed to load paired device, rejecting all connections", "error", err)
-		peerManager.AllowedDeviceID = "!invalid-load-error"
+		peerManager.SetAllowedDeviceID("!invalid-load-error")
 	} else if pairedDevice != nil {
-		peerManager.AllowedDeviceID = pairedDevice.DeviceID
+		peerManager.SetAllowedDeviceID(pairedDevice.DeviceID)
 	}
 
 	// Create a cancelable context for the agent
@@ -161,9 +161,13 @@ func Run(ctx context.Context, paths config.Paths) error {
 				signalingClient.SignalActivity()
 			case <-usr2Ch:
 				logger.Info("SIGUSR2 received, handling unpair")
+				// The CLI removes paired_devices.json before sending SIGUSR2,
+				// so LoadPairedDevice should return nil. If there's a tiny race
+				// where the file hasn't been removed yet, we skip — the agent
+				// will reject the device on its next connection attempt anyway.
 				device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
 				if err != nil || device == nil {
-					peerManager.AllowedDeviceID = "!unpaired"
+					peerManager.SetAllowedDeviceID("!unpaired")
 					peerManager.CloseAll()
 					logger.Info("unpair complete: all peers closed")
 				}

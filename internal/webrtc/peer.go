@@ -78,9 +78,10 @@ type PeerManager struct {
 	// Defaults to 1 (single-pairing mode). Set after construction to override.
 	MaxPeers int
 
-	// AllowedDeviceID is the single paired mobile device ID.
+	// allowedDeviceID is the single paired mobile device ID.
 	// When set, only this device is allowed to connect; others are rejected.
-	AllowedDeviceID string
+	// Access via SetAllowedDeviceID/getAllowedDeviceID for thread safety.
+	allowedDeviceID string
 
 	// OnPeerDisconnect is called when a peer connection enters a terminal state
 	// (Failed or Closed). Set by agent.go to point at Handler.PeerDisconnected,
@@ -110,6 +111,21 @@ type Peer struct {
 	closed    bool
 	sendReady chan struct{} // signaled by OnBufferedAmountLow when buffer drains
 	done      chan struct{} // closed by Close() to unblock waitForSendReady
+}
+
+// SetAllowedDeviceID updates the allowed device ID under the mutex.
+// Safe to call from any goroutine (e.g., SIGUSR2 handler).
+func (pm *PeerManager) SetAllowedDeviceID(id string) {
+	pm.mu.Lock()
+	pm.allowedDeviceID = id
+	pm.mu.Unlock()
+}
+
+// getAllowedDeviceID returns the allowed device ID under the mutex.
+func (pm *PeerManager) getAllowedDeviceID() string {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.allowedDeviceID
 }
 
 // NewPeerManager creates a manager for WebRTC peer connections.
@@ -260,9 +276,10 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
 
 	// Validate device is the paired device
-	if pm.AllowedDeviceID != "" && mobileDeviceID != pm.AllowedDeviceID {
+	allowedID := pm.getAllowedDeviceID()
+	if allowedID != "" && mobileDeviceID != allowedID {
 		pm.logger.Warn("connection rejected: device not paired",
-			"mobile", mobileDeviceID, "expected", pm.AllowedDeviceID)
+			"mobile", mobileDeviceID, "expected", allowedID)
 		if err := pm.signaling.Send(SignalingMessage{
 			Type:           "connection_rejected",
 			Reason:         "not_paired",
