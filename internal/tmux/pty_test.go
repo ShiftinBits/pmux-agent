@@ -7,6 +7,30 @@ import (
 	"time"
 )
 
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple path", "/tmp/pmux-bridge-123/output", "'/tmp/pmux-bridge-123/output'"},
+		{"path with spaces", "/tmp/my dir/output", "'/tmp/my dir/output'"},
+		{"path with single quote", "/tmp/it's/output", "'/tmp/it'\\''s/output'"},
+		{"path with dollar expansion", "/tmp/$(rm -rf)/output", "'/tmp/$(rm -rf)/output'"},
+		{"path with backticks", "/tmp/`whoami`/output", "'/tmp/`whoami`/output'"},
+		{"empty string", "", "''"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // readUntil reads from the bridge until the target string appears or timeout.
 func readUntil(t *testing.T, bridge *PaneBridge, target string, timeout time.Duration) string {
 	t.Helper()

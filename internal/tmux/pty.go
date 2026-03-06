@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+// shellQuote wraps s in POSIX single quotes, escaping any embedded
+// single quotes with the '\'' idiom. The result is safe to embed as a
+// single token in a shell command string.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // PaneBridge provides a bidirectional byte stream to a tmux pane.
 // Output is streamed via tmux pipe-pane through a FIFO, and input
 // is sent via tmux send-keys -l.
@@ -81,10 +88,12 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 
 	// Start pipe-pane to stream pane output to our FIFO.
 	// -o means output only (not input echo).
-	// Shell-escape the FIFO path to handle any special characters.
-	escapedPath := strings.ReplaceAll(fifoPath, "'", "'\\''")
+	// The FIFO path is passed as a positional argument ($0) to an inner
+	// sh -c, so it is never interpreted as shell syntax — only as data.
+	// This prevents command injection even if the path contained $(...)
+	// or backtick sequences.
 	if _, err := c.run("pipe-pane", "-t", paneID, "-o",
-		fmt.Sprintf("exec cat > '%s'", escapedPath)); err != nil {
+		fmt.Sprintf("exec sh -c 'cat > \"$0\"' %s", shellQuote(fifoPath))); err != nil {
 		pipeR.Close()
 		pipeW.Close()
 		syscall.Close(fd)
