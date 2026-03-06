@@ -51,10 +51,11 @@ func Run(ctx context.Context, paths config.Paths) error {
 	}
 	defer f.Close()
 
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo) // safe default until config is loaded
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: logLevel,
 	}))
-	logger.Info("agent starting", "pid", os.Getpid())
 
 	// Write our own PID file (overwrites the one written by spawn with the
 	// actual agent PID — they match in practice, but this ensures correctness).
@@ -79,6 +80,10 @@ func Run(ctx context.Context, paths config.Paths) error {
 		logger.Warn("failed to load config, using defaults", "error", err)
 		cfg = config.Defaults()
 	}
+
+	// Apply configured log level (default: info)
+	logLevel.Set(cfg.ParseLogLevel())
+	logger.Info("agent starting", "pid", os.Getpid(), "logLevel", cfg.LogLevel)
 
 	// Create secret store for secure key storage
 	store, err := auth.NewSecretStore(paths.KeysDir, cfg.Identity.SecretBackend, logger)
