@@ -406,7 +406,7 @@ func TestListPanes_InvalidTarget(t *testing.T) {
 
 func TestWindowForPane_InvalidTarget(t *testing.T) {
 	c := NewClient(testSocket)
-	_, err := c.windowForPane("`rm -rf /`")
+	_, err := c.WindowForPane("`rm -rf /`")
 	if err == nil {
 		t.Fatal("expected error for invalid target")
 	}

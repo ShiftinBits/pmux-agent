@@ -79,5 +79,12 @@ func (t *PaneSizeTracker) RestoreIfLast(paneID string) error {
 	if err := t.client.ResizePane(paneID, orig[0], orig[1]); err != nil {
 		return nil //nolint:nilerr // pane may have been killed
 	}
-	return nil
+
+	// Release manual window size constraint so the window auto-fits
+	// to the largest attached terminal client.
+	wt, err := t.client.WindowForPane(paneID)
+	if err != nil {
+		return nil //nolint:nilerr // pane/window may have been killed
+	}
+	return t.client.ResizeWindowAuto(wt)
 }

@@ -322,7 +322,7 @@ func (c *Client) ResizePane(paneID string, cols, rows int) error {
 	if count <= 1 {
 		// Single pane fills window — resize-pane can't shrink below window size,
 		// so resize the window directly.
-		wt, err := c.windowForPane(paneID)
+		wt, err := c.WindowForPane(paneID)
 		if err != nil {
 			return fmt.Errorf("resize-pane: %w", err)
 		}
