@@ -468,6 +468,13 @@ func handlePair() {
 		displayName = pairComplete.MobileDeviceID
 	}
 	fmt.Printf("Paired successfully with device '%s'\n", displayName)
+
+	// Restart the background agent (stopped earlier to avoid WebSocket race).
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+	if err := agent.EnsureRunning(paths, store, mgr); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to restart agent: %v\n", err)
+	}
 }
 
 func handleUnpair() {
