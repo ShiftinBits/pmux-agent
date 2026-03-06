@@ -125,6 +125,42 @@ func TestInitiatePairing(t *testing.T) {
 	})
 }
 
+func TestPairCompleteMessageDeserialization(t *testing.T) {
+	t.Run("deserializes mobileName", func(t *testing.T) {
+		raw := `{"type":"pair_complete","mobileDeviceId":"dev-123","mobileX25519PublicKey":"key==","mobileName":"My iPhone"}`
+		var msg PairCompleteMessage
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			t.Fatalf("Unmarshal error: %v", err)
+		}
+		if msg.Type != "pair_complete" {
+			t.Errorf("Type = %q, want %q", msg.Type, "pair_complete")
+		}
+		if msg.MobileDeviceID != "dev-123" {
+			t.Errorf("MobileDeviceID = %q, want %q", msg.MobileDeviceID, "dev-123")
+		}
+		if msg.MobileX25519PublicKey != "key==" {
+			t.Errorf("MobileX25519PublicKey = %q, want %q", msg.MobileX25519PublicKey, "key==")
+		}
+		if msg.MobileName != "My iPhone" {
+			t.Errorf("MobileName = %q, want %q", msg.MobileName, "My iPhone")
+		}
+	})
+
+	t.Run("handles missing mobileName", func(t *testing.T) {
+		raw := `{"type":"pair_complete","mobileDeviceId":"dev-456","mobileX25519PublicKey":"key2=="}`
+		var msg PairCompleteMessage
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			t.Fatalf("Unmarshal error: %v", err)
+		}
+		if msg.MobileDeviceID != "dev-456" {
+			t.Errorf("MobileDeviceID = %q, want %q", msg.MobileDeviceID, "dev-456")
+		}
+		if msg.MobileName != "" {
+			t.Errorf("MobileName = %q, want empty string", msg.MobileName)
+		}
+	})
+}
+
 func TestWaitForPairComplete(t *testing.T) {
 	t.Run("receives pair_complete message", func(t *testing.T) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}

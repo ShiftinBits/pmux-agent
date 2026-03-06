@@ -454,6 +454,7 @@ func handlePair() {
 
 	err = auth.AddPairedDevice(paths.PairedDevices, auth.PairedDevice{
 		DeviceID:     pairComplete.MobileDeviceID,
+		Name:         pairComplete.MobileName,
 		SharedSecret: sharedSecret,
 		PairedAt:     time.Now(),
 	}, store)
@@ -462,7 +463,11 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Paired successfully with device %s\n", pairComplete.MobileDeviceID)
+	displayName := pairComplete.MobileName
+	if displayName == "" {
+		displayName = pairComplete.MobileDeviceID
+	}
+	fmt.Printf("Paired successfully with device '%s'\n", displayName)
 }
 
 func handleUnpair() {

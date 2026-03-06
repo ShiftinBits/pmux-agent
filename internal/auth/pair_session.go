@@ -59,6 +59,7 @@ type PairCompleteMessage struct {
 	Type                  string `json:"type"`
 	MobileDeviceID        string `json:"mobileDeviceId"`
 	MobileX25519PublicKey string `json:"mobileX25519PublicKey"`
+	MobileName            string `json:"mobileName,omitempty"`
 }
 
 // InitiatePairing calls the server to create a pairing session.
