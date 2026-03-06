@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,11 +35,13 @@ const (
 	EnvMaxConnections  = "PMUX_MAX_CONNECTIONS"
 	EnvSecretBackend   = "PMUX_SECRET_BACKEND"
 	EnvTmuxPath        = "PMUX_TMUX_PATH"
+	EnvLogLevel        = "PMUX_LOG_LEVEL"
 )
 
 // Config holds user-editable PocketMux configuration from config.toml.
 type Config struct {
 	Name       string           `toml:"name,omitempty"`
+	LogLevel   string           `toml:"log_level,omitempty"`
 	Server     ServerConfig     `toml:"server"`
 	Identity   IdentityConfig   `toml:"identity"`
 	Connection ConnectionConfig `toml:"connection"`
@@ -100,12 +103,14 @@ type ConfigSources struct {
 	SocketName           configSource
 	TmuxPath             configSource
 	Name                 configSource
+	LogLevel             configSource
 }
 
 // Defaults returns the default configuration.
 // The server URL uses https:// as the base URL; signaling.go converts to wss:// for WebSocket.
 func Defaults() Config {
 	return Config{
+		LogLevel: "info",
 		Server:   ServerConfig{URL: DefaultServerURL},
 		Identity: IdentityConfig{KeyPath: "~/.config/pmux/keys/", SecretBackend: "auto"},
 		Connection: ConnectionConfig{
@@ -175,6 +180,9 @@ func overlayFile(cfg *Config, fileCfg *Config) {
 	if fileCfg.Name != "" {
 		cfg.Name = fileCfg.Name
 	}
+	if fileCfg.LogLevel != "" {
+		cfg.LogLevel = fileCfg.LogLevel
+	}
 	if fileCfg.Server.URL != "" {
 		cfg.Server.URL = fileCfg.Server.URL
 	}
@@ -206,6 +214,10 @@ func overlayFileTracked(cfg *Config, fileCfg *Config, sources *ConfigSources) {
 	if fileCfg.Name != "" {
 		cfg.Name = fileCfg.Name
 		sources.Name = sourceFile
+	}
+	if fileCfg.LogLevel != "" {
+		cfg.LogLevel = fileCfg.LogLevel
+		sources.LogLevel = sourceFile
 	}
 	if fileCfg.Server.URL != "" {
 		cfg.Server.URL = fileCfg.Server.URL
@@ -266,6 +278,9 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Connection.MaxMobileConnections = n
 		}
 	}
+	if v := os.Getenv(EnvLogLevel); v != "" {
+		cfg.LogLevel = v
+	}
 }
 
 // applyEnvOverridesTracked is like applyEnvOverrides but records source annotations.
@@ -298,6 +313,10 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 			cfg.Connection.MaxMobileConnections = n
 			sources.MaxMobileConnections = sourceEnv
 		}
+	}
+	if v := os.Getenv(EnvLogLevel); v != "" {
+		cfg.LogLevel = v
+		sources.LogLevel = sourceEnv
 	}
 }
 
@@ -342,6 +361,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("tmux.socket_name must not be empty")
 	}
 
+	// log_level must be a recognized value
+	switch strings.ToLower(c.LogLevel) {
+	case "debug", "info", "warn", "error":
+		// valid
+	default:
+		return fmt.Errorf("log_level must be %q, %q, %q, or %q, got %q",
+			"debug", "info", "warn", "error", c.LogLevel)
+	}
+
 	return nil
 }
 
@@ -372,10 +400,29 @@ func (c *Config) ServerURL() string {
 	return c.Server.URL
 }
 
+// ParseLogLevel returns the slog.Level corresponding to the configured log level.
+// Accepted values (case-insensitive): "debug", "info", "warn", "error".
+// Falls back to slog.LevelInfo for unrecognized values.
+func (c *Config) ParseLogLevel() slog.Level {
+	switch strings.ToLower(c.LogLevel) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 // FormatEffective returns a formatted string showing all config values with sources.
 func FormatEffective(cfg Config, sources ConfigSources) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "name = %q  (%s)\n", cfg.Name, sources.Name)
+	fmt.Fprintf(&b, "log_level = %q  (%s)\n", cfg.LogLevel, sources.LogLevel)
 	fmt.Fprintf(&b, "server.url = %q  (%s)\n", cfg.Server.URL, sources.ServerURL)
 	fmt.Fprintf(&b, "identity.key_path = %q  (%s)\n", cfg.Identity.KeyPath, sources.KeyPath)
 	fmt.Fprintf(&b, "identity.secret_backend = %q  (%s)\n", cfg.Identity.SecretBackend, sources.SecretBackend)
@@ -392,6 +439,9 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 // overriding defaults.
 func CommentedDefaultConfig() string {
 	return `# PocketMux Agent Configuration
+
+# Log level: "debug", "info", "warn", or "error" (env: PMUX_LOG_LEVEL)
+# log_level = "info"
 
 [server]
 # Signaling server URL (env: PMUX_SERVER_URL)

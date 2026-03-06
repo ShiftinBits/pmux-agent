@@ -48,6 +48,7 @@ Config file: `~/.config/pmux/config.toml`
 | `PMUX_KEY_PATH` | Key storage directory |
 | `PMUX_SECRET_BACKEND` | `keyring` or `file` |
 | `PMUX_MAX_CONNECTIONS` | Max concurrent WebRTC connections |
+| `PMUX_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
 
 ## Dependencies
 

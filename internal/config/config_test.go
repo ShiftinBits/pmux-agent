@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,11 +29,14 @@ func TestDefaults(t *testing.T) {
 	if cfg.Tmux.SocketName != "pmux" {
 		t.Errorf("Tmux.SocketName = %q, want %q", cfg.Tmux.SocketName, "pmux")
 	}
+	if cfg.LogLevel != "info" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "info")
+	}
 }
 
 func TestLoadConfig_Nonexistent(t *testing.T) {
 	// Ensure env vars don't interfere
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -55,7 +59,7 @@ func TestLoadConfig_Nonexistent(t *testing.T) {
 }
 
 func TestLoadConfig_FileOverridesDefaults(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -64,6 +68,7 @@ func TestLoadConfig_FileOverridesDefaults(t *testing.T) {
 
 	content := `
 name = "work-laptop"
+log_level = "debug"
 
 [server]
 url = "https://custom.example.com"
@@ -104,6 +109,9 @@ tmux_path = "/usr/local/bin/tmux"
 	if cfg.Tmux.TmuxPath != "/usr/local/bin/tmux" {
 		t.Errorf("Tmux.TmuxPath = %q, want %q", cfg.Tmux.TmuxPath, "/usr/local/bin/tmux")
 	}
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "debug")
+	}
 
 	// Unset file values should retain defaults
 	if cfg.Connection.ReconnectInterval != "5s" {
@@ -137,6 +145,7 @@ socket_name = "from-file"
 	t.Setenv(EnvMaxConnections, "3")
 	t.Setenv(EnvKeyPath, "/custom/keys/")
 	t.Setenv(EnvTmuxPath, "")
+	t.Setenv(EnvLogLevel, "warn")
 
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -156,10 +165,13 @@ socket_name = "from-file"
 	if cfg.Identity.KeyPath != "/custom/keys/" {
 		t.Errorf("Identity.KeyPath = %q, want %q", cfg.Identity.KeyPath, "/custom/keys/")
 	}
+	if cfg.LogLevel != "warn" {
+		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "warn")
+	}
 }
 
 func TestLoadConfig_TmuxPathEnvOverride(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -186,7 +198,7 @@ tmux_path = "/from/file/tmux"
 }
 
 func TestLoadConfig_LegacyEnvVar(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -430,7 +442,7 @@ func TestServerURL_Method(t *testing.T) {
 }
 
 func TestSaveAndLoadConfig(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -476,7 +488,7 @@ func TestDefaultHostName(t *testing.T) {
 }
 
 func TestLoadConfigWithSources_AllDefaults(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -500,7 +512,7 @@ func TestLoadConfigWithSources_AllDefaults(t *testing.T) {
 }
 
 func TestLoadConfigWithSources_FileSources(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
 	}
 
@@ -575,6 +587,7 @@ func TestFormatEffective(t *testing.T) {
 		`tmux.socket_name = "pmux"  (default)`,
 		`tmux.tmux_path = ""  (default)`,
 		`connection.max_mobile_connections = 1  (default)`,
+		`log_level = "info"  (default)`,
 	}) {
 		t.Errorf("FormatEffective() output missing expected content:\n%s", output)
 	}
@@ -594,12 +607,64 @@ func TestCommentedDefaultConfig(t *testing.T) {
 		`# socket_name = "pmux"`,
 		`PMUX_TMUX_PATH`,
 		`# tmux_path = "/opt/homebrew/bin/tmux"`,
+		"PMUX_LOG_LEVEL",
+		`# log_level = "info"`,
 	}
 
 	for _, s := range expectedStrings {
 		if !containsStr(content, s) {
 			t.Errorf("CommentedDefaultConfig() missing %q", s)
 		}
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  slog.Level
+	}{
+		{"debug", "debug", slog.LevelDebug},
+		{"info", "info", slog.LevelInfo},
+		{"warn", "warn", slog.LevelWarn},
+		{"error", "error", slog.LevelError},
+		{"uppercase", "INFO", slog.LevelInfo},
+		{"mixed_case", "Debug", slog.LevelDebug},
+		{"invalid_fallback", "verbose", slog.LevelInfo},
+		{"empty_fallback", "", slog.LevelInfo},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.LogLevel = tt.value
+			got := cfg.ParseLogLevel()
+			if got != tt.want {
+				t.Errorf("ParseLogLevel() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidLogLevel(t *testing.T) {
+	cfg := Defaults()
+	cfg.LogLevel = "verbose"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error for invalid log_level, got nil")
+	}
+}
+
+func TestValidate_ValidLogLevels(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		t.Run(level, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.LogLevel = level
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() unexpected error for log_level %q: %v", level, err)
+			}
+		})
 	}
 }
 
