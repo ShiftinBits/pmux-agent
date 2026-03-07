@@ -138,12 +138,14 @@ func (m *PongEvent) MessageType() string { return "pong" }
 
 // TmuxSession represents a tmux session with its window tree.
 type TmuxSession struct {
-	ID           string       `msgpack:"id"`
-	Name         string       `msgpack:"name"`
-	Created      int64        `msgpack:"created"`
-	Windows      []TmuxWindow `msgpack:"windows"`
-	LastActivity int64        `msgpack:"lastActivity"`
-	Attached     bool         `msgpack:"attached"`
+	ID   string `msgpack:"id"`
+	Name string `msgpack:"name"`
+	// CreatedAt is a Unix timestamp in seconds.
+	CreatedAt int64        `msgpack:"createdAt"`
+	Windows   []TmuxWindow `msgpack:"windows"`
+	// LastActivityAt is a Unix timestamp in seconds.
+	LastActivityAt int64 `msgpack:"lastActivityAt"`
+	Attached       bool  `msgpack:"attached"`
 }
 
 // TmuxWindow represents a window within a tmux session.

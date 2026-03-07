@@ -118,8 +118,8 @@ func TestCreateAndListSessions(t *testing.T) {
 		if s.ID == "" {
 			t.Error("session ID should not be empty")
 		}
-		if s.Created == 0 {
-			t.Error("session Created timestamp should not be zero")
+		if s.CreatedAt == 0 {
+			t.Error("session CreatedAt timestamp should not be zero")
 		}
 	}
 	if !names["test-a"] {
