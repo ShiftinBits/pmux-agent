@@ -96,7 +96,7 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024)) // 64KB max
 	if err != nil {
 		return nil, fmt.Errorf("read pair initiate response: %w", err)
 	}

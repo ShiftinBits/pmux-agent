@@ -117,6 +117,28 @@ func TestInitiatePairing(t *testing.T) {
 		}
 	})
 
+	t.Run("oversized response body is truncated", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Send a response body larger than 64KB — the LimitReader should truncate it,
+			// causing JSON unmarshal to fail (incomplete JSON).
+			big := make([]byte, 128*1024)
+			for i := range big {
+				big[i] = 'x'
+			}
+			w.Write(big)
+		}))
+		defer server.Close()
+
+		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host")
+		if err == nil {
+			t.Fatal("expected error for oversized response, got nil")
+		}
+		if !strings.Contains(err.Error(), "parse pair initiate response") {
+			t.Errorf("error = %q, want substring %q", err.Error(), "parse pair initiate response")
+		}
+	})
+
 	t.Run("network error", func(t *testing.T) {
 		_, err := InitiatePairing(id, "x25519key==", "http://localhost:1", http.DefaultClient, "test-host")
 		if err == nil {
