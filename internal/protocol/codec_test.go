@@ -174,7 +174,7 @@ func TestRoundTripSessions(t *testing.T) {
 			{
 				ID:      "$1",
 				Name:    "dev",
-				Created: 1708700000,
+				CreatedAt: 1708700000,
 				Windows: []TmuxWindow{
 					{
 						ID:     "@1",
@@ -193,7 +193,7 @@ func TestRoundTripSessions(t *testing.T) {
 						},
 					},
 				},
-				LastActivity: 1708700100,
+				LastActivityAt: 1708700100,
 				Attached:     false,
 			},
 		},
@@ -214,7 +214,7 @@ func TestRoundTripSessions(t *testing.T) {
 		t.Fatalf("sessions count = %d, want 1", len(got.Sessions))
 	}
 	s := got.Sessions[0]
-	if s.ID != "$1" || s.Name != "dev" || s.Created != 1708700000 {
+	if s.ID != "$1" || s.Name != "dev" || s.CreatedAt != 1708700000 {
 		t.Errorf("session = %+v", s)
 	}
 	if len(s.Windows) != 1 {
@@ -697,7 +697,7 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 			{
 				ID:      "$0",
 				Name:    "work",
-				Created: 1708700000,
+				CreatedAt: 1708700000,
 				Windows: []TmuxWindow{
 					{
 						ID:     "@0",
@@ -716,13 +716,13 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 						},
 					},
 				},
-				LastActivity: 1708700100,
+				LastActivityAt: 1708700100,
 				Attached:     false,
 			},
 			{
 				ID:      "$1",
 				Name:    "shell",
-				Created: 1708700200,
+				CreatedAt: 1708700200,
 				Windows: []TmuxWindow{
 					{
 						ID:     "@1",
@@ -741,7 +741,7 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 						},
 					},
 				},
-				LastActivity: 1708700300,
+				LastActivityAt: 1708700300,
 				Attached:     true,
 			},
 		},
@@ -777,7 +777,7 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 		t.Fatalf("session[0] is %T, want map[string]interface{}", sessions[0])
 	}
 
-	expectedSessionKeys := []string{"id", "name", "created", "windows", "lastActivity", "attached"}
+	expectedSessionKeys := []string{"id", "name", "createdAt", "windows", "lastActivityAt", "attached"}
 	for _, key := range expectedSessionKeys {
 		if _, exists := s0[key]; !exists {
 			t.Errorf("session[0] missing key %q (keys: %v)", key, mapKeys(s0))

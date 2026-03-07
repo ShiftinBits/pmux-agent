@@ -141,16 +141,16 @@ func (c *Client) ListSessions() ([]protocol.TmuxSession, error) {
 		if len(parts) != 5 {
 			continue
 		}
-		created, _ := strconv.ParseInt(parts[2], 10, 64)
-		lastActivity, _ := strconv.ParseInt(parts[3], 10, 64)
+		createdAt, _ := strconv.ParseInt(parts[2], 10, 64)
+		lastActivityAt, _ := strconv.ParseInt(parts[3], 10, 64)
 		attached := parts[4] == "1"
 
 		sessions = append(sessions, protocol.TmuxSession{
-			ID:           parts[0],
-			Name:         parts[1],
-			Created:      created,
-			LastActivity: lastActivity,
-			Attached:     attached,
+			ID:             parts[0],
+			Name:           parts[1],
+			CreatedAt:      createdAt,
+			LastActivityAt: lastActivityAt,
+			Attached:       attached,
 		})
 	}
 	return sessions, nil
