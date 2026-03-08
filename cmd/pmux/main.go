@@ -83,6 +83,9 @@ func main() {
 	case "unpair":
 		handleUnpair()
 		return
+	case "uninstall":
+		handleUninstall(args[1:])
+		return
 	case "agent":
 		handleAgent(args[1:])
 		return
@@ -498,6 +501,40 @@ func handleUnpair() {
 	}
 }
 
+func handleUninstall(args []string) {
+	// Parse --keep-config flag
+	keepConfig := false
+	for _, arg := range args {
+		if arg == "--keep-config" {
+			keepConfig = true
+		}
+	}
+
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	// Don't fail if dirs don't exist — they might already be gone
+	_ = paths.EnsureDirs()
+
+	cfg, _ := config.LoadConfig(paths.ConfigFile)
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to initialize secret store: %v\n", err)
+		os.Exit(1)
+	}
+
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+
+	if err := agent.RunUninstall(paths, store, mgr, keepConfig, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func handleStatus() {
 	paths, err := config.DefaultPaths()
 	if err != nil {
@@ -827,6 +864,7 @@ PocketMux commands:
   config            Show effective configuration with sources
   status            Show agent, service, and pairing status
   unpair            Remove the paired mobile device
+  uninstall         Remove PocketMux completely (reverses 'init')
   agent run         Run the agent in the foreground
   agent start       Start the agent
   agent stop        Stop the agent
