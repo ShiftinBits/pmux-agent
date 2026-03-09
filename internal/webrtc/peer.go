@@ -58,10 +58,6 @@ type MessageSender interface {
 // ProtocolHandler is called when a decoded protocol message arrives on the DataChannel.
 type ProtocolHandler func(peerID string, msg protocol.Message)
 
-// PeerStateHandler is called when a peer connection's state changes.
-// The handler receives the device ID and the new connection state.
-type PeerStateHandler func(deviceID string, state webrtc.PeerConnectionState)
-
 // PeerManager manages multiple WebRTC peer connections, one per mobile device.
 type PeerManager struct {
 	logger    *slog.Logger
