@@ -127,7 +127,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 			if err != nil {
 				logger.Warn("failed to update mobile device name", "error", err)
 			} else if updated {
-				logger.Info("updated paired mobile device name", "deviceId", msg.DeviceID, "name", truncatedName)
+				logger.Debug("updated paired mobile device name", "deviceId", msg.DeviceID, "name", truncatedName)
 			}
 			return
 		}
