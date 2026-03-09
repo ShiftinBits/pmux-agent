@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"crypto/ecdh"
 	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,6 +149,55 @@ func TestComputeSharedSecret(t *testing.T) {
 			t.Error("derived secret should differ from raw ECDH output (HKDF not applied)")
 		}
 	})
+}
+
+func TestComputeSharedSecret_KnownVector(t *testing.T) {
+	curve := ecdh.X25519()
+
+	aliceHex := "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+	bobHex := "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+
+	aliceBytes, err := hex.DecodeString(aliceHex)
+	if err != nil {
+		t.Fatalf("decode alice hex: %v", err)
+	}
+	bobBytes, err := hex.DecodeString(bobHex)
+	if err != nil {
+		t.Fatalf("decode bob hex: %v", err)
+	}
+
+	alicePriv, err := curve.NewPrivateKey(aliceBytes)
+	if err != nil {
+		t.Fatalf("alice private key: %v", err)
+	}
+	bobPriv, err := curve.NewPrivateKey(bobBytes)
+	if err != nil {
+		t.Fatalf("bob private key: %v", err)
+	}
+
+	alice := &X25519Keypair{PrivateKey: alicePriv, PublicKey: alicePriv.PublicKey()}
+	bob := &X25519Keypair{PrivateKey: bobPriv, PublicKey: bobPriv.PublicKey()}
+
+	secret, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
+	if err != nil {
+		t.Fatalf("ComputeSharedSecret() error: %v", err)
+	}
+
+	// Known vector: deterministic output from fixed keypairs with HKDF salt="pocketmux", info="pocketmux-pairing-v1".
+	// Must match pocketmux-mobile's "HKDF known-vector (cross-implementation)" test.
+	const expected = "u4yr2Slh8UHncKnmDoXdLaoa9SGZ4aaJ9KBrEfNgd54="
+	if secret != expected {
+		t.Errorf("known vector mismatch:\n  got:  %s\n  want: %s", secret, expected)
+	}
+
+	// Verify bob computes the same secret
+	bobSecret, err := bob.ComputeSharedSecret(alice.PublicKeyBase64())
+	if err != nil {
+		t.Fatalf("bob.ComputeSharedSecret() error: %v", err)
+	}
+	if secret != bobSecret {
+		t.Errorf("alice and bob secrets differ: %s vs %s", secret, bobSecret)
+	}
 }
 
 func TestBuildQRPayload(t *testing.T) {
