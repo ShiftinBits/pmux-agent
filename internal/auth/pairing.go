@@ -85,10 +85,19 @@ func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("compute X25519 shared secret: %w", err)
 	}
+	// Zero raw ECDH output after use — it is not uniformly distributed
+	// and should not persist in memory. Note: the ephemeral PrivateKey
+	// cannot be zeroed (crypto/ecdh exposes no API for this).
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
 
-	// Derive key material using HKDF (RFC 5869) — raw X25519 output
-	// is not uniformly distributed and should never be used directly.
-	// Salt: "pocketmux", Info: "pocketmux-pairing-v1"
+	// Derive key material using HKDF (RFC 5869, §3.1 extract-then-expand).
+	// Raw X25519 output is not uniformly distributed and must be processed
+	// through a KDF before use. Salt (§3.3): static domain separator.
+	// Info (§3.2): versioned context label for protocol isolation.
 	hkdfReader := hkdf.New(sha256.New, raw, []byte("pocketmux"), []byte("pocketmux-pairing-v1"))
 	derived := make([]byte, 32)
 	if _, err := io.ReadFull(hkdfReader, derived); err != nil {
