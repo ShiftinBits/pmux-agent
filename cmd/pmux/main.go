@@ -588,7 +588,7 @@ func handleAgent(args []string) {
 
 	switch args[0] {
 	case "run":
-		// Internal: agent background/foreground mode (spawned by supervisor).
+		// "run" is an internal subcommand used by the supervisor to start the agent process.
 		// Supports optional --cpuprofile <file> and --memprofile <file> flags.
 		var cpuProfile, memProfile string
 		for i := 1; i < len(args); i++ {
