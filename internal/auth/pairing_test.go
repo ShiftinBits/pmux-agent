@@ -183,7 +183,8 @@ func TestComputeSharedSecret_KnownVector(t *testing.T) {
 		t.Fatalf("ComputeSharedSecret() error: %v", err)
 	}
 
-	// Known vector: deterministic output from fixed keypairs with HKDF salt="pocketmux", info="pocketmux-pairing-v1"
+	// Known vector: deterministic output from fixed keypairs with HKDF salt="pocketmux", info="pocketmux-pairing-v1".
+	// Must match pocketmux-mobile's "HKDF known-vector (cross-implementation)" test.
 	const expected = "u4yr2Slh8UHncKnmDoXdLaoa9SGZ4aaJ9KBrEfNgd54="
 	if secret != expected {
 		t.Errorf("known vector mismatch:\n  got:  %s\n  want: %s", secret, expected)
