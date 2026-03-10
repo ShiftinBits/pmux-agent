@@ -17,7 +17,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
+
+      - name: Install garble
+        run: go install mvdan.cc/garble@latest
 
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6

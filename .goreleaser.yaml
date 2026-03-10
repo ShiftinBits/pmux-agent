@@ -11,6 +11,7 @@ before:
 
 builds:
   - id: pmux-linux
+    tool: ./scripts/garble.sh
     main: ./cmd/pmux
     binary: pmux
     goos: [linux]
@@ -24,6 +25,7 @@ builds:
       - -X main.version={{.Version}}
 
   - id: pmux-darwin
+    tool: ./scripts/garble.sh
     main: ./cmd/pmux
     binary: pmux
     goos: [darwin]

@@ -4,6 +4,7 @@
 .claude/worktrees
 
 bin/
+build/
 dist/
 *.exe
 *.test

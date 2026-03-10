@@ -2,11 +2,15 @@
 
 BINARY := pmux
 
-.PHONY: build test test-integration test-stress test-all clean snapshot
+.PHONY: build build-obfuscated test test-integration test-stress test-all clean snapshot
 
 # Build the pmux binary (local dev)
 build:
 	go build -ldflags="-X main.version=dev" -o bin/$(BINARY) ./cmd/pmux
+
+# Build with garble obfuscation (mirrors release pipeline)
+build-obfuscated:
+	garble -literals -seed=random build -trimpath -ldflags="-s -w -X main.version=dev" -o bin/$(BINARY) ./cmd/pmux
 
 # Run unit tests
 test:
