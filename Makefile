@@ -6,11 +6,11 @@ BINARY := pmux
 
 # Build the pmux binary (local dev)
 build:
-	go build -ldflags="-X main.version=dev" -o bin/$(BINARY) ./cmd/pmux
+	go build -ldflags="-X main.version=dev -X 'main.hmacSecret=$(PMUX_HMAC_SECRET)'" -o bin/$(BINARY) ./cmd/pmux
 
 # Build with garble obfuscation (mirrors release pipeline)
 build-obfuscated:
-	garble -literals -seed=random build -trimpath -ldflags="-s -w -X main.version=dev" -o bin/$(BINARY) ./cmd/pmux
+	garble -literals -seed=random build -trimpath -ldflags="-s -w -X main.version=dev -X 'main.hmacSecret=$(PMUX_HMAC_SECRET)'" -o bin/$(BINARY) ./cmd/pmux
 
 # Run unit tests
 test:

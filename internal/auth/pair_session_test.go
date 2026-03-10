@@ -76,7 +76,7 @@ func TestInitiatePairing(t *testing.T) {
 		}))
 		defer server.Close()
 
-		resp, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host")
+		resp, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
 		if err != nil {
 			t.Fatalf("InitiatePairing() error: %v", err)
 		}
@@ -92,7 +92,7 @@ func TestInitiatePairing(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host")
+		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -108,7 +108,7 @@ func TestInitiatePairing(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host")
+		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -130,7 +130,7 @@ func TestInitiatePairing(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host")
+		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
 		if err == nil {
 			t.Fatal("expected error for oversized response, got nil")
 		}
@@ -140,7 +140,7 @@ func TestInitiatePairing(t *testing.T) {
 	})
 
 	t.Run("network error", func(t *testing.T) {
-		_, err := InitiatePairing(id, "x25519key==", "http://localhost:1", http.DefaultClient, "test-host")
+		_, err := InitiatePairing(id, "x25519key==", "http://localhost:1", http.DefaultClient, "test-host", "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -225,7 +225,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt")
+		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err != nil {
 			t.Fatalf("WaitForPairComplete() error: %v", err)
 		}
@@ -261,7 +261,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt")
+		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err != nil {
 			t.Fatalf("WaitForPairComplete() error: %v", err)
 		}
@@ -291,7 +291,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 
-		_, err := WaitForPairComplete(ctx, server.URL, "test-jwt")
+		_, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err == nil {
 			t.Fatal("expected timeout error, got nil")
 		}
@@ -321,7 +321,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := WaitForPairComplete(ctx, server.URL, "test-jwt")
+		_, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err == nil {
 			t.Fatal("expected validation error, got nil")
 		}
@@ -348,7 +348,7 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := WaitForPairComplete(ctx, server.URL, "bad-jwt")
+		_, err := WaitForPairComplete(ctx, server.URL, "bad-jwt", "")
 		if err == nil {
 			t.Fatal("expected auth error, got nil")
 		}

@@ -65,7 +65,7 @@ type PairCompleteMessage struct {
 // InitiatePairing calls the server to create a pairing session.
 // The name parameter is an optional human-readable host name sent to the server
 // so it can be displayed on paired mobile devices.
-func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client, name string) (*PairInitiateResponse, error) {
+func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client, name string, hmacSecret string) (*PairInitiateResponse, error) {
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	signature := id.SignChallenge(id.DeviceID, timestamp)
 
@@ -90,7 +90,14 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/pair/initiate"
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create pair initiate request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, hmacSecret)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New(connError(err))
 	}
@@ -120,14 +127,14 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 // WaitForPairComplete connects to the server WebSocket, authenticates, and waits
 // for the pair_complete message. Returns the mobile's X25519 public key and device ID.
 // The context can be used for timeout/cancellation.
-func WaitForPairComplete(ctx context.Context, serverURL string, jwt string) (*PairCompleteMessage, error) {
+func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmacSecret string) (*PairCompleteMessage, error) {
 	// Convert HTTP URL to WebSocket URL
 	wsURL := strings.TrimRight(serverURL, "/") + "/ws"
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
+	conn, _, err := dialer.DialContext(ctx, wsURL, SignWebSocketHeaders(wsURL, hmacSecret))
 	if err != nil {
 		return nil, fmt.Errorf("connect to signaling server: %s", connError(err))
 	}

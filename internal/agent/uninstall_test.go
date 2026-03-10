@@ -27,7 +27,7 @@ func TestRunUninstall_UserCancels(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, strings.NewReader("n\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("n\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestRunUninstall_EOF(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, strings.NewReader(""), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader(""), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRunUninstall_FullUninstall(t *testing.T) {
 	mgr := &mockServiceManager{installed: true}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestRunUninstall_KeepConfig(t *testing.T) {
 	mgr := &mockServiceManager{installed: true}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, true, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, true, "", strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRunUninstall_NoIdentity(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}

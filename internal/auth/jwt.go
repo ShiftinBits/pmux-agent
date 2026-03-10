@@ -20,7 +20,7 @@ type tokenResponse struct {
 
 // ExchangeToken signs a challenge with the identity key and exchanges it for a JWT.
 // serverURL should be the base URL of the signaling server (e.g., "https://signal.pmux.io").
-func ExchangeToken(id *Identity, serverURL string, client *http.Client) (string, error) {
+func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecret string) (string, error) {
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	signature := id.SignChallenge(id.DeviceID, timestamp)
 
@@ -39,7 +39,14 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client) (string,
 	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/token"
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	SignRequest(req, hmacSecret)
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", errors.New(connError(err))
 	}

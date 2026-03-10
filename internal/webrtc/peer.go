@@ -14,6 +14,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
+	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 )
 
@@ -60,11 +61,12 @@ type ProtocolHandler func(peerID string, msg protocol.Message)
 
 // PeerManager manages multiple WebRTC peer connections, one per mobile device.
 type PeerManager struct {
-	logger    *slog.Logger
-	signaling MessageSender
-	serverURL string
-	jwt       func() string // returns current JWT
-	handler   ProtocolHandler
+	logger     *slog.Logger
+	signaling  MessageSender
+	serverURL  string
+	jwt        func() string // returns current JWT
+	handler    ProtocolHandler
+	hmacSecret string
 
 	// API is the Pion WebRTC API used to create peer connections.
 	// If nil, the default API is used. Set this for testing with custom settings.
@@ -125,13 +127,14 @@ func (pm *PeerManager) getAllowedDeviceID() string {
 }
 
 // NewPeerManager creates a manager for WebRTC peer connections.
-func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL string, jwtFn func() string, handler ProtocolHandler) *PeerManager {
+func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL string, jwtFn func() string, handler ProtocolHandler, hmacSecret string) *PeerManager {
 	return &PeerManager{
 		logger:           logger,
 		signaling:        signaling,
 		serverURL:        strings.TrimRight(serverURL, "/"),
 		jwt:              jwtFn,
 		handler:          handler,
+		hmacSecret:       hmacSecret,
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
@@ -483,6 +486,7 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		return nil, fmt.Errorf("create TURN request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+pm.jwt())
+	auth.SignRequest(req, pm.hmacSecret)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

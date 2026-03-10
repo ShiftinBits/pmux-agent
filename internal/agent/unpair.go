@@ -15,7 +15,7 @@ import (
 // RunUnpair removes the paired mobile device after confirmation.
 // It notifies the signaling server (best-effort) and signals the running
 // agent to close active connections before removing the local pairing.
-func RunUnpair(paths config.Paths, store auth.SecretStore, r io.Reader, w io.Writer) error {
+func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r io.Reader, w io.Writer) error {
 	device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
 	if err != nil {
 		return fmt.Errorf("load paired device: %w", err)
@@ -54,7 +54,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, r io.Reader, w io.Wri
 	if identErr == nil {
 		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
-		if err := auth.DeletePairing(identity, cfg.ServerURL(), httpClient); err != nil {
+		if err := auth.DeletePairing(identity, cfg.ServerURL(), httpClient, hmacSecret); err != nil {
 			fmt.Fprintf(w, "Warning: could not notify server: %v\n", err)
 		}
 	}

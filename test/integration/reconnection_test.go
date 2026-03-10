@@ -105,7 +105,7 @@ func TestReconnection_ReconnectsAfterDrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx) //nolint:errcheck
@@ -157,7 +157,7 @@ func TestReconnection_BackoffIncreases(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	go sc.Run(ctx) //nolint:errcheck
@@ -243,7 +243,7 @@ func TestReconnection_PreservesStateAcrossReconnect(t *testing.T) {
 		mu.Unlock()
 	}
 
-	sc := sigclient.NewSignalingClient(id, server.URL, "", handler, logger)
+	sc := sigclient.NewSignalingClient(id, server.URL, "", handler, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx) //nolint:errcheck
@@ -295,7 +295,7 @@ func TestReconnection_ActivitySignalWakesFromDormancy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := sigclient.NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	done := make(chan struct{})

@@ -3,6 +3,7 @@ version: 2
 
 env:
   - GO111MODULE=on
+  - PMUX_HMAC_SECRET={{ if index .Env "PMUX_HMAC_SECRET" }}{{ .Env.PMUX_HMAC_SECRET }}{{ end }}
 
 before:
   hooks:
@@ -23,6 +24,7 @@ builds:
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
+      - -X 'main.hmacSecret={{ .Env.PMUX_HMAC_SECRET }}'
 
   - id: pmux-darwin
     tool: ./scripts/garble.sh
@@ -37,6 +39,7 @@ builds:
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
+      - -X 'main.hmacSecret={{ .Env.PMUX_HMAC_SECRET }}'
 
 universal_binaries:
   - id: pmux-darwin-universal

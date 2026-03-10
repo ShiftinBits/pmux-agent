@@ -51,7 +51,7 @@ func TestRunUnpair_NoDevice(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("")
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func TestRunUnpair_Confirmed(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("y\n")
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair: %v", err)
 	}
 
@@ -101,7 +101,7 @@ func TestRunUnpair_Cancelled(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("n\n")
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestRunUnpair_EOFCancels(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("") // EOF
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestRunUnpair_NotifiesServer(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("y\n")
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair: %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestRunUnpair_ServerFailureContinues(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("y\n")
 
-	if err := RunUnpair(paths, store, in, &out); err != nil {
+	if err := RunUnpair(paths, store, "", in, &out); err != nil {
 		t.Fatalf("RunUnpair should succeed even if server fails: %v", err)
 	}
 

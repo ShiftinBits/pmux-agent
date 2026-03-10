@@ -18,7 +18,7 @@ import (
 // It stops the agent, uninstalls the OS service, un-registers from the
 // signaling server, and removes local config/keys.
 // If keepConfig is true, local config and keys are preserved.
-func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, r io.Reader, w io.Writer) error {
+func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, hmacSecret string, r io.Reader, w io.Writer) error {
 	// Step 1: Interactive confirmation
 	fmt.Fprintln(w, "This will remove PocketMux from this host:")
 	fmt.Fprintln(w, "  • Stop the agent process")
@@ -61,7 +61,7 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 	if identErr == nil {
 		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
-		if err := auth.DeleteDevice(identity, cfg.ServerURL(), httpClient); err != nil {
+		if err := auth.DeleteDevice(identity, cfg.ServerURL(), httpClient, hmacSecret); err != nil {
 			fmt.Fprintf(w, "Warning: could not un-register from server: %v\n", err)
 			fmt.Fprintln(w, "  The host may still appear on your mobile device.")
 		} else {

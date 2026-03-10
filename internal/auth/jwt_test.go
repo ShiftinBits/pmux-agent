@@ -31,7 +31,7 @@ func TestExchangeToken(t *testing.T) {
 		}))
 		defer server.Close()
 
-		token, err := ExchangeToken(id, server.URL, server.Client())
+		token, err := ExchangeToken(id, server.URL, server.Client(), "")
 		if err != nil {
 			t.Fatalf("ExchangeToken() error: %v", err)
 		}
@@ -47,7 +47,7 @@ func TestExchangeToken(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err := ExchangeToken(id, server.URL, server.Client())
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -63,7 +63,7 @@ func TestExchangeToken(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err := ExchangeToken(id, server.URL, server.Client())
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -73,7 +73,7 @@ func TestExchangeToken(t *testing.T) {
 	})
 
 	t.Run("network error", func(t *testing.T) {
-		_, err := ExchangeToken(id, "http://localhost:1", http.DefaultClient)
+		_, err := ExchangeToken(id, "http://localhost:1", http.DefaultClient, "")
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -89,7 +89,7 @@ func TestExchangeToken(t *testing.T) {
 		}))
 		defer server.Close()
 
-		token, err := ExchangeToken(id, server.URL+"/", server.Client())
+		token, err := ExchangeToken(id, server.URL+"/", server.Client(), "")
 		if err != nil {
 			t.Fatalf("ExchangeToken() error: %v", err)
 		}

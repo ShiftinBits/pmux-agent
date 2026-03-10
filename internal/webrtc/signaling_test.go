@@ -102,7 +102,7 @@ func TestSignalingClient_ConnectsAndAuthenticates(t *testing.T) {
 		mu.Unlock()
 	}
 
-	sc := NewSignalingClient(id, server.URL, "", handler, logger)
+	sc := NewSignalingClient(id, server.URL, "", handler, logger, "")
 	sc.HTTPClient = server.Client()
 
 	// Run will exit when context cancels or connection drops
@@ -144,7 +144,7 @@ func TestSignalingClient_SendsPresenceHeartbeats(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 	sc.PresenceInterval = 200 * time.Millisecond // fast for testing
 
@@ -191,7 +191,7 @@ func TestSignalingClient_DispatchesMessages(t *testing.T) {
 		mu.Unlock()
 	}
 
-	sc := NewSignalingClient(id, server.URL, "", handler, logger)
+	sc := NewSignalingClient(id, server.URL, "", handler, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx)
@@ -246,7 +246,7 @@ func TestSignalingClient_SendMessages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	go sc.Run(ctx)
@@ -329,7 +329,7 @@ func TestSignalingClient_ReconnectsOnDisconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx)
@@ -353,7 +353,7 @@ func TestSignalingClient_AuthFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	// Should keep trying to reconnect but always fail auth
@@ -364,7 +364,7 @@ func TestSignalingClient_AuthFailure(t *testing.T) {
 func TestSignalingClient_SendWhenNotConnected(t *testing.T) {
 	id, logger := testSetup(t)
 
-	sc := NewSignalingClient(id, "http://localhost:1", "", nil, logger)
+	sc := NewSignalingClient(id, "http://localhost:1", "", nil, logger, "")
 
 	err := sc.Send(SignalingMessage{Type: "presence"})
 	if err == nil {
@@ -385,7 +385,7 @@ func TestSignalingClient_Close(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	done := make(chan struct{})
@@ -434,7 +434,7 @@ func TestSignalingClient_ErrorMessagesLogged(t *testing.T) {
 		mu.Unlock()
 	}
 
-	sc := NewSignalingClient(id, server.URL, "", handler, logger)
+	sc := NewSignalingClient(id, server.URL, "", handler, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx)
@@ -473,7 +473,7 @@ func TestSignalingClient_SendsNameInAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	sc := NewSignalingClient(id, server.URL, "my-workstation", nil, logger)
+	sc := NewSignalingClient(id, server.URL, "my-workstation", nil, logger, "")
 	sc.HTTPClient = server.Client()
 
 	sc.Run(ctx)

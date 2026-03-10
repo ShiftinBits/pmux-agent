@@ -63,10 +63,11 @@ type MessageHandler func(msg SignalingMessage)
 
 // SignalingClient manages a persistent WebSocket connection to the signaling server.
 type SignalingClient struct {
-	identity  *auth.Identity
-	serverURL string
-	logger    *slog.Logger
-	handler   MessageHandler
+	identity   *auth.Identity
+	serverURL  string
+	logger     *slog.Logger
+	handler    MessageHandler
+	hmacSecret string
 
 	// hostName is the host's display name sent in WebSocket auth messages.
 	hostName string
@@ -95,12 +96,13 @@ type SignalingClient struct {
 }
 
 // NewSignalingClient creates a signaling client for the given identity and server.
-func NewSignalingClient(identity *auth.Identity, serverURL string, hostName string, handler MessageHandler, logger *slog.Logger) *SignalingClient {
+func NewSignalingClient(identity *auth.Identity, serverURL string, hostName string, handler MessageHandler, logger *slog.Logger, hmacSecret string) *SignalingClient {
 	return &SignalingClient{
 		identity:         identity,
 		serverURL:        strings.TrimRight(serverURL, "/"),
 		handler:          handler,
 		logger:           logger,
+		hmacSecret:       hmacSecret,
 		hostName:         hostName,
 		PresenceInterval: DefaultPresenceInterval,
 		activitySignal:   make(chan struct{}, 1),
@@ -266,7 +268,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
+	conn, _, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
 		return false, fmt.Errorf("connect to signaling server: %w", err)
 	}
@@ -366,7 +368,7 @@ func (sc *SignalingClient) ensureToken() error {
 	}
 
 	sc.logger.Info("exchanging new JWT")
-	token, err := auth.ExchangeToken(sc.identity, sc.serverURL, sc.HTTPClient)
+	token, err := auth.ExchangeToken(sc.identity, sc.serverURL, sc.HTTPClient, sc.hmacSecret)
 	if err != nil {
 		return err
 	}

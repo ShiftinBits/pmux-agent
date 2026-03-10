@@ -42,7 +42,7 @@ type serverChecker interface {
 // Run starts the PocketMux agent. It connects to the signaling server,
 // handles WebRTC connections, and monitors the tmux server.
 // Blocks until the context is canceled (SIGTERM/SIGINT or fatal error).
-func Run(ctx context.Context, paths config.Paths) error {
+func Run(ctx context.Context, paths config.Paths, hmacSecret string) error {
 	// Set up file logging
 	logFile := filepath.Join(paths.ConfigDir, "agent.log")
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -132,7 +132,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 			return
 		}
 		peerManager.HandleSignalingMessage(msg)
-	}, logger)
+	}, logger, hmacSecret)
 	signalingClient.PresenceInterval = cfg.KeepaliveInterval()
 
 	peerManager = webrtc.NewPeerManager(
@@ -141,6 +141,7 @@ func Run(ctx context.Context, paths config.Paths) error {
 		serverURL,
 		signalingClient.JWT,
 		handler.HandleMessage,
+		hmacSecret,
 	)
 	peerManager.MaxPeers = cfg.Connection.MaxMobileConnections
 	peerManager.OnPeerDisconnect = handler.PeerDisconnected

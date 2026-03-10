@@ -89,7 +89,7 @@ func TestPeerManager_HandleConnectRequest(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -127,7 +127,7 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	defer turnServer.Close()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -200,7 +200,7 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	}
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, handler)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, handler, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -341,7 +341,7 @@ func TestPeerManager_ClosePeer(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -373,7 +373,7 @@ func TestPeerManager_CloseAllClearsAllPeers(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	// Connect a single peer and verify CloseAll removes it
@@ -403,7 +403,7 @@ func TestPeerManager_NoTurnWithCustomAPI(t *testing.T) {
 
 	// With pm.API set (test mode), TURN credentials are not fetched,
 	// so even a bad server URL is fine.
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -435,7 +435,7 @@ func TestPeerManager_FetchTurnCredentials(t *testing.T) {
 		turnServer := mockTurnServer(t)
 		defer turnServer.Close()
 
-		pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+		pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 		servers, err := pm.fetchTurnCredentials()
 		if err != nil {
 			t.Fatalf("fetchTurnCredentials() error: %v", err)
@@ -454,7 +454,7 @@ func TestPeerManager_FetchTurnCredentials(t *testing.T) {
 		}))
 		defer badServer.Close()
 
-		pm := NewPeerManager(logger, sender, badServer.URL, func() string { return "test-jwt" }, nil)
+		pm := NewPeerManager(logger, sender, badServer.URL, func() string { return "test-jwt" }, nil, "")
 		_, err := pm.fetchTurnCredentials()
 		if err == nil {
 			t.Error("expected error from bad TURN server")
@@ -466,7 +466,7 @@ func TestPeerManager_UnknownPeerMessages(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 
 	// These should not panic
 	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: "nonexistent", SDP: "v=0"})
@@ -477,7 +477,7 @@ func TestPeerManager_SendTo(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 
 	err := pm.SendTo("nonexistent", &protocol.PongEvent{Type: "pong"})
 	if err == nil {
@@ -491,7 +491,7 @@ func TestPeerManager_Reconnect(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	// First connection
@@ -534,7 +534,7 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
 
@@ -573,7 +573,7 @@ func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.SetAllowedDeviceID("paired-device-123")
 
@@ -613,7 +613,7 @@ func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
 
@@ -653,7 +653,7 @@ func TestPeerManager_DataChannelOrdered(t *testing.T) {
 	defer turnServer.Close()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -741,7 +741,7 @@ func TestPeerManager_DTLSNotDisabled(t *testing.T) {
 	defer turnServer.Close()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -796,7 +796,7 @@ func TestPeerManager_DisconnectedStartsGraceTimer(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	// Create a peer via connect_request
@@ -825,7 +825,7 @@ func TestPeerManager_ConnectedDuringGraceCancelsTimer(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-recover"})
@@ -863,7 +863,7 @@ func TestPeerManager_FailedClosesPeerImmediately(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-fail"})
@@ -888,7 +888,7 @@ func TestPeerManager_DisconnectTimerFiresICERestart(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-ice"})
@@ -926,7 +926,7 @@ func TestPeerManager_ICERestartSendsOffer(t *testing.T) {
 	logger := testLogger()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-iceoff"})
@@ -995,7 +995,7 @@ func TestPeerManager_CloseAllCancelsDisconnectTimers(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-t1"})
@@ -1026,7 +1026,7 @@ func TestPeerManager_PeerStates(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	// No peers — should return empty map
@@ -1065,7 +1065,7 @@ func TestPeerManager_ClosePeerCancelsDisconnectTimer(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-cpt"})
@@ -1099,7 +1099,7 @@ func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
 	var disconnectedMu sync.Mutex
 	var disconnectedPeers []string
 
-	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.OnPeerDisconnect = func(deviceID string) {
 		disconnectedMu.Lock()
@@ -1148,7 +1148,7 @@ func TestPeer_BackpressureCallbackRegistered(t *testing.T) {
 	defer turnServer.Close()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -1198,7 +1198,7 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 
 	api := fastAPI(t)
 	received := make(chan []byte, 10)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{
@@ -1383,7 +1383,7 @@ func TestPeer_CloseUnblocksWaitingBackpressure(t *testing.T) {
 	defer turnServer.Close()
 
 	api := fastAPI(t)
-	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
 	pm.HandleSignalingMessage(SignalingMessage{

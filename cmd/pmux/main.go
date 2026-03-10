@@ -28,6 +28,7 @@ import (
 )
 
 var version = "dev"
+var hmacSecret string
 
 // loadEffectiveConfig loads the config from disk with env overrides.
 // Returns a usable config even if the config file doesn't exist.
@@ -162,7 +163,7 @@ func runAgent(cpuProfile, memProfile string) {
 		cancel()
 	}()
 
-	agentErr := agent.Run(ctx, paths)
+	agentErr := agent.Run(ctx, paths, hmacSecret)
 
 	// Write memory profile on shutdown if requested
 	if memProfile != "" {
@@ -386,7 +387,7 @@ func handlePair() {
 	// Initiate pairing with signaling server
 	fmt.Println("Contacting signaling server...")
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	pairResp, err := auth.InitiatePairing(id, x25519kp.PublicKeyBase64(), serverURL, httpClient, hostName)
+	pairResp, err := auth.InitiatePairing(id, x25519kp.PublicKeyBase64(), serverURL, httpClient, hostName, hmacSecret)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to initiate pairing: %v\n", err)
 		os.Exit(1)
@@ -426,7 +427,7 @@ func handlePair() {
 	}
 
 	// Get JWT for WebSocket auth
-	jwt, err := auth.ExchangeToken(id, serverURL, httpClient)
+	jwt, err := auth.ExchangeToken(id, serverURL, httpClient, hmacSecret)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ failed to authenticate: %v\n", err)
 		os.Exit(1)
@@ -436,7 +437,7 @@ func handlePair() {
 	ctx, cancel := context.WithTimeout(context.Background(), auth.PairTimeout)
 	defer cancel()
 
-	pairComplete, err := auth.WaitForPairComplete(ctx, serverURL, jwt)
+	pairComplete, err := auth.WaitForPairComplete(ctx, serverURL, jwt, hmacSecret)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ pairing failed: %v\n", err)
 		os.Exit(1)
@@ -495,7 +496,7 @@ func handleUnpair() {
 		os.Exit(1)
 	}
 
-	if err := agent.RunUnpair(paths, store, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunUnpair(paths, store, hmacSecret, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -529,7 +530,7 @@ func handleUninstall(args []string) {
 	exe, _ := os.Executable()
 	mgr := service.NewManager(exe, paths.ConfigDir)
 
-	if err := agent.RunUninstall(paths, store, mgr, keepConfig, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunUninstall(paths, store, mgr, keepConfig, hmacSecret, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}

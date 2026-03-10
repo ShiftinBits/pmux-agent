@@ -33,7 +33,7 @@ func TestDeletePairing_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := DeletePairing(id, server.URL, server.Client()); err != nil {
+	if err := DeletePairing(id, server.URL, server.Client(), ""); err != nil {
 		t.Fatalf("DeletePairing() error: %v", err)
 	}
 }
@@ -60,7 +60,7 @@ func TestDeletePairing_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err = DeletePairing(id, server.URL, server.Client())
+	err = DeletePairing(id, server.URL, server.Client(), "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -83,7 +83,7 @@ func TestDeletePairing_TokenExchangeFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err = DeletePairing(id, server.URL, server.Client())
+	err = DeletePairing(id, server.URL, server.Client(), "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -118,7 +118,7 @@ func TestDeleteDevice_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := DeleteDevice(id, server.URL, server.Client()); err != nil {
+	if err := DeleteDevice(id, server.URL, server.Client(), ""); err != nil {
 		t.Fatalf("DeleteDevice() error: %v", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestDeleteDevice_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err = DeleteDevice(id, server.URL, server.Client())
+	err = DeleteDevice(id, server.URL, server.Client(), "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -168,7 +168,7 @@ func TestDeleteDevice_TokenExchangeFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err = DeleteDevice(id, server.URL, server.Client())
+	err = DeleteDevice(id, server.URL, server.Client(), "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
