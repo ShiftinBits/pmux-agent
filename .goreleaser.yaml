@@ -132,3 +132,26 @@ homebrew_casks:
     description: "Secure remote tmux access from the PocketMux mobile app"
     license: MIT
     commit_msg_template: "chore: update pmux to {{ .Tag }}"
+
+    caveats: |
+      The pmux agent service will be stopped and removed on uninstall.
+
+      For full cleanup (including un-registering this host from the
+      signaling server), run before uninstalling:
+
+        pmux uninstall
+
+    uninstall:
+      launchctl:
+        - io.pmux.agent
+      delete:
+        - "~/Library/LaunchAgents/io.pmux.agent.plist"
+
+    zap:
+      trash:
+        - "~/.config/pmux"
+
+    hooks:
+      pre:
+        uninstall: |
+          system_command "#{staged_path}/pmux", args: ["uninstall", "--keep-config", "--yes"]
