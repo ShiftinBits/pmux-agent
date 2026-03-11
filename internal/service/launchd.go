@@ -74,7 +74,63 @@ func (m *launchdManager) writePlist() error {
 	return os.WriteFile(path, []byte(m.generatePlist()), 0644)
 }
 
+// checkNotRoot returns an error if the process is running as root.
+// launchd user agents must be installed in the user's GUI domain (gui/<uid>),
+// which doesn't exist for root. Running via sudo is the most common cause.
+func checkNotRoot() error {
+	if os.Getuid() == 0 {
+		if os.Getenv("SUDO_USER") != "" {
+			return fmt.Errorf("pmux agent must be installed as your regular user, not with sudo\n  Run without sudo: pmux agent install")
+		}
+		return fmt.Errorf("pmux agent must be installed as your regular user, not as root\n  Run as your normal user: pmux agent install")
+	}
+	return nil
+}
+
+// launchctlHint translates common launchctl error output into actionable
+// messages for the end user. Returns empty string if no specific hint applies.
+func launchctlHint(output string, exitCode int) string {
+	lower := strings.ToLower(output)
+	switch {
+	case strings.Contains(lower, "domain does not support specified action"):
+		// Exit 125 — typically caused by running as root or targeting wrong domain.
+		return "The launchd GUI domain is not available. This usually means the command was run as root or via sudo.\n  Run without sudo: pmux agent install"
+	case strings.Contains(lower, "could not find specified service"):
+		return "The service is not loaded. Try reinstalling: pmux agent install"
+	case strings.Contains(lower, "operation not permitted"):
+		return "Permission denied by launchd. Check that your user has permission to manage LaunchAgents."
+	case strings.Contains(lower, "no such file or directory"):
+		return "The service plist file is missing. Try reinstalling: pmux agent install"
+	case exitCode == 125:
+		// Catch-all for exit 125 without a recognized message.
+		return "launchd rejected the operation (exit 125). Try: pmux agent uninstall && pmux agent install"
+	}
+	return ""
+}
+
+// wrapLaunchctlError creates an error from a launchctl command failure,
+// appending an actionable hint when one is available.
+func wrapLaunchctlError(verb, output string, err error) error {
+	outStr := strings.TrimSpace(output)
+
+	// Extract exit code from *exec.ExitError if available.
+	exitCode := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode = exitErr.ExitCode()
+	}
+
+	hint := launchctlHint(outStr, exitCode)
+	if hint != "" {
+		return fmt.Errorf("launchctl %s: %s: %w\n  %s", verb, outStr, err, hint)
+	}
+	return fmt.Errorf("launchctl %s: %s: %w", verb, outStr, err)
+}
+
 func (m *launchdManager) Install() error {
+	if err := checkNotRoot(); err != nil {
+		return err
+	}
+
 	if err := m.writePlist(); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
@@ -97,11 +153,11 @@ func (m *launchdManager) Install() error {
 			}
 			cmd2 := exec.Command("launchctl", "bootstrap", fmt.Sprintf("gui/%d", uid), m.plistPath())
 			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-				return fmt.Errorf("launchctl re-bootstrap: %s: %w", strings.TrimSpace(string(out2)), err2)
+				return wrapLaunchctlError("re-bootstrap", string(out2), err2)
 			}
 			return nil
 		}
-		return fmt.Errorf("launchctl bootstrap: %s: %w", outStr, err)
+		return wrapLaunchctlError("bootstrap", string(out), err)
 	}
 	return nil
 }
@@ -118,6 +174,10 @@ func (m *launchdManager) Uninstall() error {
 }
 
 func (m *launchdManager) Start() error {
+	if err := checkNotRoot(); err != nil {
+		return err
+	}
+
 	uid := os.Getuid()
 	domain := fmt.Sprintf("gui/%d", uid)
 	target := fmt.Sprintf("%s/%s", domain, launchdLabel)
@@ -134,12 +194,16 @@ func (m *launchdManager) Start() error {
 	}
 	cmd = exec.Command("launchctl", "bootstrap", domain, m.plistPath())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %s: %w", strings.TrimSpace(string(out)), err)
+		return wrapLaunchctlError("bootstrap", string(out), err)
 	}
 	return nil
 }
 
 func (m *launchdManager) Stop() error {
+	if err := checkNotRoot(); err != nil {
+		return err
+	}
+
 	// Use bootout to fully unload the service from the launchd domain.
 	// "launchctl kill SIGTERM" only sends a signal — launchd restarts the
 	// service immediately due to KeepAlive. bootout unloads the job so it
@@ -154,7 +218,7 @@ func (m *launchdManager) Stop() error {
 			strings.Contains(outStr, "No such process") {
 			return nil
 		}
-		return fmt.Errorf("launchctl bootout: %s: %w", outStr, err)
+		return wrapLaunchctlError("bootout", string(out), err)
 	}
 	return nil
 }
