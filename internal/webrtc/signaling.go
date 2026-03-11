@@ -279,7 +279,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	dialer := websocket.DefaultDialer
 	conn, resp, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
-		if resp != nil {
+		if resp != nil && resp.Body != nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if hmacErr := auth.CheckHMACRejection(resp.StatusCode, body, sc.serverURL); hmacErr != nil {

@@ -139,7 +139,7 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 	dialer := websocket.DefaultDialer
 	conn, resp, err := dialer.DialContext(ctx, wsURL, SignWebSocketHeaders(wsURL, hmacSecret))
 	if err != nil {
-		if resp != nil {
+		if resp != nil && resp.Body != nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 			if hmacErr := CheckHMACRejection(resp.StatusCode, body, serverURL); hmacErr != nil {
