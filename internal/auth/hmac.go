@@ -54,9 +54,3 @@ func computeHMAC(secret, timestamp, path string) string {
 	mac.Write([]byte(message))
 	return hex.EncodeToString(mac.Sum(nil))
 }
-
-// ComputeHMACForTest is exported for cross-platform test vector validation.
-// It computes HMAC-SHA256(secret, "{timestamp}:{path}") with caller-supplied values.
-func ComputeHMACForTest(secret, timestamp, path string) string {
-	return computeHMAC(secret, timestamp, path)
-}

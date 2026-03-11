@@ -106,7 +106,7 @@ func TestCrossplatformTestVector(t *testing.T) {
 	path := "/auth/token"
 	expectedHex := "724c81d78ba888524abb90d0de772502eda085ceb125c0fb8b2aaddeb3d0604c"
 
-	got := ComputeHMACForTest(secret, timestamp, path)
+	got := computeHMAC(secret, timestamp, path)
 	if got != expectedHex {
 		t.Errorf("cross-platform test vector mismatch\n  got:  %s\n  want: %s", got, expectedHex)
 	}
