@@ -187,6 +187,14 @@ func runAgent(cpuProfile, memProfile string) {
 			agent.RemovePIDFile(agent.PIDFilePath(paths))
 			os.Exit(0)
 		}
+		// HMAC rejection means this binary doesn't match the server's
+		// expected client credentials. Won't self-resolve on restart.
+		var hmacErr *auth.HMACRejectedError
+		if errors.As(agentErr, &hmacErr) {
+			fmt.Fprintf(os.Stderr, "fatal: %v\n", agentErr)
+			agent.RemovePIDFile(agent.PIDFilePath(paths))
+			os.Exit(0)
+		}
 		// Runtime errors: exit 1 so service manager restarts us.
 		os.Exit(1)
 	}

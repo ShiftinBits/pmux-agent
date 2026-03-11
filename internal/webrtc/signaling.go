@@ -4,7 +4,9 @@ package webrtc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -163,6 +165,13 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		// HMAC rejection is permanent — stop retrying immediately.
+		var hmacErr *auth.HMACRejectedError
+		if errors.As(err, &hmacErr) {
+			sc.logger.Error("signaling server rejected agent credentials", "error", err)
+			return err
+		}
+
 		// Reset backoff and failure tracking after a successful connection
 		if connected {
 			backoff = initialBackoff
@@ -268,8 +277,15 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
+	conn, resp, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if hmacErr := auth.CheckHMACRejection(resp.StatusCode, body, sc.serverURL); hmacErr != nil {
+				return false, hmacErr
+			}
+		}
 		return false, fmt.Errorf("connect to signaling server: %w", err)
 	}
 

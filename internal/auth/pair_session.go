@@ -109,6 +109,9 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if hmacErr := CheckHMACRejection(resp.StatusCode, respBody, serverURL); hmacErr != nil {
+			return nil, hmacErr
+		}
 		return nil, errors.New(serverError(resp.StatusCode, respBody))
 	}
 
@@ -134,8 +137,15 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.DialContext(ctx, wsURL, SignWebSocketHeaders(wsURL, hmacSecret))
+	conn, resp, err := dialer.DialContext(ctx, wsURL, SignWebSocketHeaders(wsURL, hmacSecret))
 	if err != nil {
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if hmacErr := CheckHMACRejection(resp.StatusCode, body, serverURL); hmacErr != nil {
+				return nil, hmacErr
+			}
+		}
 		return nil, fmt.Errorf("connect to signaling server: %s", connError(err))
 	}
 	defer conn.Close()

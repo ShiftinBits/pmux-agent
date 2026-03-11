@@ -58,6 +58,9 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecr
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if hmacErr := CheckHMACRejection(resp.StatusCode, respBody, serverURL); hmacErr != nil {
+			return "", hmacErr
+		}
 		return "", errors.New(serverError(resp.StatusCode, respBody))
 	}
 
