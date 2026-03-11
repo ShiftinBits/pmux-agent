@@ -27,7 +27,7 @@ func TestRunUninstall_UserCancels(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("n\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("n\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestRunUninstall_EOF(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader(""), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader(""), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRunUninstall_FullUninstall(t *testing.T) {
 	mgr := &mockServiceManager{installed: true}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestRunUninstall_KeepConfig(t *testing.T) {
 	mgr := &mockServiceManager{installed: true}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, true, "", strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, true, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRunUninstall_NoIdentity(t *testing.T) {
 	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -174,5 +174,60 @@ func TestRunUninstall_NoIdentity(t *testing.T) {
 	}
 	if !strings.Contains(output, "PocketMux uninstalled successfully.") {
 		t.Errorf("expected success message, got: %s", output)
+	}
+}
+
+func TestRunUninstall_YesFlag_SkipsPrompt(t *testing.T) {
+	dir := t.TempDir()
+	paths := testUninstallPaths(dir)
+	store := auth.NewMemorySecretStore()
+	mgr := &mockServiceManager{}
+
+	var buf bytes.Buffer
+	// Empty reader — would block if it tried to read
+	err := RunUninstall(paths, store, mgr, false, "", true, strings.NewReader(""), &buf)
+	if err != nil {
+		t.Fatalf("RunUninstall: %v", err)
+	}
+
+	output := buf.String()
+	if strings.Contains(output, "Proceed with uninstall? [y/N]") {
+		t.Error("should not prompt when --yes is set")
+	}
+	if !strings.Contains(output, "Uninstalling PocketMux") {
+		t.Errorf("expected 'Uninstalling PocketMux' header, got: %s", output)
+	}
+	if !strings.Contains(output, "PocketMux uninstalled successfully.") {
+		t.Errorf("expected success message, got: %s", output)
+	}
+}
+
+func TestRunUninstall_YesFlag_WithKeepConfig(t *testing.T) {
+	dir := t.TempDir()
+	paths := testUninstallPaths(dir)
+
+	if err := os.MkdirAll(paths.KeysDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte("name = \"test\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := auth.NewMemorySecretStore()
+	_ = store.Set(auth.SecretKeyEd25519Private, []byte("fake-key-data"))
+	mgr := &mockServiceManager{installed: true}
+
+	var buf bytes.Buffer
+	err := RunUninstall(paths, store, mgr, true, "", true, strings.NewReader(""), &buf)
+	if err != nil {
+		t.Fatalf("RunUninstall: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Config and keys preserved (--keep-config).") {
+		t.Errorf("expected keep-config message, got: %s", output)
+	}
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Error("config directory should have been preserved")
 	}
 }

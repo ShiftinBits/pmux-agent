@@ -18,29 +18,40 @@ import (
 // It stops the agent, uninstalls the OS service, un-registers from the
 // signaling server, and removes local config/keys.
 // If keepConfig is true, local config and keys are preserved.
-func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, hmacSecret string, r io.Reader, w io.Writer) error {
-	// Step 1: Interactive confirmation
-	fmt.Fprintln(w, "This will remove PocketMux from this host:")
-	fmt.Fprintln(w, "  • Stop the agent process")
-	fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
-	fmt.Fprintln(w, "  • Un-register this host from the signaling server")
-	if !keepConfig {
-		fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
-	}
-	fmt.Fprint(w, "\nProceed with uninstall? [y/N] ")
-
-	var response string
-	if _, err := fmt.Fscanln(r, &response); err != nil {
+func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, hmacSecret string, skipConfirm bool, r io.Reader, w io.Writer) error {
+	if skipConfirm {
+		fmt.Fprintln(w, "Uninstalling PocketMux from this host:")
+		fmt.Fprintln(w, "  • Stop the agent process")
+		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
+		fmt.Fprintln(w, "  • Un-register this host from the signaling server")
+		if !keepConfig {
+			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
+		}
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Cancelled.")
-		return nil
-	}
-	if strings.ToLower(response) != "y" {
-		fmt.Fprintln(w, "Cancelled.")
-		return nil
-	}
+	} else {
+		// Step 1: Interactive confirmation
+		fmt.Fprintln(w, "This will remove PocketMux from this host:")
+		fmt.Fprintln(w, "  • Stop the agent process")
+		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
+		fmt.Fprintln(w, "  • Un-register this host from the signaling server")
+		if !keepConfig {
+			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
+		}
+		fmt.Fprint(w, "\nProceed with uninstall? [y/N] ")
 
-	fmt.Fprintln(w)
+		var response string
+		if _, err := fmt.Fscanln(r, &response); err != nil {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Cancelled.")
+			return nil
+		}
+		if strings.ToLower(response) != "y" {
+			fmt.Fprintln(w, "Cancelled.")
+			return nil
+		}
+
+		fmt.Fprintln(w)
+	}
 
 	// Step 2: Stop agent process (best-effort)
 	if err := StopRunning(paths); err != nil {

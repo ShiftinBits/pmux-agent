@@ -530,7 +530,7 @@ func handleUninstall(args []string) {
 	exe, _ := os.Executable()
 	mgr := service.NewManager(exe, paths.ConfigDir)
 
-	if err := agent.RunUninstall(paths, store, mgr, keepConfig, hmacSecret, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunUninstall(paths, store, mgr, keepConfig, hmacSecret, false, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
