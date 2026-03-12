@@ -668,6 +668,84 @@ func TestValidate_ValidLogLevels(t *testing.T) {
 	}
 }
 
+func TestConfigSource_String(t *testing.T) {
+	tests := []struct {
+		source configSource
+		want   string
+	}{
+		{sourceDefault, "default"},
+		{sourceFile, "file"},
+		{sourceEnv, "env"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.source.String(); got != tt.want {
+				t.Errorf("configSource(%d).String() = %q, want %q", tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultPaths(t *testing.T) {
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths() error: %v", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir() error: %v", err)
+	}
+
+	wantConfigDir := filepath.Join(home, ".config", "pmux")
+	if paths.ConfigDir != wantConfigDir {
+		t.Errorf("ConfigDir = %q, want %q", paths.ConfigDir, wantConfigDir)
+	}
+	if paths.KeysDir != filepath.Join(wantConfigDir, "keys") {
+		t.Errorf("KeysDir = %q, want %q", paths.KeysDir, filepath.Join(wantConfigDir, "keys"))
+	}
+	if paths.PairedDevices != filepath.Join(wantConfigDir, "paired_devices.json") {
+		t.Errorf("PairedDevices = %q, want %q", paths.PairedDevices, filepath.Join(wantConfigDir, "paired_devices.json"))
+	}
+	if paths.ConfigFile != filepath.Join(wantConfigDir, "config.toml") {
+		t.Errorf("ConfigFile = %q, want %q", paths.ConfigFile, filepath.Join(wantConfigDir, "config.toml"))
+	}
+}
+
+func TestEnsureDirs(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		ConfigDir:     filepath.Join(dir, "pmux"),
+		KeysDir:       filepath.Join(dir, "pmux", "keys"),
+		PairedDevices: filepath.Join(dir, "pmux", "paired_devices.json"),
+		ConfigFile:    filepath.Join(dir, "pmux", "config.toml"),
+	}
+
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error: %v", err)
+	}
+
+	// Verify KeysDir was created (EnsureDirs uses MkdirAll on KeysDir which also creates ConfigDir)
+	if info, err := os.Stat(paths.KeysDir); err != nil {
+		t.Errorf("KeysDir not created: %v", err)
+	} else if !info.IsDir() {
+		t.Errorf("KeysDir is not a directory")
+	}
+
+	// Verify directory permissions are 0700
+	if info, err := os.Stat(paths.KeysDir); err == nil {
+		if perm := info.Mode().Perm(); perm != 0700 {
+			t.Errorf("KeysDir permissions = %o, want 0700", perm)
+		}
+	}
+
+	// Calling EnsureDirs again should be idempotent
+	if err := paths.EnsureDirs(); err != nil {
+		t.Errorf("EnsureDirs() second call error: %v", err)
+	}
+}
+
 // containsAll checks that s contains all of the given substrings.
 func containsAll(s string, subs []string) bool {
 	for _, sub := range subs {
