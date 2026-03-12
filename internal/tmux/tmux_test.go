@@ -426,6 +426,43 @@ func TestWindowForPane_InvalidTarget(t *testing.T) {
 	}
 }
 
+func TestPaneExists_True(t *testing.T) {
+	c := testClient(t)
+
+	_, err := c.CreateSession("pane-exists-true", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	if !c.PaneExists(paneID) {
+		t.Errorf("PaneExists(%q) = false, want true", paneID)
+	}
+}
+
+func TestPaneExists_False(t *testing.T) {
+	c := testClient(t)
+
+	// No sessions — pane %99999 cannot exist
+	if c.PaneExists("%99999") {
+		t.Error("PaneExists(%99999) = true, want false for nonexistent pane")
+	}
+}
+
+func TestPaneExists_InvalidTarget(t *testing.T) {
+	c := testClient(t)
+
+	// Shell metacharacters in pane ID — tmux command will fail, PaneExists returns false
+	if c.PaneExists(";evil-cmd") {
+		t.Error("PaneExists(;evil-cmd) = true, want false for invalid target")
+	}
+}
+
 func TestIsolationFromDefaultSocket(t *testing.T) {
 	c := testClient(t)
 

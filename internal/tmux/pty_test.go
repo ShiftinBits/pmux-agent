@@ -253,6 +253,28 @@ func TestAttachPane_InitialContent(t *testing.T) {
 	}
 }
 
+func TestPaneBridge_AttachPane_NonexistentPane(t *testing.T) {
+	c := testClient(t)
+
+	// No sessions started — pane %99999 does not exist.
+	// pipe-pane will fail because the target is unknown to tmux.
+	_, err := c.AttachPane("%99999", 80, 24)
+	if err == nil {
+		t.Fatal("AttachPane with nonexistent pane should return error")
+	}
+}
+
+func TestPaneBridge_AttachPane_InvalidPaneID(t *testing.T) {
+	c := testClient(t)
+
+	// Pane ID containing shell metacharacters.
+	// pipe-pane will fail because tmux rejects the invalid target.
+	_, err := c.AttachPane(";evil-cmd", 80, 24)
+	if err == nil {
+		t.Fatal("AttachPane with invalid pane ID should return error")
+	}
+}
+
 func TestAttachPane_HostUndisturbed(t *testing.T) {
 	c := testClient(t)
 
