@@ -463,6 +463,49 @@ func TestPaneExists_InvalidTarget(t *testing.T) {
 	}
 }
 
+func TestCursorState(t *testing.T) {
+	c := testClient(t)
+
+	_, err := c.CreateSession("cursor-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession() error: %v", err)
+	}
+
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() error: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	state, err := c.CursorState(paneID)
+	if err != nil {
+		t.Fatalf("CursorState() error: %v", err)
+	}
+
+	// Fresh shell: cursor should be visible, not in alternate screen
+	if !state.CursorVisible {
+		t.Error("CursorVisible = false, want true for normal shell")
+	}
+	if state.AlternateOn {
+		t.Error("AlternateOn = true, want false for normal shell")
+	}
+	// Cursor position should be non-negative
+	if state.CursorX < 0 || state.CursorY < 0 {
+		t.Errorf("negative cursor position: x=%d y=%d", state.CursorX, state.CursorY)
+	}
+}
+
+func TestCursorState_InvalidTarget(t *testing.T) {
+	c := NewClient(testSocket)
+	_, err := c.CursorState(";evil-cmd")
+	if err == nil {
+		t.Fatal("expected error for invalid target")
+	}
+	if !errors.Is(err, ErrInvalidTarget) {
+		t.Errorf("expected ErrInvalidTarget, got: %v", err)
+	}
+}
+
 func TestIsolationFromDefaultSocket(t *testing.T) {
 	c := testClient(t)
 

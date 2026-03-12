@@ -284,6 +284,22 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	}
 	h.sendMsg(peerID, attachedEvent)
 
+	// Synchronize terminal mode state with xterm.js on the mobile.
+	// pipe-pane only captures output AFTER it starts — mode-setting sequences
+	// the pane's program sent earlier (alternate screen, cursor hide) are lost.
+	// Query tmux for the pane's current mode state and send restoration
+	// sequences before any pipe-pane output reaches the mobile.
+	cursorState, csErr := h.tmux.CursorState(req.PaneID)
+	if csErr != nil {
+		h.logger.Debug("cursor state query failed, skipping mode sync", "peer", peerID, "error", csErr)
+	}
+
+	// Build mode restoration prefix: alternate screen + cursor visibility.
+	var modePrefix []byte
+	if csErr == nil && cursorState.AlternateOn {
+		modePrefix = append(modePrefix, "\x1b[?1049h"...)
+	}
+
 	// Skip initial capture-pane content on fresh attach — the captured buffer
 	// contains prompts reflowed from the computer's wider terminal, producing
 	// staircase indentation. The shell is already at the correct mobile width
@@ -291,7 +307,18 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	// On reattach, send initial content so the mobile can restore its buffer.
 	if req.Reattach {
 		if initial := bridge.InitialContent(); initial != "" {
-			initialData := []byte(initial)
+			// Prepend mode restoration (alt screen) and append cursor
+			// position + visibility so xterm.js matches tmux's state.
+			initialData := make([]byte, 0, len(modePrefix)+len(initial)+32)
+			initialData = append(initialData, modePrefix...)
+			initialData = append(initialData, []byte(initial)...)
+			if csErr == nil {
+				initialData = fmt.Appendf(initialData,
+					"\x1b[%d;%dH", cursorState.CursorY+1, cursorState.CursorX+1)
+				if !cursorState.CursorVisible {
+					initialData = append(initialData, "\x1b[?25l"...)
+				}
+			}
 			h.mu.Lock()
 			compressor := h.compressors[peerID]
 			h.mu.Unlock()
@@ -307,6 +334,26 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 				Data: initialData,
 			})
 		}
+	} else if csErr == nil && (cursorState.AlternateOn || !cursorState.CursorVisible) {
+		// Fresh attach: send mode state so xterm.js enters the correct
+		// terminal mode before pipe-pane output arrives.
+		stateData := make([]byte, 0, 32)
+		stateData = append(stateData, modePrefix...)
+		if !cursorState.CursorVisible {
+			stateData = append(stateData, "\x1b[?25l"...)
+		}
+		h.mu.Lock()
+		compressor := h.compressors[peerID]
+		h.mu.Unlock()
+		if compressor != nil {
+			if compressed, err := compressor.Compress(stateData); err == nil {
+				stateData = compressed
+			}
+		}
+		h.sendMsg(peerID, &protocol.OutputEvent{
+			Type: "output",
+			Data: stateData,
+		})
 	}
 
 	// Start streaming output in background with context for lifecycle management

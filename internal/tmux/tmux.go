@@ -431,6 +431,47 @@ func (c *Client) CapturePane(paneID string) (string, error) {
 	return out, nil
 }
 
+// PaneCursorState holds the cursor position and terminal mode state of a pane.
+type PaneCursorState struct {
+	CursorX       int  // 0-based column
+	CursorY       int  // 0-based row
+	AlternateOn   bool // pane is using the alternate screen buffer
+	CursorVisible bool // DECTCEM state (true = cursor shown)
+}
+
+// CursorState queries the cursor position and terminal mode flags of a pane.
+// cursor_flag (DECTCEM) requires tmux 3.2+; if unavailable, CursorVisible
+// defaults to true. This is used to synchronize xterm.js mode state on
+// mobile attach, since pipe-pane only captures output after it starts —
+// mode-setting sequences sent earlier (alt screen, cursor hide) are lost.
+func (c *Client) CursorState(paneID string) (PaneCursorState, error) {
+	if err := validateTarget(paneID); err != nil {
+		return PaneCursorState{CursorVisible: true}, fmt.Errorf("cursor-state: %w", err)
+	}
+	out, err := c.run("display-message", "-t", paneID, "-p",
+		"#{cursor_x}:#{cursor_y}:#{alternate_on}:#{cursor_flag}")
+	if err != nil {
+		return PaneCursorState{CursorVisible: true}, fmt.Errorf("cursor-state: %w: %s", err, out)
+	}
+	parts := strings.SplitN(strings.TrimSpace(out), ":", 4)
+
+	state := PaneCursorState{CursorVisible: true} // safe default
+	if len(parts) >= 2 {
+		state.CursorX, _ = strconv.Atoi(parts[0])
+		state.CursorY, _ = strconv.Atoi(parts[1])
+	}
+	if len(parts) >= 3 {
+		state.AlternateOn = parts[2] == "1"
+	}
+	if len(parts) >= 4 && parts[3] != "" {
+		// cursor_flag: "1" = visible, "0" = hidden.
+		// If tmux doesn't recognize the variable, it outputs empty or
+		// the literal format string — both handled by defaulting to true.
+		state.CursorVisible = parts[3] != "0"
+	}
+	return state, nil
+}
+
 // PaneExists returns true if a pane with the given ID exists in the tmux server.
 func (c *Client) PaneExists(paneID string) bool {
 	out, err := c.run("display-message", "-t", paneID, "-p", "#{pane_id}")
