@@ -685,25 +685,6 @@ func handleAgentStart() {
 		os.Exit(1)
 	}
 
-	// Check if already running
-	pidFile := agent.PIDFilePath(paths)
-	if pid, err := agent.ReadPIDFile(pidFile); err == nil && agent.IsProcessRunning(pid) {
-		fmt.Printf("Agent is already running (PID %d)\n", pid)
-		return
-	}
-
-	// Try service manager first
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-	if mgr.IsInstalled() {
-		if err := mgr.Start(); err == nil {
-			fmt.Println("Agent started (via service manager)")
-			return
-		}
-		// Fall through to direct spawn
-	}
-
-	// Direct spawn
 	cfg := loadEffectiveConfig()
 	store, err := initSecretStore(paths, cfg)
 	if err != nil {
@@ -711,11 +692,13 @@ func handleAgentStart() {
 		os.Exit(1)
 	}
 
-	if err := agent.EnsureRunning(paths, store, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to start agent: %v\n", err)
+	exe, _ := os.Executable()
+	mgr := service.NewManager(exe, paths.ConfigDir)
+
+	if err := agent.RunAgentStart(paths, store, mgr, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Agent started")
 }
 
 func handleAgentInstall() {
