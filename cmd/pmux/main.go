@@ -1,23 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"runtime/pprof"
-	"strings"
 	"syscall"
-	"time"
-
-	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/shiftinbits/pmux-agent/internal/agent"
 	"github.com/shiftinbits/pmux-agent/internal/auth"
@@ -265,7 +258,6 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	// Load config to get server URL, host name, and secret backend
 	cfg, _ := config.LoadConfig(paths.ConfigFile)
 
 	store, err := initSecretStore(paths, cfg)
@@ -274,169 +266,12 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	// Must have identity first
-	if !auth.HasIdentity(paths.KeysDir, store) {
-		fmt.Fprintf(os.Stderr, "⚠ no identity found. Run 'pmux init' first.\n")
-		os.Exit(1)
-	}
-
-	id, err := auth.LoadIdentity(paths.KeysDir, store, slog.Default())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to load identity: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Check for existing pairing
-	pairedDevicesPath := filepath.Join(paths.ConfigDir, "paired_devices.json")
-	existingDevice, err := auth.LoadPairedDevice(pairedDevicesPath, store)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load paired devices: %v\n", err)
-		os.Exit(1)
-	}
-
-	if existingDevice != nil {
-		name := existingDevice.Name
-		if name == "" {
-			name = existingDevice.DeviceID[:12] + "..."
-		}
-		pairedDate := existingDevice.PairedAt.Format("2006-01-02")
-		fmt.Printf("A device is already paired: %s (paired %s). Replace it? [y/N] ", name, pairedDate)
-
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		answer = strings.TrimSpace(strings.ToLower(answer))
-		if answer != "y" && answer != "yes" {
-			fmt.Println("Pairing cancelled.")
-			return
-		}
-
-		if err := auth.RemovePairedDevice(pairedDevicesPath, existingDevice.DeviceID, store); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to remove paired device: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	serverURL := cfg.ServerURL()
-
-	// Warn if using unencrypted HTTP for non-local server
-	if strings.HasPrefix(serverURL, "http://") || strings.HasPrefix(serverURL, "ws://") {
-		host := strings.TrimPrefix(strings.TrimPrefix(serverURL, "http://"), "ws://")
-		host = strings.Split(host, "/")[0] // strip path
-		host = strings.Split(host, ":")[0] // strip port
-		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-			fmt.Fprintf(os.Stderr, "WARNING: Server URL %q uses unencrypted HTTP.\n", serverURL)
-			fmt.Fprintf(os.Stderr, "  Pairing data (public keys, device IDs) will be sent in cleartext.\n")
-			fmt.Fprintf(os.Stderr, "  Use https:// for production servers.\n\n")
-		}
-	}
-
-	// Generate X25519 ephemeral keypair for key exchange
-	x25519kp, err := auth.GenerateX25519Keypair()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to generate X25519 keypair: %v\n", err)
-		os.Exit(1)
-	}
-
-	hostName := cfg.Name
-	if hostName == "" {
-		hostName = config.DefaultHostName()
-	}
-
-	// Initiate pairing with signaling server
-	fmt.Println("Contacting signaling server...")
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	pairResp, err := auth.InitiatePairing(id, x25519kp.PublicKeyBase64(), serverURL, httpClient, hostName, hmacSecret)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to initiate pairing: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Build and display QR code
-	qrData, err := auth.BuildQRPayload(
-		pairResp.PairingCode,
-		x25519kp.PublicKeyBase64(),
-		id.DeviceID,
-		serverURL,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to build QR payload: %v\n", err)
-		os.Exit(1)
-	}
-
-	qr, err := qrcode.New(qrData, qrcode.Low)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to generate QR code: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("\nScan this QR code with PocketMux on your mobile device:")
-	fmt.Println()
-	fmt.Println(qr.ToSmallString(false))
-	fmt.Printf("Manual pairing code: %s\n\n", pairResp.PairingCode)
-	fmt.Println("Waiting for mobile device to complete pairing...")
-
-	// Stop the background agent if running. During pairing, the pair CLI
-	// opens its own WebSocket to receive pair_complete. A competing agent
-	// WebSocket for the same device ID can intercept the message after DO
-	// hibernation, causing the pair CLI to hang. Stopping the agent ensures
-	// only one WebSocket exists for this device during pairing.
-	if err := agent.StopRunning(paths); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to stop agent for pairing: %v\n", err)
-	}
-
-	// Get JWT for WebSocket auth
-	jwt, err := auth.ExchangeToken(id, serverURL, httpClient, hmacSecret)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to authenticate: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Wait for mobile to complete pairing via WebSocket
-	ctx, cancel := context.WithTimeout(context.Background(), auth.PairTimeout)
-	defer cancel()
-
-	pairComplete, err := auth.WaitForPairComplete(ctx, serverURL, jwt, hmacSecret)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ pairing failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Compute shared secret via X25519 key exchange
-	sharedSecret, err := x25519kp.ComputeSharedSecret(pairComplete.MobileX25519PublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ key exchange failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Store paired device
-	if err := paths.EnsureDirs(); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
-		os.Exit(1)
-	}
-
-	mobileName := auth.TruncateMobileName(pairComplete.MobileName)
-	err = auth.AddPairedDevice(paths.PairedDevices, auth.PairedDevice{
-		DeviceID:     pairComplete.MobileDeviceID,
-		Name:         mobileName,
-		SharedSecret: sharedSecret,
-		PairedAt:     time.Now(),
-	}, store)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to save paired device: %v\n", err)
-		os.Exit(1)
-	}
-
-	displayName := mobileName
-	if displayName == "" {
-		displayName = pairComplete.MobileDeviceID
-	}
-	fmt.Printf("Paired successfully with device '%s'\n", displayName)
-
-	// Restart the background agent (stopped earlier to avoid WebSocket race).
 	exe, _ := os.Executable()
 	mgr := service.NewManager(exe, paths.ConfigDir)
-	if err := agent.EnsureRunning(paths, store, mgr); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to restart agent: %v\n", err)
+
+	if err := agent.RunPair(paths, cfg, store, mgr, hmacSecret, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
 	}
 }
 
