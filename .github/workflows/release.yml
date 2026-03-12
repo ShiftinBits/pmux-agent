@@ -29,15 +29,9 @@ jobs:
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
       - name: Install Snapcraft
-        run: sudo snap install snapcraft --classic
-
-      - name: Setup keyring for Snapcraft
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnome-keyring dbus-x11
-          eval $(dbus-launch --sh-syntax)
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-          echo -n "" | gnome-keyring-daemon --unlock
+          sudo apt-get -yq --no-install-suggests --no-install-recommends install snapcraft
 
       - uses: goreleaser/goreleaser-action@v6
         with:
