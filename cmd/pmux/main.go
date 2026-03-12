@@ -700,79 +700,16 @@ func handleAgentStop() {
 		os.Exit(1)
 	}
 
-	// Try service manager first (prevents auto-restart)
 	exe, _ := os.Executable()
 	mgr := service.NewManager(exe, paths.ConfigDir)
-	if mgr.IsInstalled() {
-		if err := mgr.Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠ service stop failed: %v\n", err)
-			// Fall through to direct stop
-		} else {
-			fmt.Println("Agent stopped")
-			return
+
+	if err := agent.RunAgentStop(paths, mgr, os.Stdout); err != nil {
+		if errors.Is(err, agent.ErrAgentNotRunning) {
+			fmt.Println("Agent is not running")
+			os.Exit(1)
 		}
-	}
-
-	// Direct stop via PID file
-	pidFile := agent.PIDFilePath(paths)
-
-	pid, err := agent.ReadPIDFile(pidFile)
-	if err != nil {
-		fmt.Println("Agent is not running")
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
-	}
-
-	if !agent.IsProcessRunning(pid) {
-		fmt.Println("Agent is not running (stale PID file cleaned up)")
-		agent.RemovePIDFile(pidFile)
-		os.Exit(0)
-	}
-
-	process, ferr := os.FindProcess(pid)
-	if ferr != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to find process %d: %v\n", pid, ferr)
-		os.Exit(1)
-	}
-
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to send SIGTERM to PID %d: %v\n", pid, err)
-		os.Exit(1)
-	}
-
-	// Wait up to 5 seconds for process to exit (poll every 200ms)
-	const (
-		stopTimeout  = 5 * time.Second
-		pollInterval = 200 * time.Millisecond
-	)
-
-	deadline := time.After(stopTimeout)
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-deadline:
-			// Process didn't exit in time - send SIGKILL
-			if err := process.Signal(syscall.SIGKILL); err != nil {
-				// Process may have exited between the last check and now
-				if !agent.IsProcessRunning(pid) {
-					fmt.Println("Agent stopped")
-					agent.RemovePIDFile(pidFile)
-					return
-				}
-				fmt.Fprintf(os.Stderr, "⚠ failed to send SIGKILL to PID %d: %v\n", pid, err)
-				os.Exit(1)
-			}
-			fmt.Println("Agent forcefully killed")
-			agent.RemovePIDFile(pidFile)
-			return
-		case <-ticker.C:
-			if !agent.IsProcessRunning(pid) {
-				fmt.Println("Agent stopped")
-				agent.RemovePIDFile(pidFile)
-				return
-			}
-		}
 	}
 }
 
