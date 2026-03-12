@@ -104,25 +104,6 @@ nfpms:
         dependencies:
           - tmux
 
-# Snap package (classic confinement — needs full filesystem + network access for tmux)
-# snapcrafts:
-#   - id: pmux-snap
-#     ids:
-#       - pmux-linux
-#     name: pmux
-#     publish: true
-#     summary: Secure and private remote tmux access from your phone.
-#     description: |
-#       Your tmux sessions, in your pocket.
-#       Secure and private access to your tmux sessions from your phone.
-#       End-to-end encrypted, peer-to-peer connected.
-#     grade: stable
-#     confinement: classic
-#     license: MIT
-#     apps:
-#       pmux:
-#         command: pmux
-
 checksum:
   name_template: checksums.txt
   algorithm: sha256
