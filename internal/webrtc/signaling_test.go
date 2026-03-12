@@ -483,3 +483,397 @@ func TestSignalingClient_SendsNameInAuth(t *testing.T) {
 		t.Errorf("expected auth message name=%q, got %q", "my-workstation", name)
 	}
 }
+
+func TestSignalActivity_WakeFromDormancy(t *testing.T) {
+	id, logger := testSetup(t)
+
+	// Set up a server that stays connected long enough for us to observe behaviour.
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		// Stay alive so the connection doesn't drop during the test.
+		time.Sleep(3 * time.Second)
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	// Place the client in dormancy directly — same package, fields are accessible.
+	sc.mu.Lock()
+	sc.dormant = true
+	sc.failureStart = time.Now().Add(-DormancyTimeout - time.Second)
+	sc.mu.Unlock()
+
+	// Verify dormant before signal.
+	sc.mu.Lock()
+	dormantBefore := sc.dormant
+	sc.mu.Unlock()
+	if !dormantBefore {
+		t.Fatal("expected client to be dormant before SignalActivity()")
+	}
+
+	// Run in background — it will block on dormancy until signalled.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Give Run() a moment to enter the dormancy wait branch.
+	time.Sleep(50 * time.Millisecond)
+
+	// Send activity signal.
+	sc.SignalActivity()
+
+	// Wait briefly for Run() to process the signal and clear dormancy.
+	time.Sleep(300 * time.Millisecond)
+
+	sc.mu.Lock()
+	dormantAfter := sc.dormant
+	sc.mu.Unlock()
+
+	if dormantAfter {
+		t.Error("expected dormant=false after SignalActivity(), still dormant")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestJWT_ReturnsCurrentToken(t *testing.T) {
+	id, logger := testSetup(t)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		time.Sleep(2 * time.Second)
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	// JWT() should be empty before any auth.
+	if got := sc.JWT(); got != "" {
+		t.Errorf("expected empty JWT before auth, got %q", got)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Wait for the auth flow to complete and token to be cached.
+	time.Sleep(400 * time.Millisecond)
+
+	got := sc.JWT()
+	if got != "test-jwt-token" {
+		t.Errorf("JWT() = %q, want %q", got, "test-jwt-token")
+	}
+
+	cancel()
+	<-done
+}
+
+func TestTokenRefreshLoop_RefreshesToken(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var tokenCallCount atomic.Int32
+
+	// Build a custom server that counts /auth/token calls and keeps WS alive.
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			tokenCallCount.Add(1)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"token":"test-jwt-token"}`))
+			return
+		}
+		if r.URL.Path == "/ws" {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.ReadMessage() // auth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+			// Stay connected for the duration of the test.
+			time.Sleep(5 * time.Second)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Wait for the initial connection + auth (one token call).
+	time.Sleep(300 * time.Millisecond)
+
+	// Force jwtExpiry into the past so tokenRefreshLoop will see needsRefresh=true
+	// on its next tick.
+	sc.mu.Lock()
+	sc.jwtExpiry = time.Now().Add(-time.Hour)
+	sc.mu.Unlock()
+
+	// tokenRefreshLoop polls every 30s, which is too slow to wait for.
+	// Instead, directly call ensureToken() to simulate what the loop does —
+	// this proves the refresh path works and increments the server counter.
+	initialCount := tokenCallCount.Load()
+	if err := sc.ensureToken(); err != nil {
+		t.Fatalf("ensureToken() after forcing expiry: %v", err)
+	}
+
+	afterCount := tokenCallCount.Load()
+	if afterCount <= initialCount {
+		t.Errorf("expected token endpoint to be called again after expiry, count stayed at %d", initialCount)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestTokenRefreshLoop_ServerError(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var tokenCallCount atomic.Int32
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			count := tokenCallCount.Add(1)
+			// First call succeeds so the client can connect; subsequent calls fail.
+			if count == 1 {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"token":"test-jwt-token"}`))
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"internal server error"}`))
+			}
+			return
+		}
+		if r.URL.Path == "/ws" {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.ReadMessage() // auth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+			time.Sleep(3 * time.Second)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Wait for initial connection.
+	time.Sleep(300 * time.Millisecond)
+
+	// Force token expiry and call ensureToken() — simulates what the refresh
+	// loop does, and the server will now return 500.
+	sc.mu.Lock()
+	sc.jwtExpiry = time.Now().Add(-time.Hour)
+	sc.mu.Unlock()
+
+	err := sc.ensureToken()
+	if err == nil {
+		t.Error("expected error from ensureToken() when server returns 500, got nil")
+	}
+
+	// Client should still be running (not panicked, not exited).
+	select {
+	case <-done:
+		t.Error("Run() exited unexpectedly after token server error")
+	default:
+		// Still running — correct.
+	}
+
+	cancel()
+	<-done
+}
+
+func TestReconnect_IncreasesBackoff(t *testing.T) {
+	id, logger := testSetup(t)
+
+	// Use a server that rejects WebSocket auth with an error response so that
+	// connectAndServe returns (false, err) on every attempt. That keeps the
+	// backoff variable growing rather than resetting on each cycle.
+	attemptTimes := make([]time.Time, 0, 6)
+	var timeMu sync.Mutex
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"token":"test-jwt-token"}`))
+			return
+		}
+		if r.URL.Path == "/ws" {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			timeMu.Lock()
+			attemptTimes = append(attemptTimes, time.Now())
+			timeMu.Unlock()
+			// Read the auth message then immediately respond with an error.
+			// This makes connectAndServe return (false, err), so backoff grows.
+			conn.ReadMessage()
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":"auth rejected"}`))
+			conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	// Enough time for: attempt 1 + 1s backoff + attempt 2 + 2s backoff + attempt 3.
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	sc.Run(ctx)
+
+	timeMu.Lock()
+	times := attemptTimes
+	timeMu.Unlock()
+
+	if len(times) < 3 {
+		t.Fatalf("expected at least 3 connection attempts to observe backoff, got %d", len(times))
+	}
+
+	// Gap between attempt 1→2 must be ≥ initialBackoff (1s).
+	// Gap between attempt 2→3 must be ≥ 2×initialBackoff (2s).
+	gap1 := times[1].Sub(times[0])
+	gap2 := times[2].Sub(times[1])
+
+	if gap1 < initialBackoff {
+		t.Errorf("gap between attempt 1 and 2 = %v, want >= %v (initialBackoff)", gap1, initialBackoff)
+	}
+	if gap2 < time.Duration(float64(initialBackoff)*backoffFactor) {
+		t.Errorf("gap between attempt 2 and 3 = %v, want >= %v (2×initialBackoff)", gap2,
+			time.Duration(float64(initialBackoff)*backoffFactor))
+	}
+}
+
+func TestSignalingClient_SendWritesJSON(t *testing.T) {
+	id, logger := testSetup(t)
+
+	type capture struct {
+		msg SignalingMessage
+		raw []byte
+	}
+	var received []capture
+	var mu sync.Mutex
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg SignalingMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+			mu.Lock()
+			received = append(received, capture{msg: msg, raw: data})
+			mu.Unlock()
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	go sc.Run(ctx)
+	time.Sleep(400 * time.Millisecond) // wait for connection
+
+	mlineIdx := 1
+	want := SignalingMessage{
+		Type:           "ice_candidate",
+		TargetDeviceID: "mobile-test-999",
+		Candidate:      "candidate:abc def",
+		SDPMid:         "audio",
+		SDPMLineIndex:  &mlineIdx,
+	}
+
+	if err := sc.Send(want); err != nil {
+		t.Fatalf("Send() error: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Find the ice_candidate message (skip presence heartbeats).
+	var got *SignalingMessage
+	for i := range received {
+		if received[i].msg.Type == "ice_candidate" {
+			got = &received[i].msg
+			break
+		}
+	}
+
+	if got == nil {
+		t.Fatal("server did not receive ice_candidate message")
+	}
+	if got.TargetDeviceID != want.TargetDeviceID {
+		t.Errorf("TargetDeviceID = %q, want %q", got.TargetDeviceID, want.TargetDeviceID)
+	}
+	if got.Candidate != want.Candidate {
+		t.Errorf("Candidate = %q, want %q", got.Candidate, want.Candidate)
+	}
+	if got.SDPMid != want.SDPMid {
+		t.Errorf("SDPMid = %q, want %q", got.SDPMid, want.SDPMid)
+	}
+	if got.SDPMLineIndex == nil || *got.SDPMLineIndex != mlineIdx {
+		t.Errorf("SDPMLineIndex = %v, want %d", got.SDPMLineIndex, mlineIdx)
+	}
+}
