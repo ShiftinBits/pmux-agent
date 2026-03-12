@@ -65,6 +65,64 @@ archives:
       - LICENSE
       - README.md
 
+# Linux packages (DEB + RPM) via nFPM
+nfpms:
+  - id: pmux-linux-packages
+    package_name: pmux
+    file_name_template: "{{ .ConventionalFileName }}"
+    ids:
+      - pmux-linux
+    vendor: ShiftinBits Inc.
+    homepage: https://pmux.io
+    maintainer: ShiftinBits Inc. <hello@shiftinbits.com>
+    description: |-
+      Your tmux sessions, in your pocket.
+      Secure and private access to your tmux sessions from your phone.
+      End-to-end encrypted, peer-to-peer connected.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    dependencies:
+      - tmux
+    recommends:
+      - systemd
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/pmux/LICENSE
+        file_info:
+          mode: 0644
+      - src: README.md
+        dst: /usr/share/doc/pmux/README.md
+        file_info:
+          mode: 0644
+    overrides:
+      rpm:
+        dependencies:
+          - tmux
+
+# Snap package (classic confinement — needs full filesystem + network access for tmux)
+snapcrafts:
+  - id: pmux-snap
+    ids:
+      - pmux-linux
+    name: pmux
+    publish: true
+    summary: Secure and private remote tmux access from your phone.
+    description: |
+      Your tmux sessions, in your pocket.
+      Secure and private access to your tmux sessions from your phone.
+      End-to-end encrypted, peer-to-peer connected.
+    grade: stable
+    confinement: classic
+    license: MIT
+    apps:
+      pmux:
+        command: pmux
+
 checksum:
   name_template: checksums.txt
   algorithm: sha256
@@ -124,12 +182,12 @@ homebrew_casks:
     ids:
       - default
     repository:
-      owner: ShiftinBits
+      owner: ShiftinBits Inc.
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://pmux.io"
-    description: "Secure remote tmux access from the PocketMux mobile app"
+    description: "Secure and private remote tmux access from your phone"
     license: MIT
     commit_msg_template: "chore: update pmux to {{ .Tag }}"
 

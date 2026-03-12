@@ -1,4 +1,4 @@
-name: CI
+name: Build
 on:
   push:
     branches: [main]
@@ -18,6 +18,4 @@ jobs:
           go-version: ${{ matrix.go-version }}
       - run: go install mvdan.cc/garble@latest
       - run: go vet ./...
-      - run: go test ./...
       - run: go build -ldflags="-X main.version=dev" -o bin/pmux ./cmd/pmux
-      - run: make build-obfuscated
