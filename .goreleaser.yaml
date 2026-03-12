@@ -182,7 +182,7 @@ homebrew_casks:
     ids:
       - default
     repository:
-      owner: ShiftinBits Inc.
+      owner: ShiftinBits
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
