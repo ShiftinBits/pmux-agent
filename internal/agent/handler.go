@@ -9,6 +9,7 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
+	"github.com/shiftinbits/pmux-agent/internal/update"
 )
 
 const (
@@ -30,11 +31,13 @@ type SendFunc func(peerID string, msg protocol.Message) error
 // Handler processes protocol messages from mobile clients and dispatches
 // them to the appropriate tmux operations.
 type Handler struct {
-	tmux         *tmux.Client
-	sizeTracker  *tmux.PaneSizeTracker
-	send         SendFunc
-	logger       *slog.Logger
-	ctx          context.Context // agent lifecycle context
+	tmux            *tmux.Client
+	sizeTracker     *tmux.PaneSizeTracker
+	send            SendFunc
+	logger          *slog.Logger
+	ctx             context.Context // agent lifecycle context
+	agentVersion    string          // version string for protocol responses
+	updateStateFile string          // path to update-state.json for update notifications
 
 	mu           sync.Mutex
 	bridges      map[string]*tmux.PaneBridge              // per-peer attached bridge
@@ -46,13 +49,15 @@ type Handler struct {
 }
 
 // NewHandler creates a protocol message handler.
-func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger) *Handler {
+func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger, agentVersion, updateStateFile string) *Handler {
 	return &Handler{
-		tmux:         tmuxClient,
-		sizeTracker:  tmux.NewPaneSizeTracker(tmuxClient),
-		send:         send,
-		logger:       logger,
-		ctx:          context.Background(), // overridden by SetContext in agent.go
+		tmux:            tmuxClient,
+		sizeTracker:     tmux.NewPaneSizeTracker(tmuxClient),
+		send:            send,
+		logger:          logger,
+		agentVersion:    agentVersion,
+		updateStateFile: updateStateFile,
+		ctx:             context.Background(), // overridden by SetContext in agent.go
 		bridges:      make(map[string]*tmux.PaneBridge),
 		cancels:      make(map[string]context.CancelFunc),
 		paneForPeer:  make(map[string]string),
@@ -68,6 +73,21 @@ func (h *Handler) SetContext(ctx context.Context) {
 	h.mu.Lock()
 	h.ctx = ctx
 	h.mu.Unlock()
+}
+
+// newSessionsEvent builds a SessionsEvent with agent version and update info populated.
+func (h *Handler) newSessionsEvent(sessions []protocol.TmuxSession) *protocol.SessionsEvent {
+	event := &protocol.SessionsEvent{
+		Type:         "sessions",
+		Sessions:     sessions,
+		AgentVersion: h.agentVersion,
+	}
+	if h.updateStateFile != "" {
+		if state, err := update.LoadState(h.updateStateFile); err == nil && state.UpdateAvailable {
+			event.UpdateAvailable = state.LatestVersion
+		}
+	}
+	return event
 }
 
 // HandleMessage processes an incoming protocol message from a peer.
@@ -181,10 +201,7 @@ func (h *Handler) handleListSessions(peerID string) {
 		}
 	}
 
-	if err := h.sendMsg(peerID, &protocol.SessionsEvent{
-		Type:     "sessions",
-		Sessions: toProtocolSessions(sessions),
-	}); err != nil {
+	if err := h.sendMsg(peerID, h.newSessionsEvent(toProtocolSessions(sessions))); err != nil {
 		h.logger.Warn("failed to send sessions event", "peer", peerID, "error", err)
 	}
 }
@@ -244,10 +261,7 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 				PaneID: req.PaneID,
 			})
 			if sessions, listErr := h.tmux.ListAll(); listErr == nil {
-				h.sendMsg(peerID, &protocol.SessionsEvent{
-					Type:     "sessions",
-					Sessions: toProtocolSessions(sessions),
-				})
+				h.sendMsg(peerID, h.newSessionsEvent(toProtocolSessions(sessions)))
 			}
 			return
 		}
@@ -557,10 +571,7 @@ func (h *Handler) handlePaneExit(peerID string) {
 	if err != nil {
 		h.logger.Warn("failed to list sessions after pane close", "error", err)
 	} else {
-		if err := h.sendMsg(peerID, &protocol.SessionsEvent{
-			Type:     "sessions",
-			Sessions: toProtocolSessions(sessions),
-		}); err != nil {
+		if err := h.sendMsg(peerID, h.newSessionsEvent(toProtocolSessions(sessions))); err != nil {
 			h.logger.Error("failed to send sessions after pane close", "peer", peerID, "error", err)
 		} else {
 			h.logger.Info("sent sessions after pane close", "peer", peerID, "sessionCount", len(sessions))

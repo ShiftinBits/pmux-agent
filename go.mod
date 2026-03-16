@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gorilla/websocket v1.5.3
+	github.com/minio/selfupdate v0.6.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/pion/ice/v4 v4.2.1
 	github.com/pion/webrtc/v4 v4.2.9
@@ -14,6 +15,7 @@ require (
 )
 
 require (
+	aead.dev/minisign v0.2.0 // indirect
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect

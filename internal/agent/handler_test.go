@@ -76,7 +76,7 @@ func testHandler(t *testing.T) (*Handler, *tmux.Client, *messageCatcher) {
 
 	tc := tmux.NewClient(handlerTestSocket)
 	catcher := &messageCatcher{}
-	h := NewHandler(tc, catcher.Send, slog.Default())
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
 	return h, tc, catcher
 }
 
@@ -844,7 +844,7 @@ func TestHandler_GoroutineLeak(t *testing.T) {
 
 	tc := tmux.NewClient(testSocket)
 	catcher := &messageCatcher{}
-	h := NewHandler(tc, catcher.Send, slog.Default())
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
 
 	// Create a persistent session so the tmux server stays alive across cycles
 	_, err := tc.CreateSession("leak-anchor", "")

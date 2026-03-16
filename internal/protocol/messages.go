@@ -72,9 +72,13 @@ func (m *PingRequest) MessageType() string { return "ping" }
 // --- Host → Mobile (Events) ---
 
 // SessionsEvent returns the full session tree.
+// AgentVersion and UpdateAvailable are optional fields added for update
+// notifications to the mobile app.
 type SessionsEvent struct {
-	Type     string        `msgpack:"type"`
-	Sessions []TmuxSession `msgpack:"sessions"`
+	Type            string        `msgpack:"type"`
+	Sessions        []TmuxSession `msgpack:"sessions"`
+	AgentVersion    string        `msgpack:"agentVersion,omitempty"`
+	UpdateAvailable string        `msgpack:"updateAvailable,omitempty"` // latest version if update available, empty otherwise
 }
 
 func (m *SessionsEvent) MessageType() string { return "sessions" }

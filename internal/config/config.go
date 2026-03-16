@@ -36,6 +36,8 @@ const (
 	EnvSecretBackend   = "PMUX_SECRET_BACKEND"
 	EnvTmuxPath        = "PMUX_TMUX_PATH"
 	EnvLogLevel        = "PMUX_LOG_LEVEL"
+	EnvUpdateEnabled   = "PMUX_UPDATE_ENABLED"
+	EnvUpdateInterval  = "PMUX_UPDATE_INTERVAL"
 )
 
 // Config holds user-editable PocketMux configuration from config.toml.
@@ -46,6 +48,32 @@ type Config struct {
 	Identity   IdentityConfig   `toml:"identity"`
 	Connection ConnectionConfig `toml:"connection"`
 	Tmux       TmuxConfig       `toml:"tmux"`
+	Update     UpdateConfig     `toml:"update"`
+}
+
+// UpdateConfig holds auto-update configuration.
+type UpdateConfig struct {
+	Enabled       bool   `toml:"enabled"`        // default true
+	CheckInterval string `toml:"check_interval"` // duration string, e.g., "24h"
+}
+
+// fileUpdateConfig is used for TOML unmarshaling so we can distinguish
+// "enabled absent" (nil) from "enabled = false" (pointer to false).
+type fileUpdateConfig struct {
+	Enabled       *bool  `toml:"enabled"`
+	CheckInterval string `toml:"check_interval"`
+}
+
+// fileConfig mirrors Config but uses fileUpdateConfig for the [update] section.
+// This is only used during TOML parsing, not as a public API.
+type fileConfig struct {
+	Name       string           `toml:"name,omitempty"`
+	LogLevel   string           `toml:"log_level,omitempty"`
+	Server     ServerConfig     `toml:"server"`
+	Identity   IdentityConfig   `toml:"identity"`
+	Connection ConnectionConfig `toml:"connection"`
+	Tmux       TmuxConfig       `toml:"tmux"`
+	Update     fileUpdateConfig `toml:"update"`
 }
 
 // ServerConfig holds signaling server configuration.
@@ -104,6 +132,8 @@ type ConfigSources struct {
 	TmuxPath             configSource
 	Name                 configSource
 	LogLevel             configSource
+	UpdateEnabled        configSource
+	UpdateCheckInterval  configSource
 }
 
 // Defaults returns the default configuration.
@@ -118,7 +148,8 @@ func Defaults() Config {
 			KeepaliveInterval:    "30s",
 			MaxMobileConnections: 1,
 		},
-		Tmux: TmuxConfig{SocketName: "pmux"},
+		Tmux:   TmuxConfig{SocketName: "pmux"},
+		Update: UpdateConfig{Enabled: true, CheckInterval: "24h"},
 	}
 }
 
@@ -138,8 +169,9 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 
-	// Parse file into a separate struct so we can overlay non-zero values
-	var fileCfg Config
+	// Parse file into a separate struct so we can overlay non-zero values.
+	// Uses fileConfig (not Config) to distinguish absent bools from false.
+	var fileCfg fileConfig
 	if err := toml.Unmarshal(data, &fileCfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
@@ -164,7 +196,7 @@ func LoadConfigWithSources(path string) (Config, ConfigSources, error) {
 		return Config{}, ConfigSources{}, fmt.Errorf("read config: %w", err)
 	}
 
-	var fileCfg Config
+	var fileCfg fileConfig
 	if err := toml.Unmarshal(data, &fileCfg); err != nil {
 		return Config{}, ConfigSources{}, fmt.Errorf("parse config: %w", err)
 	}
@@ -176,7 +208,7 @@ func LoadConfigWithSources(path string) (Config, ConfigSources, error) {
 }
 
 // overlayFile overlays non-zero file values onto defaults.
-func overlayFile(cfg *Config, fileCfg *Config) {
+func overlayFile(cfg *Config, fileCfg *fileConfig) {
 	if fileCfg.Name != "" {
 		cfg.Name = fileCfg.Name
 	}
@@ -207,10 +239,16 @@ func overlayFile(cfg *Config, fileCfg *Config) {
 	if fileCfg.Tmux.TmuxPath != "" {
 		cfg.Tmux.TmuxPath = fileCfg.Tmux.TmuxPath
 	}
+	if fileCfg.Update.CheckInterval != "" {
+		cfg.Update.CheckInterval = fileCfg.Update.CheckInterval
+	}
+	if fileCfg.Update.Enabled != nil {
+		cfg.Update.Enabled = *fileCfg.Update.Enabled
+	}
 }
 
 // overlayFileTracked is like overlayFile but also records source annotations.
-func overlayFileTracked(cfg *Config, fileCfg *Config, sources *ConfigSources) {
+func overlayFileTracked(cfg *Config, fileCfg *fileConfig, sources *ConfigSources) {
 	if fileCfg.Name != "" {
 		cfg.Name = fileCfg.Name
 		sources.Name = sourceFile
@@ -251,6 +289,14 @@ func overlayFileTracked(cfg *Config, fileCfg *Config, sources *ConfigSources) {
 		cfg.Tmux.TmuxPath = fileCfg.Tmux.TmuxPath
 		sources.TmuxPath = sourceFile
 	}
+	if fileCfg.Update.CheckInterval != "" {
+		cfg.Update.CheckInterval = fileCfg.Update.CheckInterval
+		sources.UpdateCheckInterval = sourceFile
+	}
+	if fileCfg.Update.Enabled != nil {
+		cfg.Update.Enabled = *fileCfg.Update.Enabled
+		sources.UpdateEnabled = sourceFile
+	}
 }
 
 // applyEnvOverrides overlays environment variable values onto the config.
@@ -280,6 +326,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv(EnvLogLevel); v != "" {
 		cfg.LogLevel = v
+	}
+	if v := os.Getenv(EnvUpdateEnabled); v != "" {
+		cfg.Update.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv(EnvUpdateInterval); v != "" {
+		cfg.Update.CheckInterval = v
 	}
 }
 
@@ -317,6 +369,14 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 	if v := os.Getenv(EnvLogLevel); v != "" {
 		cfg.LogLevel = v
 		sources.LogLevel = sourceEnv
+	}
+	if v := os.Getenv(EnvUpdateEnabled); v != "" {
+		cfg.Update.Enabled = v == "true" || v == "1" || v == "yes"
+		sources.UpdateEnabled = sourceEnv
+	}
+	if v := os.Getenv(EnvUpdateInterval); v != "" {
+		cfg.Update.CheckInterval = v
+		sources.UpdateCheckInterval = sourceEnv
 	}
 }
 
@@ -361,6 +421,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("tmux.socket_name must not be empty")
 	}
 
+	// update.check_interval must parse if non-empty
+	if c.Update.CheckInterval != "" {
+		if _, err := time.ParseDuration(c.Update.CheckInterval); err != nil {
+			return fmt.Errorf("update.check_interval: %w", err)
+		}
+	}
+
 	// log_level must be a recognized value
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
@@ -389,6 +456,16 @@ func (c *Config) KeepaliveInterval() time.Duration {
 	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
 	if err != nil {
 		return 30 * time.Second
+	}
+	return d
+}
+
+// UpdateCheckInterval returns the parsed update check interval duration.
+// Falls back to 24h if parsing fails.
+func (c *Config) UpdateCheckInterval() time.Duration {
+	d, err := time.ParseDuration(c.Update.CheckInterval)
+	if err != nil {
+		return 24 * time.Hour
 	}
 	return d
 }
@@ -431,6 +508,8 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "connection.max_mobile_connections = %d  (%s)\n", cfg.Connection.MaxMobileConnections, sources.MaxMobileConnections)
 	fmt.Fprintf(&b, "tmux.socket_name = %q  (%s)\n", cfg.Tmux.SocketName, sources.SocketName)
 	fmt.Fprintf(&b, "tmux.tmux_path = %q  (%s)\n", cfg.Tmux.TmuxPath, sources.TmuxPath)
+	fmt.Fprintf(&b, "update.enabled = %v  (%s)\n", cfg.Update.Enabled, sources.UpdateEnabled)
+	fmt.Fprintf(&b, "update.check_interval = %q  (%s)\n", cfg.Update.CheckInterval, sources.UpdateCheckInterval)
 	return b.String()
 }
 
@@ -466,6 +545,13 @@ func CommentedDefaultConfig() string {
 # Absolute path to tmux binary (env: PMUX_TMUX_PATH)
 # Resolved automatically during 'pmux init'. Set manually if tmux moves.
 # tmux_path = "/opt/homebrew/bin/tmux"
+
+[update]
+# Enable automatic update checking (env: PMUX_UPDATE_ENABLED)
+# Defaults to true. Set to false to disable update notifications.
+# enabled = true
+# How often the agent checks for updates (env: PMUX_UPDATE_INTERVAL)
+# check_interval = "24h"
 `
 }
 

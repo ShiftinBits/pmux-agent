@@ -18,10 +18,12 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/proxy"
 	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
+	"github.com/shiftinbits/pmux-agent/internal/update"
 )
 
 var version = "dev"
 var hmacSecret string
+var installMethod string // set via ldflags for dev builds, empty for release
 
 // loadEffectiveConfig loads the config from disk with env overrides.
 // Returns a usable config even if the config file doesn't exist.
@@ -60,6 +62,14 @@ func main() {
 		return
 	}
 
+	// Show update banner for PocketMux commands (not tmux passthrough).
+	if isPocketMuxCommand(args[0]) {
+		paths, _ := config.DefaultPaths()
+		if paths.ConfigDir != "" {
+			update.PrintBannerIfAvailable(update.StateFilePath(paths.ConfigDir))
+		}
+	}
+
 	// Intercept PocketMux-only commands
 	switch args[0] {
 	case "init":
@@ -79,6 +89,9 @@ func main() {
 		return
 	case "uninstall":
 		handleUninstall(args[1:])
+		return
+	case "update":
+		handleUpdate()
 		return
 	case "agent":
 		handleAgent(args[1:])
@@ -156,7 +169,7 @@ func runAgent(cpuProfile, memProfile string) {
 		cancel()
 	}()
 
-	agentErr := agent.Run(ctx, paths, hmacSecret)
+	agentErr := agent.Run(ctx, paths, hmacSecret, version, installMethod)
 
 	// Write memory profile on shutdown if requested
 	if memProfile != "" {
@@ -520,6 +533,75 @@ func handleAgentUninstall() {
 }
 
 
+// isPocketMuxCommand returns true for intercepted PocketMux commands
+// (not tmux passthrough). Used to show the update banner.
+func isPocketMuxCommand(cmd string) bool {
+	switch cmd {
+	case "init", "pair", "config", "status", "unpair", "uninstall", "update", "agent", "--version", "-v", "--help", "-h":
+		return true
+	}
+	return false
+}
+
+func handleUpdate() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	stateFile := update.StateFilePath(paths.ConfigDir)
+
+	// Force a fresh check.
+	fmt.Println("Checking for updates...")
+	checker := update.NewChecker(version, stateFile, slog.Default())
+	method := update.Detect(installMethod)
+	state, err := checker.Check(method)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ update check failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !state.UpdateAvailable {
+		fmt.Printf("pmux is up to date (version %s)\n", version)
+		return
+	}
+
+	fmt.Printf("Update available: %s → %s\n", state.CurrentVersion, state.LatestVersion)
+	fmt.Printf("Install method: %s\n\n", method)
+
+	updater := update.NewUpdater(method, version, slog.Default())
+
+	// For self-update methods, stop the agent first so the binary can be replaced.
+	if method == update.MethodGitHub || method == update.MethodHomebrew {
+		exe, _ := os.Executable()
+		mgr := service.NewManager(exe, paths.ConfigDir)
+		_ = agent.RunAgentStop(paths, mgr, os.Stdout)
+	}
+
+	// Fetch full release info for asset URLs.
+	release, err := checker.FetchRelease()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ failed to fetch release info: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := updater.Update(release); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ update failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Clear stale update state so the banner doesn't persist after a successful update.
+	_ = update.SaveState(stateFile, update.State{
+		CurrentVersion:  state.LatestVersion,
+		LatestVersion:   state.LatestVersion,
+		UpdateAvailable: false,
+		InstallMethod:   state.InstallMethod,
+	})
+
+	fmt.Println("Update complete! The agent will restart on the next pmux command.")
+}
+
 func printHelp() {
 	fmt.Println(`pmux — PocketMux terminal access agent
 
@@ -529,6 +611,7 @@ PocketMux commands:
   config            Show effective configuration with sources
   status            Show agent, service, and pairing status
   unpair            Remove the paired mobile device
+  update            Check for and apply updates
   uninstall [-y]    Remove PocketMux completely (reverses 'init')
   agent run         Run the agent in the foreground
   agent start       Start the agent

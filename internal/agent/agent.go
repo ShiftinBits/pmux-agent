@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
+	"github.com/shiftinbits/pmux-agent/internal/update"
 	"github.com/shiftinbits/pmux-agent/internal/webrtc"
 )
 
@@ -42,7 +44,7 @@ type serverChecker interface {
 // Run starts the PocketMux agent. It connects to the signaling server,
 // handles WebRTC connections, and monitors the tmux server.
 // Blocks until the context is canceled (SIGTERM/SIGINT or fatal error).
-func Run(ctx context.Context, paths config.Paths, hmacSecret string) error {
+func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMethod string) error {
 	// Set up file logging
 	logFile := filepath.Join(paths.ConfigDir, "agent.log")
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -112,9 +114,11 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret string) error {
 	// Create components with forward references (resolved via closures)
 	var peerManager *webrtc.PeerManager
 
+	updateStateFile := update.StateFilePath(paths.ConfigDir)
+
 	handler := NewHandler(tmuxClient, func(peerID string, msg protocol.Message) error {
 		return peerManager.SendTo(peerID, msg)
-	}, logger)
+	}, logger, version, updateStateFile)
 
 	hostName := cfg.Name
 	if hostName == "" {
@@ -206,6 +210,13 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret string) error {
 		WithStateChecker(peerManager)
 	go cleaner.Run(ctx)
 
+	// Start periodic update checker if enabled.
+	if cfg.Update.Enabled && version != "dev" {
+		checker := update.NewChecker(version, updateStateFile, logger)
+		method := update.Detect(installMethod)
+		go runUpdateChecker(ctx, checker, method, cfg.UpdateCheckInterval(), logger)
+	}
+
 	// Run signaling client (blocks until context is canceled)
 	logger.Info("connecting to signaling server", "url", serverURL)
 	err = signalingClient.Run(ctx)
@@ -220,4 +231,32 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret string) error {
 		return err
 	}
 	return nil
+}
+
+// runUpdateChecker periodically checks for updates and writes the result to disk.
+// It runs as a background goroutine and never returns an error that would affect
+// the agent's lifecycle.
+func runUpdateChecker(ctx context.Context, checker *update.Checker, method update.InstallMethod, interval time.Duration, logger *slog.Logger) {
+	// Check immediately on startup.
+	if state, err := checker.Check(method); err != nil {
+		logger.Warn("initial update check failed", "error", err)
+	} else if state.UpdateAvailable {
+		logger.Info("update available", "current", state.CurrentVersion, "latest", state.LatestVersion)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if state, err := checker.Check(method); err != nil {
+				logger.Warn("periodic update check failed", "error", err)
+			} else if state.UpdateAvailable {
+				logger.Info("update available", "current", state.CurrentVersion, "latest", state.LatestVersion)
+			}
+		}
+	}
 }
