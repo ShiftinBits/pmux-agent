@@ -23,7 +23,15 @@ func NewKeyringSecretStore() *KeyringSecretStore {
 
 // Get retrieves a secret from the system keyring.
 // The stored value is base64-decoded since go-keyring only supports strings.
-func (k *KeyringSecretStore) Get(key string) ([]byte, error) {
+//
+// Panics from the D-Bus backend are recovered and returned as errors.
+func (k *KeyringSecretStore) Get(key string) (data []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			data, err = nil, fmt.Errorf("keyring get %q panic: %v", key, r)
+		}
+	}()
+
 	encoded, err := keyring.Get(k.service, key)
 	if err != nil {
 		if err == keyring.ErrNotFound {
@@ -32,7 +40,7 @@ func (k *KeyringSecretStore) Get(key string) ([]byte, error) {
 		return nil, fmt.Errorf("keyring get %q: %w", key, err)
 	}
 
-	data, err := base64.StdEncoding.DecodeString(encoded)
+	data, err = base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("keyring decode %q: %w", key, err)
 	}
@@ -41,7 +49,15 @@ func (k *KeyringSecretStore) Get(key string) ([]byte, error) {
 
 // Set stores a secret in the system keyring.
 // The data is base64-encoded since go-keyring only supports strings.
-func (k *KeyringSecretStore) Set(key string, data []byte) error {
+//
+// Panics from the D-Bus backend are recovered and returned as errors.
+func (k *KeyringSecretStore) Set(key string, data []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("keyring set %q panic: %v", key, r)
+		}
+	}()
+
 	encoded := base64.StdEncoding.EncodeToString(data)
 	if err := keyring.Set(k.service, key, encoded); err != nil {
 		return fmt.Errorf("keyring set %q: %w", key, err)
@@ -51,8 +67,16 @@ func (k *KeyringSecretStore) Set(key string, data []byte) error {
 
 // Delete removes a secret from the system keyring.
 // Returns nil if the secret does not exist.
-func (k *KeyringSecretStore) Delete(key string) error {
-	err := keyring.Delete(k.service, key)
+//
+// Panics from the D-Bus backend are recovered and returned as errors.
+func (k *KeyringSecretStore) Delete(key string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("keyring delete %q panic: %v", key, r)
+		}
+	}()
+
+	err = keyring.Delete(k.service, key)
 	if err != nil && err != keyring.ErrNotFound {
 		return fmt.Errorf("keyring delete %q: %w", key, err)
 	}
@@ -68,7 +92,17 @@ func (k *KeyringSecretStore) Backend() string {
 
 // ProbeKeyring tests whether the system keyring is available by writing
 // and deleting a probe value. Returns nil if the keyring is usable.
-func ProbeKeyring() error {
+//
+// The probe is wrapped in a panic recovery because obfuscation tools (garble)
+// can break D-Bus interface type assertions on Linux, causing the Secret
+// Service backend to panic instead of returning an error.
+func ProbeKeyring() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("keyring probe panic: %v", r)
+		}
+	}()
+
 	const probeKey = "__probe__"
 	const probeValue = "test"
 

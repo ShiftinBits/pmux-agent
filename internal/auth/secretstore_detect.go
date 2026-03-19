@@ -39,6 +39,8 @@ func NewSecretStore(keysDir string, backendPref string, logger *slog.Logger) (Se
 		// Try keyring first
 		if err := ProbeKeyring(); err == nil {
 			return NewKeyringSecretStore(), nil
+		} else if logger != nil {
+			logger.Debug("keyring unavailable, using encrypted file backend", "error", err)
 		}
 		// Fall back to encrypted file
 		return NewFileSecretStore(keysDir, logger), nil
