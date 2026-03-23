@@ -109,6 +109,15 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		tmuxClient.TmuxBin = cfg.Tmux.TmuxPath
 	}
 
+	// Suppress zsh's PROMPT_EOL_MARK in pmux sessions. When terminal output
+	// doesn't end with a newline, zsh renders a '%' marker with inverse video.
+	// On the host terminal this is transient, but through pipe-pane streaming
+	// to the mobile app the marker persists visibly. Setting it empty disables
+	// the marker for all new panes on the pmux socket.
+	if err := tmuxClient.SetGlobalEnv("PROMPT_EOL_MARK", ""); err != nil {
+		logger.Debug("failed to set PROMPT_EOL_MARK (tmux server may not be running yet)", "error", err)
+	}
+
 	serverURL := cfg.ServerURL()
 
 	// Create components with forward references (resolved via closures)

@@ -130,6 +130,16 @@ func (c *Client) IsServerRunning() bool {
 	return err == nil
 }
 
+// SetGlobalEnv sets a variable in the tmux server's global environment.
+// New panes and windows inherit global environment variables.
+func (c *Client) SetGlobalEnv(key, value string) error {
+	out, err := c.run("set-environment", "-g", key, value)
+	if err != nil {
+		return fmt.Errorf("set-environment: %w: %s", err, out)
+	}
+	return nil
+}
+
 // Version returns the tmux version string.
 func (c *Client) Version() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultCommandTimeout)
