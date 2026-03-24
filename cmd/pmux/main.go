@@ -145,12 +145,14 @@ func runAgent(cpuProfile, memProfile string) {
 	if cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠ could not create CPU profile: %v\n", err)
+			slog.Error("could not create CPU profile", "error", err)
+			fmt.Fprintln(os.Stderr, "⚠ could not create CPU profile")
 			os.Exit(1)
 		}
 		if err := pprof.StartCPUProfile(f); err != nil {
 			f.Close()
-			fmt.Fprintf(os.Stderr, "⚠ could not start CPU profile: %v\n", err)
+			slog.Error("could not start CPU profile", "error", err)
+			fmt.Fprintln(os.Stderr, "⚠ could not start CPU profile")
 			os.Exit(1)
 		}
 		defer func() {
@@ -175,11 +177,13 @@ func runAgent(cpuProfile, memProfile string) {
 	if memProfile != "" {
 		f, err := os.Create(memProfile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠ could not create memory profile: %v\n", err)
+			slog.Error("could not create memory profile", "error", err)
+			fmt.Fprintln(os.Stderr, "⚠ could not create memory profile")
 		} else {
 			runtime.GC() // Get up-to-date heap statistics
 			if err := pprof.WriteHeapProfile(f); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠ could not write memory profile: %v\n", err)
+				slog.Error("could not write memory profile", "error", err)
+				fmt.Fprintln(os.Stderr, "⚠ could not write memory profile")
 			}
 			f.Close()
 		}
