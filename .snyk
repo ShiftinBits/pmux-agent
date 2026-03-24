@@ -1,0 +1,7 @@
+# Snyk (https://snyk.io) policy file
+# Exclude test directories and files from Snyk Code analysis
+---
+exclude:
+  global:
+    - test/**
+    - "*_test.go"
