@@ -66,7 +66,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 	// Signal running agent to close connections (best-effort)
 	pidFile := PIDFilePath(paths)
 	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
-		signalUnpair(pid)
+		signalReloadPairing(pid)
 	}
 
 	fmt.Fprintf(w, "Device '%s' unpaired successfully.\n", name)

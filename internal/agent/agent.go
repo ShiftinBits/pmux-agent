@@ -193,16 +193,20 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 				logger.Info("SIGUSR1 received, signaling activity")
 				signalingClient.SignalActivity()
 			case <-usr2Ch:
-				logger.Info("SIGUSR2 received, handling unpair")
-				// The CLI removes paired_devices.json before sending SIGUSR2,
-				// so LoadPairedDevice should return nil. If there's a tiny race
-				// where the file hasn't been removed yet, we skip — the agent
-				// will reject the device on its next connection attempt anyway.
+				logger.Info("SIGUSR2 received, reloading pairing state")
 				device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
-				if err != nil || device == nil {
+				if err != nil {
+					logger.Warn("failed to reload paired device, rejecting all connections", "error", err)
+					peerManager.SetAllowedDeviceID("!invalid-load-error")
+					peerManager.CloseAll()
+				} else if device == nil {
 					peerManager.SetAllowedDeviceID("!unpaired")
 					peerManager.CloseAll()
 					logger.Info("unpair complete: all peers closed")
+				} else {
+					peerManager.SetAllowedDeviceID(device.DeviceID)
+					peerManager.CloseAll()
+					logger.Info("pairing reloaded, peers closed for re-auth", "device", device.DeviceID)
 				}
 			}
 		}

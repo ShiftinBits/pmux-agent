@@ -118,8 +118,23 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	// WebSocket for the same device ID can intercept the message after DO
 	// hibernation, causing the pair CLI to hang. Stopping the agent ensures
 	// only one WebSocket exists for this device during pairing.
-	if err := StopRunning(paths); err != nil {
-		fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
+	//
+	// When the agent is installed as an OS service (launchd/systemd), we must
+	// use the service manager to stop it — a plain SIGTERM causes the service
+	// supervisor to auto-restart the agent before pairing completes, leaving
+	// the restarted agent with a stale cached device ID.
+	if mgr != nil && mgr.IsInstalled() {
+		if err := mgr.Stop(); err != nil {
+			fmt.Fprintf(w, "warning: failed to stop agent service for pairing: %v\n", err)
+			// Fall back to process-level stop
+			if err := StopRunning(paths); err != nil {
+				fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
+			}
+		}
+	} else {
+		if err := StopRunning(paths); err != nil {
+			fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
+		}
 	}
 
 	// Get JWT for WebSocket auth
@@ -164,6 +179,13 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 		displayName = pairComplete.MobileDeviceID
 	}
 	fmt.Fprintf(w, "Paired successfully with device '%s'\n", displayName)
+
+	// If the agent is still running (e.g., service manager stop failed and
+	// the supervisor restarted it), signal it to reload the new pairing state.
+	pidFile := PIDFilePath(paths)
+	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
+		signalReloadPairing(pid)
+	}
 
 	// Restart the background agent (stopped earlier to avoid WebSocket race).
 	if err := EnsureRunning(paths, store, mgr); err != nil {

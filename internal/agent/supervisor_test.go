@@ -75,7 +75,7 @@ func TestSignalUnpair_DeliversSIGUSR2(t *testing.T) {
 	signal.Notify(ch, syscall.SIGUSR2)
 	defer signal.Stop(ch)
 
-	signalUnpair(os.Getpid())
+	signalReloadPairing(os.Getpid())
 
 	select {
 	case sig := <-ch:

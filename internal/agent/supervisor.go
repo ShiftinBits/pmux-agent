@@ -29,9 +29,10 @@ func signalActivity(pid int) {
 	}
 }
 
-// signalUnpair sends SIGUSR2 to notify the agent of an unpair event.
-// No-op if the signal can't be delivered (process exited between check and signal).
-func signalUnpair(pid int) {
+// signalReloadPairing sends SIGUSR2 to notify the running agent that pairing
+// state has changed on disk and should be reloaded. Used after both pair and
+// unpair operations. No-op if the signal can't be delivered.
+func signalReloadPairing(pid int) {
 	if proc, err := os.FindProcess(pid); err == nil {
 		proc.Signal(syscall.SIGUSR2) //nolint:errcheck // Best-effort notification
 	}
