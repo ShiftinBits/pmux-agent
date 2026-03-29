@@ -104,34 +104,6 @@ nfpms:
         dependencies:
           - tmux
 
-# Snap package for Ubuntu/Linux (classic confinement — requires Store approval)
-snapcrafts:
-  - id: pmux-snap
-    ids:
-      - pmux-linux
-    name: pmux
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    title: pmux
-    publish: true
-    grade: stable
-    confinement: classic
-    license: MIT
-    base: core24
-    channel_templates:
-      - stable
-    summary: Secure remote tmux access from your phone
-    description: |
-      pmux lets you securely access your tmux terminal sessions
-      from your mobile device. End-to-end encrypted, peer-to-peer connected.
-
-      pmux is a transparent tmux wrapper — use it exactly like tmux. Your
-      sessions are accessible from the Pocketmux mobile app via WebRTC.
-
-      Requires tmux to be installed on the system.
-    apps:
-      pmux:
-        command: pmux
-
 checksum:
   name_template: checksums.txt
   algorithm: sha256
