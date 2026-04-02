@@ -173,10 +173,14 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 	pm.mu.Unlock()
 
 	if ok {
+		closeStart := time.Now()
+		pcState := peer.conn.ConnectionState().String()
 		peer.Close()
 		pm.logger.Info("peer disconnected",
 			"mobile", deviceID,
 			"peerCount", peerCount,
+			"pcState", pcState,
+			"closeElapsed", time.Since(closeStart).Round(time.Millisecond),
 			"goroutines", runtime.NumGoroutine(),
 		)
 	}
@@ -272,6 +276,7 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
 func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
+	requestStart := time.Now()
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
 
 	// Validate device is the paired device
@@ -292,8 +297,13 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	// Check connection limit (don't count the requesting device — they may be reconnecting)
 	pm.mu.Lock()
 	currentCount := len(pm.peers)
-	_, isReconnect := pm.peers[mobileDeviceID]
+	oldPeerForLog, isReconnect := pm.peers[mobileDeviceID]
 	pm.mu.Unlock()
+
+	if isReconnect {
+		pm.logger.Info("reconnect detected, will replace existing peer",
+			"mobile", mobileDeviceID, "oldPcState", oldPeerForLog.conn.ConnectionState().String())
+	}
 
 	if !isReconnect && currentCount >= pm.MaxPeers {
 		pm.logger.Warn("max peer connections reached", "max", pm.MaxPeers, "mobile", mobileDeviceID)
@@ -307,8 +317,47 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		return
 	}
 
-	// Close existing peer connection if any (re-connect scenario)
-	pm.ClosePeer(mobileDeviceID)
+	// Close existing peer connection if any (re-connect scenario).
+	// Remove from the map synchronously so the new peer can be added, but
+	// close the old PeerConnection in the background. PeerConnection.Close()
+	// can block for seconds waiting for DTLS/ICE shutdown with an unreachable
+	// peer, which would freeze the signaling readLoop and prevent processing
+	// subsequent messages (including the mobile's reconnection attempts).
+	pm.mu.Lock()
+	oldPeer, hadOld := pm.peers[mobileDeviceID]
+	if hadOld {
+		delete(pm.peers, mobileDeviceID)
+	}
+	if timer, hasTimer := pm.disconnectTimers[mobileDeviceID]; hasTimer {
+		timer.Stop()
+		delete(pm.disconnectTimers, mobileDeviceID)
+	}
+	delete(pm.disconnectTimes, mobileDeviceID)
+	pm.mu.Unlock()
+
+	if hadOld {
+		oldState := oldPeer.conn.ConnectionState().String()
+		pm.logger.Info("closing old peer for reconnect (async)",
+			"mobile", mobileDeviceID, "oldPcState", oldState)
+		pm.cleanupWg.Add(1)
+		go func() {
+			defer pm.cleanupWg.Done()
+			start := time.Now()
+			closeDone := make(chan struct{})
+			go func() {
+				oldPeer.Close()
+				close(closeDone)
+			}()
+			select {
+			case <-closeDone:
+				pm.logger.Info("old peer closed",
+					"mobile", mobileDeviceID, "elapsed", time.Since(start).Round(time.Millisecond))
+			case <-time.After(5 * time.Second):
+				pm.logger.Warn("old peer close timed out (5s), abandoning",
+					"mobile", mobileDeviceID, "oldPcState", oldState)
+			}
+		}()
+	}
 
 	// Fetch TURN credentials (skipped when custom API is set, e.g. in tests)
 	//
@@ -416,7 +465,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		pm.logger.Error("failed to send SDP offer", "error", err)
 	}
 
-	pm.logger.Info("SDP offer sent", "mobile", mobileDeviceID)
+	pm.logger.Info("SDP offer sent", "mobile", mobileDeviceID, "elapsed", time.Since(requestStart).Round(time.Millisecond))
 }
 
 // handleSDPAnswer sets the remote description from the mobile's SDP answer.
