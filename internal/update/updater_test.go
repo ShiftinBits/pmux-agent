@@ -92,9 +92,9 @@ func TestGithubUpdater_MatchArchiveName(t *testing.T) {
 	release := ReleaseInfo{
 		TagName: "v1.2.3",
 		Assets: []ReleaseAsset{
-			{Name: "pmux_1.2.3_linux_amd64.tar.gz"},
-			{Name: "pmux_1.2.3_linux_arm64.tar.gz"},
-			{Name: "pmux_1.2.3_darwin_all.zip"},
+			{Name: "pmux-agent_1.2.3_Linux_x86_64.tar.gz"},
+			{Name: "pmux-agent_1.2.3_Linux_arm64.tar.gz"},
+			{Name: "pmux-agent_1.2.3_Darwin_universal.zip"},
 			{Name: "checksums.txt"},
 		},
 	}

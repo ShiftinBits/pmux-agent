@@ -95,15 +95,22 @@ func (u *githubUpdater) Update(release ReleaseInfo) error {
 }
 
 // matchArchiveName returns the expected release archive filename for this OS/arch.
+// Must match goreleaser's name_template in .goreleaser.yaml.
 func (u *githubUpdater) matchArchiveName(release ReleaseInfo) (string, error) {
 	version := strings.TrimPrefix(release.TagName, "v")
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
-	// macOS universal binary uses "darwin_all".
+	// goreleaser uses `title .Os` (Title Case).
+	osName := strings.ToUpper(goos[:1]) + goos[1:]
+
+	// goreleaser arch mapping: darwin→universal, amd64→x86_64, else as-is.
 	archSuffix := goarch
-	if goos == "darwin" {
-		archSuffix = "all"
+	switch {
+	case goos == "darwin":
+		archSuffix = "universal"
+	case goarch == "amd64":
+		archSuffix = "x86_64"
 	}
 
 	var ext string
@@ -114,7 +121,7 @@ func (u *githubUpdater) matchArchiveName(release ReleaseInfo) (string, error) {
 		ext = ".tar.gz"
 	}
 
-	name := fmt.Sprintf("pmux_%s_%s_%s%s", version, goos, archSuffix, ext)
+	name := fmt.Sprintf("pmux-agent_%s_%s_%s%s", version, osName, archSuffix, ext)
 
 	// Verify the asset actually exists.
 	for _, a := range release.Assets {
