@@ -102,7 +102,15 @@ func (cc *ConnectionCleaner) sweep() {
 	stale := cc.handler.GetStalePeers(cc.timeout)
 	for _, peerID := range stale {
 		cc.logger.Info("closing idle peer", "peer", peerID, "timeout", cc.timeout)
-		cc.handler.PeerDisconnected(peerID)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					cc.logger.Error("panic in PeerDisconnected during sweep",
+						"recover", r, "peer", peerID)
+				}
+			}()
+			cc.handler.PeerDisconnected(peerID)
+		}()
 		cc.closer.ClosePeer(peerID)
 	}
 
@@ -123,7 +131,15 @@ func (cc *ConnectionCleaner) sweep() {
 			if state == "failed" || state == "closed" {
 				cc.logger.Info("closing peer with dead PC state (safety net)",
 					"peer", peerID, "pcState", state)
-				cc.handler.PeerDisconnected(peerID)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							cc.logger.Error("panic in PeerDisconnected during sweep",
+								"recover", r, "peer", peerID)
+						}
+					}()
+					cc.handler.PeerDisconnected(peerID)
+				}()
 				cc.closer.ClosePeer(peerID)
 			}
 		}

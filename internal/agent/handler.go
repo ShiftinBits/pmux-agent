@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -480,6 +481,15 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 // Exits when the context is canceled, the bridge is closed, or sending fails.
 // When the bridge returns EOF (pane exited), sends pane_closed + sessions events.
 func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("panic in streamOutput",
+				"recover", r, "peer", peerID,
+				"stack", string(debug.Stack()))
+			h.detachPeer(peerID)
+		}
+	}()
+
 	buf := make([]byte, 4096)
 	filter := tmux.NewTitleFilter() // Strip tmux title escapes for xterm.js
 	for {
@@ -590,6 +600,14 @@ func (h *Handler) handlePaneExit(peerID string) {
 // handlePaneExit to notify the mobile client. This is needed because the
 // PaneBridge FIFO uses O_RDWR and never returns EOF on pane closure.
 func (h *Handler) watchPane(ctx context.Context, peerID, paneID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("panic in watchPane",
+				"recover", r, "peer", peerID, "pane", paneID,
+				"stack", string(debug.Stack()))
+		}
+	}()
+
 	h.logger.Debug("watchPane started", "peer", peerID, "pane", paneID)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()

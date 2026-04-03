@@ -129,6 +129,11 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 // the done channel between polls so it can exit promptly on Close().
 func (pb *PaneBridge) relayFIFOToPipe() {
 	defer close(pb.relayDone)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "panic in relayFIFOToPipe: %v\n", r)
+		}
+	}()
 
 	buf := make([]byte, 4096)
 	for {
