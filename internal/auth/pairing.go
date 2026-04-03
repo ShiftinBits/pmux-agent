@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
@@ -152,13 +153,38 @@ func LoadPairedDevices(path string, store SecretStore) ([]PairedDevice, error) {
 
 // SavePairedDevices writes the paired devices list to disk.
 // Shared secrets are NOT written to the JSON file (stored in SecretStore instead).
+// Uses temp-file-then-rename for crash-safe atomicity.
 func SavePairedDevices(path string, devices []PairedDevice) error {
 	data, err := json.MarshalIndent(devices, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal paired devices: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("write paired devices: %w", err)
+
+	// Write to temp file then rename for crash-safe atomicity.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".paired-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file for paired devices: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write paired devices temp: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("chmod paired devices temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("close paired devices temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename paired devices: %w", err)
 	}
 	return nil
 }
