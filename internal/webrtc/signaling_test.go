@@ -877,3 +877,70 @@ func TestSignalingClient_SendWritesJSON(t *testing.T) {
 		t.Errorf("SDPMLineIndex = %v, want %d", got.SDPMLineIndex, mlineIdx)
 	}
 }
+
+func TestReadDeadline_DisconnectsOnSilentServer(t *testing.T) {
+	id, logger := testSetup(t)
+
+	// Track how many times the server accepts a WebSocket connection.
+	var connectCount atomic.Int32
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		count := connectCount.Add(1)
+
+		// Authenticate normally.
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var msg SignalingMessage
+		json.Unmarshal(data, &msg)
+		if msg.Type == "auth" {
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		}
+
+		if count == 1 {
+			// First connection: go completely silent — send nothing, read
+			// nothing. The client's read deadline should fire and cause a
+			// reconnect rather than blocking forever.
+			time.Sleep(5 * time.Second)
+			return
+		}
+
+		// Second connection: stay alive briefly so the test can observe
+		// the reconnect happened, then close.
+		time.Sleep(1 * time.Second)
+		conn.Close()
+	})
+	defer server.Close()
+
+	// Use short PresenceInterval + grace so the read deadline
+	// (2*500ms + 200ms = 1.2s) fires quickly, keeping the test fast.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.PresenceInterval = 500 * time.Millisecond
+	sc.ReadDeadlineGrace = 200 * time.Millisecond // read deadline = 1.2s
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Wait long enough for the first connection to time out and a
+	// reconnect to occur (1.2s deadline + 1s backoff + second auth).
+	time.Sleep(5 * time.Second)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run() did not return after context cancel")
+	}
+
+	if connectCount.Load() < 2 {
+		t.Errorf("expected at least 2 connections (reconnect after read deadline), got %d", connectCount.Load())
+	}
+}

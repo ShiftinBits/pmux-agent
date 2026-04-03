@@ -23,6 +23,10 @@ const (
 	// DefaultPresenceInterval is how often the agent sends presence heartbeats.
 	DefaultPresenceInterval = 30 * time.Second
 
+	// DefaultReadDeadlineGrace is the fixed grace period added on top of
+	// 2×PresenceInterval when computing the WebSocket read deadline.
+	DefaultReadDeadlineGrace = 10 * time.Second
+
 	// TokenRefreshMargin is how early before expiry to refresh the JWT.
 	TokenRefreshMargin = 5 * time.Minute
 
@@ -77,6 +81,10 @@ type SignalingClient struct {
 	// PresenceInterval controls how often heartbeats are sent. Defaults to 30s.
 	PresenceInterval time.Duration
 
+	// ReadDeadlineGrace is the fixed grace added to 2×PresenceInterval for
+	// the rolling WebSocket read deadline. Defaults to 10s.
+	ReadDeadlineGrace time.Duration
+
 	mu        sync.Mutex
 	conn      *websocket.Conn
 	jwt       string
@@ -106,10 +114,17 @@ func NewSignalingClient(identity *auth.Identity, serverURL string, hostName stri
 		logger:           logger,
 		hmacSecret:       hmacSecret,
 		hostName:         hostName,
-		PresenceInterval: DefaultPresenceInterval,
-		activitySignal:   make(chan struct{}, 1),
+		PresenceInterval:  DefaultPresenceInterval,
+		ReadDeadlineGrace: DefaultReadDeadlineGrace,
+		activitySignal:    make(chan struct{}, 1),
 		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// readTimeout returns the rolling read deadline duration:
+// 2×PresenceInterval + ReadDeadlineGrace (default 70s).
+func (sc *SignalingClient) readTimeout() time.Duration {
+	return 2*sc.PresenceInterval + sc.ReadDeadlineGrace
 }
 
 // SignalActivity wakes the signaling client from dormancy, causing it to
@@ -311,6 +326,13 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	sc.conn = conn
 	sc.mu.Unlock()
 
+	// Reset read deadline on WebSocket pong frames so server-level
+	// pings prevent false timeout disconnects.
+	readTimeout := sc.readTimeout()
+	conn.SetPongHandler(func(appData string) error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+
 	sc.logger.Info("connected to signaling server")
 
 	// Start presence heartbeat
@@ -479,8 +501,14 @@ func (sc *SignalingClient) tokenRefreshLoop(ctx context.Context) {
 
 // readLoop reads messages from the WebSocket and dispatches to the handler.
 // The conn will be closed externally when context is canceled, unblocking ReadMessage.
+//
+// A rolling read deadline is set before each ReadMessage call so that
+// half-open connections (server dies without TCP close, NAT expiry) are
+// detected within a bounded time instead of blocking forever.
 func (sc *SignalingClient) readLoop(conn *websocket.Conn) error {
+	readTimeout := sc.readTimeout()
 	for {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			// All read errors — including server-initiated normal closes
