@@ -135,6 +135,12 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	}
 	signalingClient := webrtc.NewSignalingClient(identity, serverURL, hostName, func(msg webrtc.SignalingMessage) {
 		if msg.Type == "mobile_name_updated" && msg.DeviceID != "" && msg.Name != "" {
+			// Only accept name updates for the currently paired device.
+			if allowedID := peerManager.AllowedDeviceID(); allowedID == "" || msg.DeviceID != allowedID {
+				logger.Debug("ignoring mobile_name_updated for non-paired device",
+					"deviceId", msg.DeviceID, "expected", allowedID)
+				return
+			}
 			truncatedName := auth.TruncateMobileName(msg.Name)
 			updated, err := auth.UpdatePairedDeviceName(paths.PairedDevices, store, msg.DeviceID, truncatedName)
 			if err != nil {
@@ -147,6 +153,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		peerManager.HandleSignalingMessage(msg)
 	}, logger, hmacSecret)
 	signalingClient.PresenceInterval = cfg.KeepaliveInterval()
+	signalingClient.InitialBackoff = cfg.ReconnectInterval()
 
 	peerManager = webrtc.NewPeerManager(
 		logger,

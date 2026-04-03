@@ -81,6 +81,10 @@ type SignalingClient struct {
 	// PresenceInterval controls how often heartbeats are sent. Defaults to 30s.
 	PresenceInterval time.Duration
 
+	// InitialBackoff controls the starting reconnection backoff delay.
+	// Defaults to 1s if zero.
+	InitialBackoff time.Duration
+
 	// ReadDeadlineGrace is the fixed grace added to 2×PresenceInterval for
 	// the rolling WebSocket read deadline. Defaults to 10s.
 	ReadDeadlineGrace time.Duration
@@ -145,7 +149,11 @@ func (sc *SignalingClient) SignalActivity() {
 // enters dormancy and stops retrying. It resumes when SignalActivity() is
 // called (e.g., when a new tmux command triggers supervisor activity).
 func (sc *SignalingClient) Run(ctx context.Context) error {
-	backoff := initialBackoff
+	startBackoff := initialBackoff
+	if sc.InitialBackoff > 0 {
+		startBackoff = sc.InitialBackoff
+	}
+	backoff := startBackoff
 
 	for {
 		select {
@@ -169,7 +177,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 				sc.dormant = false
 				sc.failureStart = time.Time{}
 				sc.mu.Unlock()
-				backoff = initialBackoff
+				backoff = startBackoff
 				sc.logger.Info("activity signal received, resuming reconnection")
 			}
 		}
@@ -189,7 +197,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 
 		// Reset backoff and failure tracking after a successful connection
 		if connected {
-			backoff = initialBackoff
+			backoff = startBackoff
 			sc.mu.Lock()
 			sc.failureStart = time.Time{}
 			sc.mu.Unlock()
@@ -223,7 +231,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			sc.failureStart = time.Time{}
 			sc.dormant = false
 			sc.mu.Unlock()
-			backoff = initialBackoff
+			backoff = startBackoff
 			sc.logger.Info("activity signal received during backoff, reconnecting immediately")
 			continue
 		case <-time.After(backoff):
@@ -291,7 +299,10 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
-	dialer := websocket.DefaultDialer
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		Proxy:            http.ProxyFromEnvironment,
+	}
 	conn, resp, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
 		if resp != nil && resp.Body != nil {
