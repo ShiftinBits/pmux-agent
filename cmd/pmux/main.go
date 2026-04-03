@@ -169,6 +169,11 @@ func runAgent(cpuProfile, memProfile string) {
 	go func() {
 		<-sigCh
 		cancel()
+		// Second signal = force exit. If graceful shutdown stalls, the
+		// operator can send another SIGTERM/SIGINT to exit immediately.
+		<-sigCh
+		signal.Stop(sigCh)
+		os.Exit(1)
 	}()
 
 	agentErr := agent.Run(ctx, paths, hmacSecret, version, installMethod)

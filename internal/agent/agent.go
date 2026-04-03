@@ -236,8 +236,22 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 
 	// Cleanup
 	logger.Info("agent shutting down")
-	peerManager.CloseAll()
-	signalingClient.Close()
+
+	// Bound the shutdown sequence. If cleanup stalls (stuck Pion close,
+	// slow tmux IPC), force-exit after 10 seconds.
+	shutdownDone := make(chan struct{})
+	go func() {
+		peerManager.CloseAll()
+		signalingClient.Close()
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownDone:
+		logger.Info("shutdown complete")
+	case <-time.After(10 * time.Second):
+		logger.Warn("shutdown timed out after 10s, forcing exit")
+	}
 	RemovePIDFile(pidFile)
 
 	if err != nil && !errors.Is(err, context.Canceled) {
