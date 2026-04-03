@@ -353,6 +353,87 @@ func TestHandler_KillSession(t *testing.T) {
 	}
 }
 
+func TestHandler_CreateSession(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	h.HandleMessage("peer1", &protocol.CreateSessionRequest{Type: "create_session"})
+
+	msg := catcher.waitFor(t, "session_created", 5*time.Second)
+	created, ok := msg.(*protocol.SessionCreatedEvent)
+	if !ok {
+		t.Fatalf("expected SessionCreatedEvent, got %T", msg)
+	}
+	if created.Session.ID == "" {
+		t.Error("session ID should not be empty")
+	}
+	if len(created.Session.Windows) == 0 {
+		t.Error("expected at least 1 window")
+	}
+	if len(created.Session.Windows[0].Panes) == 0 {
+		t.Error("expected at least 1 pane")
+	}
+
+	// Verify session actually exists in tmux
+	sessions, err := tc.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	found := false
+	for _, s := range sessions {
+		if s.ID == created.Session.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("created session %q not found in tmux", created.Session.ID)
+	}
+}
+
+func TestHandler_CreateSession_Multiple(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	// Create two sessions
+	h.HandleMessage("peer1", &protocol.CreateSessionRequest{Type: "create_session"})
+	msg1 := catcher.waitFor(t, "session_created", 5*time.Second)
+	created1 := msg1.(*protocol.SessionCreatedEvent)
+
+	h.HandleMessage("peer1", &protocol.CreateSessionRequest{Type: "create_session"})
+
+	// Wait for second session_created (skip the first one we already saw)
+	deadline := time.Now().Add(5 * time.Second)
+	var created2 *protocol.SessionCreatedEvent
+	for time.Now().Before(deadline) {
+		msgs := catcher.get()
+		for _, m := range msgs {
+			if sc, ok := m.Msg.(*protocol.SessionCreatedEvent); ok && sc.Session.ID != created1.Session.ID {
+				created2 = sc
+				break
+			}
+		}
+		if created2 != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if created2 == nil {
+		t.Fatal("timeout waiting for second session_created")
+	}
+
+	if created1.Session.ID == created2.Session.ID {
+		t.Error("two created sessions should have different IDs")
+	}
+
+	// Verify both exist
+	sessions, err := tc.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) < 2 {
+		t.Errorf("expected at least 2 sessions, got %d", len(sessions))
+	}
+}
+
 func TestHandler_AttachInvalidPane(t *testing.T) {
 	h, _, catcher := testHandler(t)
 
