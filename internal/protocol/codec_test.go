@@ -165,6 +165,77 @@ func TestRoundTripPing(t *testing.T) {
 	}
 }
 
+func TestRoundTripCreateSession(t *testing.T) {
+	msg := &CreateSessionRequest{Type: "create_session"}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*CreateSessionRequest)
+	if !ok {
+		t.Fatalf("expected *CreateSessionRequest, got %T", decoded)
+	}
+	if got.Type != "create_session" {
+		t.Errorf("type = %q, want %q", got.Type, "create_session")
+	}
+}
+
+func TestRoundTripSessionCreated(t *testing.T) {
+	msg := &SessionCreatedEvent{
+		Type: "session_created",
+		Session: TmuxSession{
+			ID:   "$5",
+			Name: "3",
+			CreatedAt: 1708700500,
+			Windows: []TmuxWindow{
+				{
+					ID:     "@5",
+					Name:   "bash",
+					Index:  0,
+					Active: true,
+					Panes: []TmuxPane{
+						{
+							ID:             "%5",
+							Index:          0,
+							Active:         true,
+							Size:           PaneSize{Cols: 80, Rows: 24},
+							Title:          "bash",
+							CurrentCommand: "bash",
+						},
+					},
+				},
+			},
+			LastActivityAt: 1708700500,
+			Attached:     false,
+		},
+	}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*SessionCreatedEvent)
+	if !ok {
+		t.Fatalf("expected *SessionCreatedEvent, got %T", decoded)
+	}
+	if got.Session.ID != "$5" || got.Session.Name != "3" {
+		t.Errorf("session = %+v", got.Session)
+	}
+	if len(got.Session.Windows) != 1 {
+		t.Fatalf("windows count = %d, want 1", len(got.Session.Windows))
+	}
+	if got.Session.Windows[0].Panes[0].ID != "%5" {
+		t.Errorf("pane id = %q, want %%5", got.Session.Windows[0].Panes[0].ID)
+	}
+}
+
 // --- Round-trip tests for every HostEvent type ---
 
 func TestRoundTripSessions(t *testing.T) {
@@ -461,6 +532,7 @@ func TestIsRequest(t *testing.T) {
 		&ResizeRequest{Type: "resize"},
 		&KillSessionRequest{Type: "kill_session"},
 		&PingRequest{Type: "ping"},
+		&CreateSessionRequest{Type: "create_session"},
 	}
 	for _, msg := range requests {
 		if !IsRequest(msg) {
@@ -482,6 +554,7 @@ func TestIsEvent(t *testing.T) {
 		&PaneClosedEvent{Type: "pane_closed"},
 		&ErrorEvent{Type: "error"},
 		&PongEvent{Type: "pong"},
+		&SessionCreatedEvent{Type: "session_created"},
 	}
 	for _, msg := range events {
 		if !IsEvent(msg) {
@@ -546,7 +619,7 @@ type fixtureJSON struct {
 	Data           []int         `json:"data,omitempty"`
 	Name           *string       `json:"name,omitempty"`
 	Command        *string       `json:"command,omitempty"`
-	Session        string        `json:"session,omitempty"`
+	Session        json.RawMessage `json:"session,omitempty"`
 	Sessions       []interface{} `json:"sessions,omitempty"`
 	Code           string        `json:"code,omitempty"`
 	Message        string        `json:"message,omitempty"`
@@ -643,8 +716,11 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 		}
 
 	case *KillSessionRequest:
-		if m.Session != expected.Session {
-			t.Errorf("session = %q, want %q", m.Session, expected.Session)
+		var sessionStr string
+		if err := json.Unmarshal(expected.Session, &sessionStr); err == nil {
+			if m.Session != sessionStr {
+				t.Errorf("session = %q, want %q", m.Session, sessionStr)
+			}
 		}
 
 	case *SessionsEvent:
@@ -662,8 +738,11 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 		}
 
 	case *SessionEndedEvent:
-		if m.Session != expected.Session {
-			t.Errorf("session = %q, want %q", m.Session, expected.Session)
+		var sessionStr string
+		if err := json.Unmarshal(expected.Session, &sessionStr); err == nil {
+			if m.Session != sessionStr {
+				t.Errorf("session = %q, want %q", m.Session, sessionStr)
+			}
 		}
 
 	case *PaneClosedEvent:
@@ -682,6 +761,15 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 	case *PongEvent:
 		if expected.Latency != nil && m.Latency != *expected.Latency {
 			t.Errorf("latency = %d, want %d", m.Latency, *expected.Latency)
+		}
+
+	case *CreateSessionRequest:
+		// No extra fields to verify beyond type
+
+	case *SessionCreatedEvent:
+		// Verify session structure was decoded
+		if m.Session.ID == "" {
+			t.Error("session_created: session.id is empty")
 		}
 	}
 }
