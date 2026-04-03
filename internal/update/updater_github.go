@@ -12,9 +12,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/minio/selfupdate"
 )
@@ -144,9 +146,23 @@ func (u *githubUpdater) fetchExpectedChecksum(url, filename string) (string, err
 	return "", fmt.Errorf("no checksum found for %s in checksums.txt", filename)
 }
 
+var allowedDownloadHosts = map[string]bool{
+	"github.com":                    true,
+	"objects.githubusercontent.com": true,
+}
+
 // download fetches a URL and returns the response body, limited to maxBytes.
 func (u *githubUpdater) download(url string, maxBytes int64) ([]byte, error) {
-	resp, err := http.Get(url) //nolint:gosec // URL comes from GitHub API, not user input
+	parsed, err := neturl.Parse(url)
+	if err != nil || !allowedDownloadHosts[parsed.Host] {
+		return nil, fmt.Errorf("untrusted download URL host: %s", url)
+	}
+	if parsed.Scheme != "https" {
+		return nil, fmt.Errorf("untrusted download URL scheme (must be https): %s", url)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
