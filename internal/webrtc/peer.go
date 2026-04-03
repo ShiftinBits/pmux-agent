@@ -754,6 +754,27 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	}
 
 	pm.logger.Info("ICE restart offer sent", "mobile", deviceID)
+
+	// Start watchdog: if no SDP answer arrives within 20 seconds,
+	// close the peer so the mobile can perform a fresh connect_request.
+	// The existing Connected handler in handlePeerStateChange cancels
+	// disconnect timers, so recovery automatically cancels this watchdog.
+	pm.mu.Lock()
+	pm.disconnectTimers[deviceID] = time.AfterFunc(20*time.Second, func() {
+		pm.mu.Lock()
+		delete(pm.disconnectTimers, deviceID)
+		peer, ok := pm.peers[deviceID]
+		if !ok {
+			pm.mu.Unlock()
+			return
+		}
+		if peer.conn.ConnectionState() != webrtc.PeerConnectionStateConnected {
+			pm.logger.Warn("ICE restart answer timeout, closing peer", "mobile", deviceID)
+			pm.scheduleCleanup(deviceID)
+		}
+		pm.mu.Unlock()
+	})
+	pm.mu.Unlock()
 }
 
 // --- Peer methods ---
