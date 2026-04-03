@@ -128,6 +128,11 @@ func (pm *PeerManager) getAllowedDeviceID() string {
 	return pm.allowedDeviceID
 }
 
+// AllowedDeviceID returns the allowed device ID. Thread-safe.
+func (pm *PeerManager) AllowedDeviceID() string {
+	return pm.getAllowedDeviceID()
+}
+
 // NewPeerManager creates a manager for WebRTC peer connections.
 func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL string, jwtFn func() string, handler ProtocolHandler, hmacSecret string) *PeerManager {
 	return &PeerManager{
