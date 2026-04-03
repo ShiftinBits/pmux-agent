@@ -46,6 +46,7 @@ type Handler struct {
 	lastPingTime map[string]time.Time                     // peerID -> last ping received
 	lastDims     map[string][2]int                        // peerID -> [cols, rows] to skip redundant resizes
 	compressors  map[string]*protocol.OutputCompressor    // per-peer stateful deflate compressor
+	exitNotified map[string]bool                          // peerID -> true if handlePaneExit already fired
 }
 
 // NewHandler creates a protocol message handler.
@@ -64,6 +65,7 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger, age
 		lastPingTime: make(map[string]time.Time),
 		lastDims:     make(map[string][2]int),
 		compressors:  make(map[string]*protocol.OutputCompressor),
+		exitNotified: make(map[string]bool),
 	}
 }
 
@@ -548,11 +550,12 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 func (h *Handler) handlePaneExit(peerID string) {
 	h.mu.Lock()
 	paneID := h.paneForPeer[peerID]
-	h.mu.Unlock()
-
-	if paneID == "" {
+	if paneID == "" || h.exitNotified[peerID] {
+		h.mu.Unlock()
 		return
 	}
+	h.exitNotified[peerID] = true
+	h.mu.Unlock()
 
 	h.logger.Info("pane exited, notifying peer", "peer", peerID, "pane", paneID)
 
@@ -621,6 +624,7 @@ func (h *Handler) detachPeer(peerID string) {
 		delete(h.paneForPeer, peerID)
 		delete(h.lastDims, peerID)
 		delete(h.compressors, peerID)
+		delete(h.exitNotified, peerID)
 	}
 	h.mu.Unlock()
 
