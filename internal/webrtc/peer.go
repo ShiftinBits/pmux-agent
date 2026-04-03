@@ -467,6 +467,16 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 
 // handleSDPAnswer sets the remote description from the mobile's SDP answer.
 func (pm *PeerManager) handleSDPAnswer(mobileDeviceID string, sdp string) {
+	// Basic SDP validation — reject obviously malformed or oversized payloads.
+	if len(sdp) == 0 {
+		pm.logger.Warn("empty SDP answer", "mobile", mobileDeviceID)
+		return
+	}
+	if len(sdp) > 64*1024 { // 64KB — far beyond any real SDP
+		pm.logger.Warn("SDP answer too large", "mobile", mobileDeviceID, "size", len(sdp))
+		return
+	}
+
 	pm.mu.Lock()
 	peer, ok := pm.peers[mobileDeviceID]
 	pm.mu.Unlock()
