@@ -105,10 +105,12 @@ type Peer struct {
 	signaling    MessageSender
 	handler      ProtocolHandler
 	stateHandler func(peer *Peer, state webrtc.PeerConnectionState)
-	mu        sync.Mutex
-	closed    bool
-	sendReady chan struct{} // signaled by OnBufferedAmountLow when buffer drains
-	done      chan struct{} // closed by Close() to unblock waitForSendReady
+	mu             sync.Mutex
+	closed         bool
+	sendReady      chan struct{} // signaled by OnBufferedAmountLow when buffer drains
+	done           chan struct{} // closed by Close() to unblock waitForSendReady
+	remoteDescSet  bool                      // true after SetRemoteDescription succeeds
+	iceCandidates  []webrtc.ICECandidateInit // buffered candidates received before remote desc
 }
 
 // SetAllowedDeviceID updates the allowed device ID under the mutex.
@@ -490,7 +492,20 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID string, sdp string) {
 		return
 	}
 
-	pm.logger.Info("SDP answer applied", "mobile", mobileDeviceID)
+	// Mark remote desc as set and drain buffered ICE candidates.
+	peer.mu.Lock()
+	peer.remoteDescSet = true
+	buffered := peer.iceCandidates
+	peer.iceCandidates = nil
+	peer.mu.Unlock()
+
+	for _, ice := range buffered {
+		if err := peer.conn.AddICECandidate(ice); err != nil {
+			pm.logger.Warn("failed to add buffered ICE candidate", "error", err, "mobile", mobileDeviceID)
+		}
+	}
+
+	pm.logger.Info("SDP answer applied", "mobile", mobileDeviceID, "bufferedCandidates", len(buffered))
 }
 
 // handleICECandidate adds an ICE candidate from the mobile peer.
@@ -517,6 +532,15 @@ func (pm *PeerManager) handleICECandidate(mobileDeviceID string, candidate strin
 		SDPMid:        &sdpMid,
 		SDPMLineIndex: mLineIndex,
 	}
+
+	peer.mu.Lock()
+	if !peer.remoteDescSet {
+		peer.iceCandidates = append(peer.iceCandidates, ice)
+		peer.mu.Unlock()
+		pm.logger.Debug("ICE candidate buffered (remote desc not set)", "mobile", mobileDeviceID)
+		return
+	}
+	peer.mu.Unlock()
 
 	if err := peer.conn.AddICECandidate(ice); err != nil {
 		pm.logger.Warn("failed to add ICE candidate", "error", err, "mobile", mobileDeviceID)
@@ -716,6 +740,11 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 		pm.mu.Unlock()
 		return
 	}
+
+	peer.mu.Lock()
+	peer.remoteDescSet = false
+	peer.iceCandidates = nil
+	peer.mu.Unlock()
 
 	if err := pm.signaling.Send(SignalingMessage{
 		Type:           "sdp_offer",

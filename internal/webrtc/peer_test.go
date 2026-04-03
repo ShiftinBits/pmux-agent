@@ -1137,6 +1137,100 @@ func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
 	pm.CloseAll()
 }
 
+func TestPeerManager_ICECandidateBuffering(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	api := fastAPI(t)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil, "")
+	pm.API = api
+
+	const deviceID = "mobile-icebuf"
+
+	// 1. Send connect_request to create a peer (and generate an SDP offer).
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: deviceID,
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	peer := getPeer(pm, deviceID)
+	if peer == nil {
+		t.Fatal("peer should exist after connect_request")
+	}
+
+	// 2. Send an ICE candidate BEFORE sending an SDP answer.
+	//    The remote description is not yet set, so the candidate should be buffered.
+	sdpMid := "0"
+	mLineIdx := 0
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "ice_candidate",
+		TargetDeviceID: deviceID,
+		Candidate:      "candidate:1 1 UDP 2130706431 192.168.1.1 12345 typ host",
+		SDPMid:         sdpMid,
+		SDPMLineIndex:  &mLineIdx,
+	})
+
+	// 3. Verify the candidate was buffered, not applied.
+	peer.mu.Lock()
+	bufferedCount := len(peer.iceCandidates)
+	descSet := peer.remoteDescSet
+	peer.mu.Unlock()
+
+	if descSet {
+		t.Error("remoteDescSet should be false before SDP answer")
+	}
+	if bufferedCount != 1 {
+		t.Fatalf("expected 1 buffered ICE candidate, got %d", bufferedCount)
+	}
+
+	// 4. Create a valid SDP answer from the agent's offer.
+	offers := sender.messagesOfType("sdp_offer")
+	if len(offers) == 0 {
+		t.Fatal("no SDP offer sent")
+	}
+
+	answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create answer PC: %v", err)
+	}
+	defer answerPC.Close()
+
+	offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}
+	if err := answerPC.SetRemoteDescription(offer); err != nil {
+		t.Fatalf("set remote desc: %v", err)
+	}
+	answer, err := answerPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	if err := answerPC.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set local desc: %v", err)
+	}
+
+	// 5. Send the SDP answer — this should set remoteDescSet and drain the buffer.
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "sdp_answer",
+		TargetDeviceID: deviceID,
+		SDP:            answer.SDP,
+	})
+
+	// 6. Verify the buffer was drained and remoteDescSet is true.
+	peer.mu.Lock()
+	descSetAfter := peer.remoteDescSet
+	bufferedAfter := peer.iceCandidates
+	peer.mu.Unlock()
+
+	if !descSetAfter {
+		t.Error("remoteDescSet should be true after SDP answer")
+	}
+	if bufferedAfter != nil {
+		t.Errorf("iceCandidates should be nil after draining, got %d", len(bufferedAfter))
+	}
+
+	pm.CloseAll()
+}
+
 // --- Backpressure tests ---
 
 func TestPeer_BackpressureCallbackRegistered(t *testing.T) {
