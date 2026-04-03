@@ -69,6 +69,13 @@ type PingRequest struct {
 
 func (m *PingRequest) MessageType() string { return "ping" }
 
+// CreateSessionRequest requests creation of a new tmux session.
+type CreateSessionRequest struct {
+	Type string `msgpack:"type"`
+}
+
+func (m *CreateSessionRequest) MessageType() string { return "create_session" }
+
 // --- Host → Mobile (Events) ---
 
 // SessionsEvent returns the full session tree.
@@ -139,6 +146,14 @@ type PongEvent struct {
 }
 
 func (m *PongEvent) MessageType() string { return "pong" }
+
+// SessionCreatedEvent reports that a new tmux session was created.
+type SessionCreatedEvent struct {
+	Type    string      `msgpack:"type"`
+	Session TmuxSession `msgpack:"session"`
+}
+
+func (m *SessionCreatedEvent) MessageType() string { return "session_created" }
 
 // --- tmux Data Types ---
 

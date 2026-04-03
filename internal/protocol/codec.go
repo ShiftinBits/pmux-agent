@@ -61,6 +61,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &KillSessionRequest{}
 	case "ping":
 		msg = &PingRequest{}
+	case "create_session":
+		msg = &CreateSessionRequest{}
 
 	// Events (Host → Mobile)
 	case "sessions":
@@ -75,6 +77,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &SessionEndedEvent{}
 	case "pane_closed":
 		msg = &PaneClosedEvent{}
+	case "session_created":
+		msg = &SessionCreatedEvent{}
 	case "error":
 		msg = &ErrorEvent{}
 	case "pong":
@@ -96,7 +100,7 @@ func IsRequest(msg Message) bool {
 	switch msg.(type) {
 	case *ListSessionsRequest, *AttachRequest, *DetachRequest,
 		*InputRequest, *ResizeRequest,
-		*KillSessionRequest, *PingRequest:
+		*KillSessionRequest, *CreateSessionRequest, *PingRequest:
 		return true
 	}
 	return false
@@ -106,7 +110,7 @@ func IsRequest(msg Message) bool {
 func IsEvent(msg Message) bool {
 	switch msg.(type) {
 	case *SessionsEvent, *OutputEvent, *AttachedEvent, *DetachedEvent,
-		*SessionEndedEvent, *PaneClosedEvent, *ErrorEvent, *PongEvent:
+		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent:
 		return true
 	}
 	return false
