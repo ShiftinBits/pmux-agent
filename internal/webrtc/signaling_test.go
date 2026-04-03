@@ -2,7 +2,9 @@ package webrtc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -942,5 +944,33 @@ func TestReadDeadline_DisconnectsOnSilentServer(t *testing.T) {
 
 	if connectCount.Load() < 2 {
 		t.Errorf("expected at least 2 connections (reconnect after read deadline), got %d", connectCount.Load())
+	}
+}
+
+func TestParseJWTExpiry(t *testing.T) {
+	// Build a JWT with a known exp claim.
+	// JWT = base64url(header).base64url(payload).signature
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+	// Test valid exp
+	expTime := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	payload := base64.RawURLEncoding.EncodeToString(
+		[]byte(fmt.Sprintf(`{"exp":%d,"sub":"test"}`, expTime.Unix())))
+	token := header + "." + payload + ".fake-signature"
+
+	got := parseJWTExpiry(token)
+	if got.Unix() != expTime.Unix() {
+		t.Errorf("parseJWTExpiry() = %v, want %v", got, expTime)
+	}
+
+	// Test invalid tokens
+	if !parseJWTExpiry("not-a-jwt").IsZero() {
+		t.Error("expected zero time for invalid token")
+	}
+	if !parseJWTExpiry("a.b").IsZero() {
+		t.Error("expected zero time for 2-part token")
+	}
+	if !parseJWTExpiry("a.!!!invalid-base64!!!.c").IsZero() {
+		t.Error("expected zero time for invalid base64")
 	}
 }

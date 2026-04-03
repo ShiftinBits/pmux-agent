@@ -3,6 +3,7 @@ package webrtc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -406,6 +407,26 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn) error {
 	return nil
 }
 
+// parseJWTExpiry extracts the "exp" claim from a JWT without full validation.
+// Returns a zero time if parsing fails (caller falls back to estimated expiry).
+func parseJWTExpiry(token string) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(claims.Exp, 0)
+}
+
 // ensureToken obtains or refreshes the JWT if needed.
 func (sc *SignalingClient) ensureToken() error {
 	sc.mu.Lock()
@@ -423,7 +444,11 @@ func (sc *SignalingClient) ensureToken() error {
 	}
 
 	sc.jwt = token
-	sc.jwtExpiry = time.Now().Add(JWTLifetime).Round(0) // strip monotonic for wall-clock comparison
+	if exp := parseJWTExpiry(token); !exp.IsZero() {
+		sc.jwtExpiry = exp
+	} else {
+		sc.jwtExpiry = time.Now().Add(JWTLifetime) // fallback to estimated expiry
+	}
 	return nil
 }
 
