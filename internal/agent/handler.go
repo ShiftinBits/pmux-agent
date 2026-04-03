@@ -113,6 +113,8 @@ func (h *Handler) HandleMessage(peerID string, msg protocol.Message) {
 		h.handlePing(peerID)
 	case *protocol.KillSessionRequest:
 		h.handleKillSession(peerID, m)
+	case *protocol.CreateSessionRequest:
+		h.handleCreateSession(peerID)
 	default:
 		h.logger.Warn("unknown message type", "type", msg.MessageType(), "peer", peerID)
 	}
@@ -474,6 +476,43 @@ func (h *Handler) handleKillSession(peerID string, req *protocol.KillSessionRequ
 	h.sendMsg(peerID, &protocol.SessionEndedEvent{
 		Type:    "session_ended",
 		Session: req.Session,
+	})
+}
+
+func (h *Handler) handleCreateSession(peerID string) {
+	sessionID, err := h.tmux.CreateSession("", "")
+	if err != nil {
+		h.logger.Debug("create session failed", "peer", peerID, "error", err)
+		h.sendError(peerID, "create_session_failed", "failed to create session")
+		return
+	}
+
+	// Fetch the full session tree so we can return the complete TmuxSession.
+	sessions, err := h.tmux.ListAll()
+	if err != nil {
+		h.logger.Debug("list sessions after create failed", "peer", peerID, "error", err)
+		h.sendError(peerID, "create_session_failed", "session created but failed to fetch details")
+		return
+	}
+
+	protoSessions := toProtocolSessions(sessions)
+	var created *protocol.TmuxSession
+	for i := range protoSessions {
+		if protoSessions[i].ID == sessionID {
+			created = &protoSessions[i]
+			break
+		}
+	}
+
+	if created == nil {
+		h.logger.Warn("created session not found in list", "peer", peerID, "sessionID", sessionID)
+		h.sendError(peerID, "create_session_failed", "session created but not found in session list")
+		return
+	}
+
+	h.sendMsg(peerID, &protocol.SessionCreatedEvent{
+		Type:    "session_created",
+		Session: *created,
 	})
 }
 
