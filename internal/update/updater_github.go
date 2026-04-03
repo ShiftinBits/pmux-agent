@@ -161,7 +161,18 @@ func (u *githubUpdater) download(url string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("untrusted download URL scheme (must be https): %s", url)
 	}
 
-	client := &http.Client{Timeout: 2 * time.Minute}
+	client := &http.Client{
+		Timeout: 2 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !allowedDownloadHosts[req.URL.Host] {
+				return fmt.Errorf("untrusted redirect host: %s", req.URL.Host)
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("untrusted redirect scheme: %s", req.URL.Scheme)
+			}
+			return nil
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, err

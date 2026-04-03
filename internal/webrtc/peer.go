@@ -213,9 +213,17 @@ func (pm *PeerManager) CloseAll() {
 	pm.disconnectTimes = make(map[string]time.Time)
 	pm.mu.Unlock()
 
+	// Close peers in parallel so one stuck Pion DTLS shutdown doesn't
+	// block cleanup of other peers (each Close can take 30s+ if unreachable).
+	var closeWg sync.WaitGroup
 	for _, p := range peers {
-		p.Close()
+		closeWg.Add(1)
+		go func(peer *Peer) {
+			defer closeWg.Done()
+			peer.Close()
+		}(p)
 	}
+	closeWg.Wait()
 
 	// Wait for any in-flight cleanup goroutines spawned by handlePeerStateChange
 	// or attemptICERestart to finish before returning.
