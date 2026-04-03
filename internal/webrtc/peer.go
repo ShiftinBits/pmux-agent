@@ -345,19 +345,9 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		go func() {
 			defer pm.cleanupWg.Done()
 			start := time.Now()
-			closeDone := make(chan struct{})
-			go func() {
-				oldPeer.Close()
-				close(closeDone)
-			}()
-			select {
-			case <-closeDone:
-				pm.logger.Info("old peer closed",
-					"mobile", mobileDeviceID, "elapsed", time.Since(start).Round(time.Millisecond))
-			case <-time.After(5 * time.Second):
-				pm.logger.Warn("old peer close timed out (5s), abandoning",
-					"mobile", mobileDeviceID, "oldPcState", oldState)
-			}
+			oldPeer.Close()
+			pm.logger.Info("old peer closed",
+				"mobile", mobileDeviceID, "elapsed", time.Since(start).Round(time.Millisecond))
 		}()
 	}
 
