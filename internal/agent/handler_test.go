@@ -1,9 +1,14 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,6 +17,7 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
+	"github.com/shiftinbits/pmux-agent/internal/update"
 )
 
 const handlerTestSocket = "pmux-handler-test"
@@ -1179,4 +1185,311 @@ func TestHandler_CompressedStreamOutput(t *testing.T) {
 
 	// Clean up
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
+func TestHandler_SetContext(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
+
+	h.mu.Lock()
+	defaultCtx := h.ctx
+	h.mu.Unlock()
+	if defaultCtx != context.Background() {
+		t.Error("expected default context to be context.Background()")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.SetContext(ctx)
+
+	h.mu.Lock()
+	got := h.ctx
+	h.mu.Unlock()
+	if got != ctx {
+		t.Error("SetContext did not update handler context")
+	}
+}
+
+func TestHandler_SendMsgError(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	errSend := errors.New("send failed")
+	h := NewHandler(tc, func(peerID string, msg protocol.Message) error {
+		return errSend
+	}, slog.Default(), "test", "")
+
+	err := h.sendMsg("peer1", &protocol.PongEvent{Type: "pong"})
+	if err == nil {
+		t.Fatal("expected error from sendMsg")
+	}
+	if !errors.Is(err, errSend) {
+		t.Errorf("sendMsg error = %v, want %v", err, errSend)
+	}
+}
+
+func TestHandler_SendErrorEvent(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
+
+	h.sendError("peer1", "test_code", "test message")
+
+	msgs := catcher.get()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	errEvent, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+	if !ok {
+		t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+	}
+	if errEvent.Code != "test_code" {
+		t.Errorf("Code = %q, want test_code", errEvent.Code)
+	}
+	if errEvent.Message != "test message" {
+		t.Errorf("Message = %q, want 'test message'", errEvent.Message)
+	}
+}
+
+func TestHandler_NewSessionsEvent_NoUpdateFile(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "1.0.0", "")
+
+	sessions := []protocol.TmuxSession{{ID: "$0", Name: "test"}}
+	event := h.newSessionsEvent(sessions)
+
+	if event.AgentVersion != "1.0.0" {
+		t.Errorf("AgentVersion = %q, want 1.0.0", event.AgentVersion)
+	}
+	if event.UpdateAvailable != "" {
+		t.Errorf("UpdateAvailable = %q, want empty", event.UpdateAvailable)
+	}
+	if len(event.Sessions) != 1 {
+		t.Errorf("Sessions count = %d, want 1", len(event.Sessions))
+	}
+}
+
+func TestHandler_NewSessionsEvent_WithUpdateAvailable(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "update-state.json")
+
+	state := update.State{UpdateAvailable: true, LatestVersion: "v2.0.0"}
+	data, _ := json.Marshal(state)
+	os.WriteFile(stateFile, data, 0600)
+
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "1.0.0", stateFile)
+
+	event := h.newSessionsEvent(nil)
+	if event.UpdateAvailable != "v2.0.0" {
+		t.Errorf("UpdateAvailable = %q, want v2.0.0", event.UpdateAvailable)
+	}
+}
+
+func TestHandler_NewSessionsEvent_NoUpdate(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "update-state.json")
+
+	state := update.State{UpdateAvailable: false, LatestVersion: "v1.0.0"}
+	data, _ := json.Marshal(state)
+	os.WriteFile(stateFile, data, 0600)
+
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "1.0.0", stateFile)
+
+	event := h.newSessionsEvent(nil)
+	if event.UpdateAvailable != "" {
+		t.Errorf("UpdateAvailable = %q, want empty", event.UpdateAvailable)
+	}
+}
+
+func TestHandler_KillSessionInvalidID(t *testing.T) {
+	h, _, catcher := testHandler(t)
+
+	h.HandleMessage("peer1", &protocol.KillSessionRequest{
+		Type:    "kill_session",
+		Session: "'; DROP TABLE sessions;--",
+	})
+
+	msgs := catcher.get()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	errMsg, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+	if !ok {
+		t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+	}
+	if errMsg.Code != "kill_session_failed" {
+		t.Errorf("code = %q, want kill_session_failed", errMsg.Code)
+	}
+}
+
+func TestHandler_AttachInvalidDimensions(t *testing.T) {
+	h, _, catcher := testHandler(t)
+
+	tests := []struct {
+		name string
+		cols int
+		rows int
+	}{
+		{"cols too large", 501, 24},
+		{"rows too large", 80, 501},
+		{"cols zero", 0, 24},
+		{"rows zero", 80, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			catcher.mu.Lock()
+			catcher.messages = nil
+			catcher.mu.Unlock()
+
+			h.HandleMessage("peer1", &protocol.AttachRequest{
+				Type: "attach", PaneID: "%0", Cols: tt.cols, Rows: tt.rows,
+			})
+
+			msgs := catcher.get()
+			if len(msgs) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(msgs))
+			}
+			errMsg, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+			if !ok {
+				t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+			}
+			if errMsg.Code != "attach_failed" {
+				t.Errorf("code = %q, want attach_failed", errMsg.Code)
+			}
+		})
+	}
+}
+
+func TestHandler_ResizeInvalidDimensions(t *testing.T) {
+	h, tc, catcher := testHandler(t)
+
+	_, err := tc.CreateSession("resize-invalid-test", "")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type: "attach", PaneID: paneID, Cols: 80, Rows: 24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+
+	catcher.mu.Lock()
+	catcher.messages = nil
+	catcher.mu.Unlock()
+
+	h.HandleMessage("peer1", &protocol.ResizeRequest{
+		Type: "resize", Cols: 501, Rows: 24,
+	})
+
+	msgs := catcher.get()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	errMsg, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+	if !ok {
+		t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+	}
+	if errMsg.Code != "resize_failed" {
+		t.Errorf("code = %q, want resize_failed", errMsg.Code)
+	}
+
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
+func TestHandler_AttachInvalidPaneFormat(t *testing.T) {
+	h, _, catcher := testHandler(t)
+
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type: "attach", PaneID: "invalid pane!!", Cols: 80, Rows: 24,
+	})
+
+	msgs := catcher.get()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	errMsg, ok := msgs[0].Msg.(*protocol.ErrorEvent)
+	if !ok {
+		t.Fatalf("expected ErrorEvent, got %T", msgs[0].Msg)
+	}
+	if errMsg.Code != "attach_failed" {
+		t.Errorf("code = %q, want attach_failed", errMsg.Code)
+	}
+}
+
+func TestHandler_GetStalePeers(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
+
+	stale := h.GetStalePeers(30 * time.Second)
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale peers, got %d", len(stale))
+	}
+
+	h.mu.Lock()
+	h.lastPingTime["peer1"] = time.Now()
+	h.lastPingTime["peer2"] = time.Now().Add(-60 * time.Second)
+	h.mu.Unlock()
+
+	stale = h.GetStalePeers(30 * time.Second)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale peer, got %d", len(stale))
+	}
+	if stale[0] != "peer2" {
+		t.Errorf("stale peer = %q, want peer2", stale[0])
+	}
+}
+
+func TestHandler_HandleMessageUnknownType(t *testing.T) {
+	tc := tmux.NewClient("nonexistent-socket")
+	catcher := &messageCatcher{}
+	h := NewHandler(tc, catcher.Send, slog.Default(), "test", "")
+
+	h.HandleMessage("peer1", &protocol.DetachedEvent{Type: "detached"})
+
+	msgs := catcher.get()
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages for unknown type, got %d", len(msgs))
+	}
+}
+
+func TestHandler_ToProtocolSessions(t *testing.T) {
+	sessions := []tmux.Session{
+		{
+			ID: "$0", Name: "test", CreatedAt: 1000, LastActivityAt: 2000,
+			Windows: []tmux.Window{
+				{
+					ID: "@0", Name: "bash", Index: 0, Active: true,
+					Panes: []tmux.Pane{
+						{ID: "%0", Index: 0, Active: true, Size: tmux.PaneSize{Cols: 80, Rows: 24}, Title: "~", CurrentCommand: "bash"},
+					},
+				},
+			},
+		},
+	}
+
+	proto := toProtocolSessions(sessions)
+	if len(proto) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(proto))
+	}
+	if proto[0].ID != "$0" {
+		t.Errorf("ID = %q, want $0", proto[0].ID)
+	}
+	if len(proto[0].Windows) != 1 {
+		t.Fatalf("expected 1 window, got %d", len(proto[0].Windows))
+	}
+	if proto[0].Windows[0].Panes[0].Size.Cols != 80 {
+		t.Errorf("Pane cols = %d, want 80", proto[0].Windows[0].Panes[0].Size.Cols)
+	}
 }

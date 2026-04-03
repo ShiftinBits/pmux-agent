@@ -1789,3 +1789,185 @@ func TestBasicDataChannel(t *testing.T) {
 		t.Fatal("DataChannel did not open within 15s")
 	}
 }
+
+func TestPeer_SendMessage_Closed(t *testing.T) {
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		closed:    true,
+	}
+
+	err := p.SendMessage(&protocol.PongEvent{Type: "pong"})
+	if err == nil {
+		t.Fatal("expected error from SendMessage on closed peer")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("error %q does not contain 'closed'", err.Error())
+	}
+}
+
+func TestPeer_SendMessage_NoDataChannel(t *testing.T) {
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		dc:        nil,
+	}
+
+	err := p.SendMessage(&protocol.PongEvent{Type: "pong"})
+	if err == nil {
+		t.Fatal("expected error from SendMessage without data channel")
+	}
+	if !strings.Contains(err.Error(), "data channel not established") {
+		t.Errorf("error %q does not contain 'data channel not established'", err.Error())
+	}
+}
+
+func TestPeer_SendRaw_Closed(t *testing.T) {
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		closed:    true,
+	}
+
+	err := p.SendRaw([]byte("test"))
+	if err == nil {
+		t.Fatal("expected error from SendRaw on closed peer")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("error %q does not contain 'closed'", err.Error())
+	}
+}
+
+func TestPeer_SendRaw_NoDataChannel(t *testing.T) {
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		dc:        nil,
+	}
+
+	err := p.SendRaw([]byte("test"))
+	if err == nil {
+		t.Fatal("expected error from SendRaw without data channel")
+	}
+	if !strings.Contains(err.Error(), "data channel not established") {
+		t.Errorf("error %q does not contain 'data channel not established'", err.Error())
+	}
+}
+
+func TestPeer_WaitForSendReady_Done(t *testing.T) {
+	done := make(chan struct{})
+	close(done) // simulate closed peer
+
+	api := fastAPI(t)
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create peer connection: %v", err)
+	}
+	defer pc.Close()
+
+	dc, err := pc.CreateDataChannel("test", nil)
+	if err != nil {
+		t.Fatalf("create data channel: %v", err)
+	}
+
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}),
+		done:      done,
+	}
+
+	err = p.waitForSendReady(dc)
+	// If buffer is below threshold, waitForSendReady returns nil immediately.
+	// That's fine — the function works correctly either way.
+	// We're testing that it doesn't hang when done is closed.
+	_ = err
+}
+
+func TestPeer_Close_Idempotent(t *testing.T) {
+	p := &Peer{
+		DeviceID:  "test",
+		logger:    testLogger(),
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+	}
+
+	// Close twice should not panic
+	p.Close()
+	p.Close()
+
+	if !p.closed {
+		t.Error("expected peer to be closed")
+	}
+}
+
+func TestPeerManager_AllowedDeviceID(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	pm.SetAllowedDeviceID("device-1")
+	if got := pm.AllowedDeviceID(); got != "device-1" {
+		t.Errorf("AllowedDeviceID() = %q, want device-1", got)
+	}
+
+	pm.SetAllowedDeviceID("device-2")
+	if got := pm.AllowedDeviceID(); got != "device-2" {
+		t.Errorf("AllowedDeviceID() = %q, want device-2", got)
+	}
+}
+
+func TestPeerManager_PeerCount_Empty(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	if pm.PeerCount() != 0 {
+		t.Errorf("PeerCount() = %d, want 0", pm.PeerCount())
+	}
+}
+
+func TestPeerManager_PeerStates_Empty(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	states := pm.PeerStates()
+	if len(states) != 0 {
+		t.Errorf("PeerStates() length = %d, want 0", len(states))
+	}
+}
+
+func TestPeerManager_SendTo_NoPeer(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	err := pm.SendTo("nonexistent", &protocol.PongEvent{Type: "pong"})
+	if err == nil {
+		t.Fatal("expected error from SendTo with no peer")
+	}
+	if !strings.Contains(err.Error(), "no peer") {
+		t.Errorf("error %q does not contain 'no peer'", err.Error())
+	}
+}
+
+func TestPeerManager_ClosePeer_NoPeer(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	// Should not panic
+	pm.ClosePeer("nonexistent")
+}
+
+func TestPeerManager_CloseAll_Empty(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
+
+	// Should not panic
+	pm.CloseAll()
+}

@@ -429,6 +429,254 @@ func TestKeepaliveInterval(t *testing.T) {
 	}
 }
 
+func TestUpdateCheckInterval(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		expect time.Duration
+	}{
+		{"24h", "24h", 24 * time.Hour},
+		{"1h", "1h", 1 * time.Hour},
+		{"30m", "30m", 30 * time.Minute},
+		{"empty_fallback", "", 24 * time.Hour},
+		{"invalid_fallback", "bad", 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Update.CheckInterval = tt.value
+			got := cfg.UpdateCheckInterval()
+			if got != tt.expect {
+				t.Errorf("UpdateCheckInterval() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestValidate_UpdateCheckInterval(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"valid_24h", "24h", false},
+		{"valid_1h", "1h", false},
+		{"valid_empty", "", false}, // empty is allowed (uses default)
+		{"invalid", "notaduration", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Update.CheckInterval = tt.value
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() with check_interval=%q: err=%v, wantErr=%v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfigWithSources_AllFieldsFromFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvSecretBackend, EnvUpdateEnabled, EnvUpdateInterval} {
+		t.Setenv(env, "")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+name = "test-machine"
+log_level = "debug"
+
+[server]
+url = "https://custom.example.com"
+
+[identity]
+key_path = "/custom/keys/"
+secret_backend = "file"
+
+[connection]
+reconnect_interval = "10s"
+keepalive_interval = "15s"
+max_mobile_connections = 1
+
+[tmux]
+socket_name = "custom-socket"
+tmux_path = "/usr/local/bin/tmux"
+
+[update]
+enabled = false
+check_interval = "12h"
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	_, sources, err := LoadConfigWithSources(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+
+	// All fields set in file should have sourceFile
+	if sources.Name != sourceFile {
+		t.Errorf("Name source = %v, want file", sources.Name)
+	}
+	if sources.LogLevel != sourceFile {
+		t.Errorf("LogLevel source = %v, want file", sources.LogLevel)
+	}
+	if sources.ServerURL != sourceFile {
+		t.Errorf("ServerURL source = %v, want file", sources.ServerURL)
+	}
+	if sources.KeyPath != sourceFile {
+		t.Errorf("KeyPath source = %v, want file", sources.KeyPath)
+	}
+	if sources.SecretBackend != sourceFile {
+		t.Errorf("SecretBackend source = %v, want file", sources.SecretBackend)
+	}
+	if sources.ReconnectInterval != sourceFile {
+		t.Errorf("ReconnectInterval source = %v, want file", sources.ReconnectInterval)
+	}
+	if sources.KeepaliveInterval != sourceFile {
+		t.Errorf("KeepaliveInterval source = %v, want file", sources.KeepaliveInterval)
+	}
+	if sources.MaxMobileConnections != sourceFile {
+		t.Errorf("MaxMobileConnections source = %v, want file", sources.MaxMobileConnections)
+	}
+	if sources.SocketName != sourceFile {
+		t.Errorf("SocketName source = %v, want file", sources.SocketName)
+	}
+	if sources.TmuxPath != sourceFile {
+		t.Errorf("TmuxPath source = %v, want file", sources.TmuxPath)
+	}
+	if sources.UpdateCheckInterval != sourceFile {
+		t.Errorf("UpdateCheckInterval source = %v, want file", sources.UpdateCheckInterval)
+	}
+	if sources.UpdateEnabled != sourceFile {
+		t.Errorf("UpdateEnabled source = %v, want file", sources.UpdateEnabled)
+	}
+}
+
+func TestLoadConfigWithSources_AllFieldsFromEnv(t *testing.T) {
+	t.Setenv(EnvNewServerURL, "https://env.example.com")
+	t.Setenv(EnvKeyPath, "/env/keys/")
+	t.Setenv(EnvSocketName, "env-socket")
+	t.Setenv(EnvMaxConnections, "1")
+	t.Setenv(EnvTmuxPath, "/env/tmux")
+	t.Setenv(EnvSecretBackend, "keyring")
+	t.Setenv(EnvLogLevel, "error")
+	t.Setenv(EnvUpdateEnabled, "false")
+	t.Setenv(EnvUpdateInterval, "6h")
+
+	_, sources, err := LoadConfigWithSources("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+
+	if sources.ServerURL != sourceEnv {
+		t.Errorf("ServerURL source = %v, want env", sources.ServerURL)
+	}
+	if sources.KeyPath != sourceEnv {
+		t.Errorf("KeyPath source = %v, want env", sources.KeyPath)
+	}
+	if sources.SocketName != sourceEnv {
+		t.Errorf("SocketName source = %v, want env", sources.SocketName)
+	}
+	if sources.MaxMobileConnections != sourceEnv {
+		t.Errorf("MaxMobileConnections source = %v, want env", sources.MaxMobileConnections)
+	}
+	if sources.TmuxPath != sourceEnv {
+		t.Errorf("TmuxPath source = %v, want env", sources.TmuxPath)
+	}
+	if sources.SecretBackend != sourceEnv {
+		t.Errorf("SecretBackend source = %v, want env", sources.SecretBackend)
+	}
+	if sources.LogLevel != sourceEnv {
+		t.Errorf("LogLevel source = %v, want env", sources.LogLevel)
+	}
+	if sources.UpdateEnabled != sourceEnv {
+		t.Errorf("UpdateEnabled source = %v, want env", sources.UpdateEnabled)
+	}
+	if sources.UpdateCheckInterval != sourceEnv {
+		t.Errorf("UpdateCheckInterval source = %v, want env", sources.UpdateCheckInterval)
+	}
+}
+
+func TestLoadConfig_UpdateConfigFromFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval} {
+		t.Setenv(env, "")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[update]
+enabled = false
+check_interval = "12h"
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Update.Enabled {
+		t.Error("Update.Enabled should be false")
+	}
+	if cfg.Update.CheckInterval != "12h" {
+		t.Errorf("Update.CheckInterval = %q, want %q", cfg.Update.CheckInterval, "12h")
+	}
+}
+
+func TestLoadConfig_UpdateConfigFromEnv(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+
+	t.Setenv(EnvUpdateEnabled, "true")
+	t.Setenv(EnvUpdateInterval, "6h")
+
+	cfg, err := LoadConfig("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if !cfg.Update.Enabled {
+		t.Error("Update.Enabled should be true from env")
+	}
+	if cfg.Update.CheckInterval != "6h" {
+		t.Errorf("Update.CheckInterval = %q, want %q", cfg.Update.CheckInterval, "6h")
+	}
+}
+
+func TestValidate_SecretBackend(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"auto", "auto", false},
+		{"keyring", "keyring", false},
+		{"file", "file", false},
+		{"invalid", "custom", true},
+		{"empty", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Identity.SecretBackend = tt.value
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() with secret_backend=%q: err=%v, wantErr=%v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestServerURL_Method(t *testing.T) {
 	cfg := Defaults()
 	if cfg.ServerURL() != "https://signal.pmux.io" {
