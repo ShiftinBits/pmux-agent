@@ -471,6 +471,15 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 
 			sc.mu.Lock()
 			err = conn.WriteMessage(websocket.TextMessage, data)
+			// Send a WebSocket-level PING so the server's automatic PONG
+			// response resets our read deadline via the PongHandler. This
+			// keeps the connection alive even if the server doesn't send
+			// application-level responses to presence heartbeats.
+			if err == nil {
+				err = conn.WriteControl(
+					websocket.PingMessage, nil, time.Now().Add(5*time.Second),
+				)
+			}
 			sc.mu.Unlock()
 
 			if err != nil {
