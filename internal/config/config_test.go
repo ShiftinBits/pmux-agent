@@ -689,6 +689,229 @@ func TestServerURL_Method(t *testing.T) {
 	}
 }
 
+func TestDefaults_APIVersion(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Server.APIVersion != "v1" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "v1")
+	}
+}
+
+func TestAPIBaseURL_Method(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		apiVersion string
+		want       string
+	}{
+		{
+			name:       "v1 appends prefix",
+			url:        "https://signal.pmux.io",
+			apiVersion: "v1",
+			want:       "https://signal.pmux.io/v1",
+		},
+		{
+			name:       "empty version returns bare URL",
+			url:        "https://signal.pmux.io",
+			apiVersion: "",
+			want:       "https://signal.pmux.io",
+		},
+		{
+			name:       "trailing slash stripped before prefix",
+			url:        "https://signal.pmux.io/",
+			apiVersion: "v1",
+			want:       "https://signal.pmux.io/v1",
+		},
+		{
+			name:       "trailing slash stripped with empty version",
+			url:        "https://signal.pmux.io/",
+			apiVersion: "",
+			want:       "https://signal.pmux.io",
+		},
+		{
+			name:       "custom host with v1",
+			url:        "http://localhost:8787",
+			apiVersion: "v1",
+			want:       "http://localhost:8787/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Server.URL = tt.url
+			cfg.Server.APIVersion = tt.apiVersion
+			if got := cfg.APIBaseURL(); got != tt.want {
+				t.Errorf("APIBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_APIVersionDefault(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvAPIVersion, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+	// Unset EnvAPIVersion entirely so the env override short-circuits via LookupEnv.
+	os.Unsetenv(EnvAPIVersion)
+
+	cfg, err := LoadConfig("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "v1" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "v1")
+	}
+}
+
+func TestLoadConfig_APIVersionFromFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+	os.Unsetenv(EnvAPIVersion)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	// File sets api_version to "" explicitly, which must override the "v1"
+	// default (covers the legacy-server compatibility case).
+	content := `
+[server]
+api_version = ""
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "")
+	}
+	// APIBaseURL should collapse to the bare URL when api_version is empty.
+	if cfg.APIBaseURL() != cfg.Server.URL {
+		t.Errorf("APIBaseURL() = %q, want bare URL %q", cfg.APIBaseURL(), cfg.Server.URL)
+	}
+}
+
+func TestLoadConfig_APIVersionFromFile_ExplicitV1(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+	os.Unsetenv(EnvAPIVersion)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[server]
+api_version = "v1"
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, sources, err := LoadConfigWithSources(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "v1" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "v1")
+	}
+	if sources.APIVersion != sourceFile {
+		t.Errorf("APIVersion source = %v, want file", sources.APIVersion)
+	}
+}
+
+func TestLoadConfig_APIVersionFromEnv(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+	t.Setenv(EnvAPIVersion, "v1")
+
+	cfg, sources, err := LoadConfigWithSources("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "v1" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "v1")
+	}
+	if sources.APIVersion != sourceEnv {
+		t.Errorf("APIVersion source = %v, want env", sources.APIVersion)
+	}
+}
+
+func TestLoadConfig_APIVersionEnvEmptyOverridesDefault(t *testing.T) {
+	// An explicit empty string via env must override the "v1" default so
+	// operators can point at a legacy signaling server without editing TOML.
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+	t.Setenv(EnvAPIVersion, "")
+
+	cfg, err := LoadConfig("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "")
+	}
+}
+
+func TestLoadConfig_APIVersionEnvOverridesFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
+		t.Setenv(env, "")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[server]
+api_version = ""
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	t.Setenv(EnvAPIVersion, "v1")
+
+	cfg, sources, err := LoadConfigWithSources(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if cfg.Server.APIVersion != "v1" {
+		t.Errorf("Server.APIVersion = %q, want %q", cfg.Server.APIVersion, "v1")
+	}
+	if sources.APIVersion != sourceEnv {
+		t.Errorf("APIVersion source = %v, want env", sources.APIVersion)
+	}
+}
+
+func TestValidate_APIVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"v1", "v1", false},
+		{"empty", "", false},
+		{"v2_not_yet_supported", "v2", true},
+		{"unknown", "custom", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Server.APIVersion = tt.value
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() with api_version=%q: err=%v, wantErr=%v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestSaveAndLoadConfig(t *testing.T) {
 	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel} {
 		t.Setenv(env, "")
@@ -832,6 +1055,7 @@ func TestFormatEffective(t *testing.T) {
 	// Check that it contains expected strings
 	if !containsAll(output, []string{
 		`server.url = "https://signal.pmux.io"  (default)`,
+		`server.api_version = "v1"  (default)`,
 		`tmux.socket_name = "pmux"  (default)`,
 		`tmux.tmux_path = ""  (default)`,
 		`connection.max_mobile_connections = 1  (default)`,
@@ -850,8 +1074,10 @@ func TestCommentedDefaultConfig(t *testing.T) {
 		"[connection]",
 		"[tmux]",
 		"PMUX_SERVER_URL",
+		"PMUX_API_VERSION",
 		"PMUX_KEY_PATH",
 		`# url = "https://signal.pmux.io"`,
+		`# api_version = "v1"`,
 		`# socket_name = "pmux"`,
 		`PMUX_TMUX_PATH`,
 		`# tmux_path = "/opt/homebrew/bin/tmux"`,
