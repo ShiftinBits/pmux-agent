@@ -72,7 +72,7 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 	if identErr == nil {
 		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
-		if err := auth.DeleteDevice(identity, cfg.ServerURL(), httpClient, hmacSecret); err != nil {
+		if err := auth.DeleteDevice(identity, cfg.APIBaseURL(), httpClient, hmacSecret); err != nil {
 			fmt.Fprintf(w, "Warning: could not un-register from server: %v\n", err)
 			fmt.Fprintln(w, "  The host may still appear on your mobile device.")
 		} else {

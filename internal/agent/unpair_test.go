@@ -158,11 +158,12 @@ func TestRunUnpair_NotifiesServer(t *testing.T) {
 
 	var deleteCalled atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Paths are /v1/... because APIVersion defaults to "v1".
 		switch {
-		case r.URL.Path == "/auth/token" && r.Method == "POST":
+		case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
-		case r.URL.Path == "/auth/pairing" && r.Method == "DELETE":
+		case r.URL.Path == "/v1/auth/pairing" && r.Method == "DELETE":
 			deleteCalled.Store(true)
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -186,7 +187,7 @@ func TestRunUnpair_NotifiesServer(t *testing.T) {
 	}
 
 	if !deleteCalled.Load() {
-		t.Error("expected DELETE /auth/pairing to be called")
+		t.Error("expected DELETE /v1/auth/pairing to be called")
 	}
 
 	if !strings.Contains(out.String(), "unpaired successfully") {
@@ -215,11 +216,12 @@ func TestRunUnpair_ServerFailureContinues(t *testing.T) {
 	writeSinglePairedDevice(t, paths.PairedDevices)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Paths are /v1/... because APIVersion defaults to "v1".
 		switch {
-		case r.URL.Path == "/auth/token" && r.Method == "POST":
+		case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
-		case r.URL.Path == "/auth/pairing" && r.Method == "DELETE":
+		case r.URL.Path == "/v1/auth/pairing" && r.Method == "DELETE":
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(`{"error":"internal error"}`))
 		default:
