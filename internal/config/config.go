@@ -30,6 +30,7 @@ const (
 
 	// Environment variable names for config overrides.
 	EnvNewServerURL    = "PMUX_SERVER_URL"
+	EnvAPIVersion      = "PMUX_API_VERSION"
 	EnvKeyPath         = "PMUX_KEY_PATH"
 	EnvSocketName      = "PMUX_SOCKET_NAME"
 	EnvMaxConnections  = "PMUX_MAX_CONNECTIONS"
@@ -64,12 +65,21 @@ type fileUpdateConfig struct {
 	CheckInterval string `toml:"check_interval"`
 }
 
-// fileConfig mirrors Config but uses fileUpdateConfig for the [update] section.
-// This is only used during TOML parsing, not as a public API.
+// fileServerConfig is used for TOML unmarshaling so we can distinguish
+// "api_version absent" (nil) from "api_version = """ (pointer to empty string).
+// Clients that set api_version = "" explicitly opt out of the versioned URL
+// prefix, which is required for compatibility with older signaling servers.
+type fileServerConfig struct {
+	URL        string  `toml:"url"`
+	APIVersion *string `toml:"api_version"`
+}
+
+// fileConfig mirrors Config but uses fileUpdateConfig for the [update] section
+// and fileServerConfig for the [server] section. Only used during TOML parsing.
 type fileConfig struct {
 	Name       string           `toml:"name,omitempty"`
 	LogLevel   string           `toml:"log_level,omitempty"`
-	Server     ServerConfig     `toml:"server"`
+	Server     fileServerConfig `toml:"server"`
 	Identity   IdentityConfig   `toml:"identity"`
 	Connection ConnectionConfig `toml:"connection"`
 	Tmux       TmuxConfig       `toml:"tmux"`
@@ -78,7 +88,8 @@ type fileConfig struct {
 
 // ServerConfig holds signaling server configuration.
 type ServerConfig struct {
-	URL string `toml:"url"`
+	URL        string `toml:"url"`
+	APIVersion string `toml:"api_version"`
 }
 
 // IdentityConfig holds Ed25519 identity path and secret storage configuration.
@@ -123,6 +134,7 @@ func (s configSource) String() string {
 // ConfigSources records the origin of each config field for display.
 type ConfigSources struct {
 	ServerURL            configSource
+	APIVersion           configSource
 	KeyPath              configSource
 	SecretBackend        configSource
 	ReconnectInterval    configSource
@@ -141,7 +153,7 @@ type ConfigSources struct {
 func Defaults() Config {
 	return Config{
 		LogLevel: "info",
-		Server:   ServerConfig{URL: DefaultServerURL},
+		Server:   ServerConfig{URL: DefaultServerURL, APIVersion: "v1"},
 		Identity: IdentityConfig{KeyPath: "~/.config/pmux/keys/", SecretBackend: "auto"},
 		Connection: ConnectionConfig{
 			ReconnectInterval:    "5s",
@@ -218,6 +230,9 @@ func overlayFile(cfg *Config, fileCfg *fileConfig) {
 	if fileCfg.Server.URL != "" {
 		cfg.Server.URL = fileCfg.Server.URL
 	}
+	if fileCfg.Server.APIVersion != nil {
+		cfg.Server.APIVersion = *fileCfg.Server.APIVersion
+	}
 	if fileCfg.Identity.KeyPath != "" {
 		cfg.Identity.KeyPath = fileCfg.Identity.KeyPath
 	}
@@ -260,6 +275,10 @@ func overlayFileTracked(cfg *Config, fileCfg *fileConfig, sources *ConfigSources
 	if fileCfg.Server.URL != "" {
 		cfg.Server.URL = fileCfg.Server.URL
 		sources.ServerURL = sourceFile
+	}
+	if fileCfg.Server.APIVersion != nil {
+		cfg.Server.APIVersion = *fileCfg.Server.APIVersion
+		sources.APIVersion = sourceFile
 	}
 	if fileCfg.Identity.KeyPath != "" {
 		cfg.Identity.KeyPath = fileCfg.Identity.KeyPath
@@ -307,6 +326,12 @@ func applyEnvOverrides(cfg *Config) {
 	} else if v := os.Getenv(EnvServerURL); v != "" {
 		cfg.Server.URL = v
 	}
+	// PMUX_API_VERSION uses LookupEnv so an explicit empty string (""),
+	// which disables the versioned URL prefix for legacy server compatibility,
+	// can be distinguished from "unset".
+	if v, ok := os.LookupEnv(EnvAPIVersion); ok {
+		cfg.Server.APIVersion = v
+	}
 	if v := os.Getenv(EnvKeyPath); v != "" {
 		cfg.Identity.KeyPath = v
 	}
@@ -343,6 +368,10 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 	} else if v := os.Getenv(EnvServerURL); v != "" {
 		cfg.Server.URL = v
 		sources.ServerURL = sourceEnv
+	}
+	if v, ok := os.LookupEnv(EnvAPIVersion); ok {
+		cfg.Server.APIVersion = v
+		sources.APIVersion = sourceEnv
 	}
 	if v := os.Getenv(EnvKeyPath); v != "" {
 		cfg.Identity.KeyPath = v
@@ -392,6 +421,15 @@ func (c *Config) Validate() error {
 		strings.HasPrefix(c.Server.URL, "https://")
 	if !validScheme {
 		return fmt.Errorf("server.url must start with http://, https://, ws://, or wss://, got %q", c.Server.URL)
+	}
+
+	// api_version must be "" (legacy/unversioned) or "v1". Additional versions
+	// can be added as the signaling server evolves.
+	switch c.Server.APIVersion {
+	case "", "v1":
+		// valid
+	default:
+		return fmt.Errorf("server.api_version must be %q or %q, got %q", "", "v1", c.Server.APIVersion)
 	}
 
 	// secret_backend must be a known value
@@ -473,8 +511,25 @@ func (c *Config) UpdateCheckInterval() time.Duration {
 // ServerURL returns the effective signaling server URL from the config.
 // This replaces the old standalone ServerURL() function.
 // The URL is resolved from: defaults → config file → env vars.
+//
+// Use ServerURL for QR code payloads and user-facing display (the bare host
+// URL, with no version prefix). For HTTP/WS calls to the signaling server,
+// use APIBaseURL so requests are routed through the configured API version.
 func (c *Config) ServerURL() string {
 	return c.Server.URL
+}
+
+// APIBaseURL returns the server URL with the configured API version suffix
+// (e.g., "https://signal.pmux.io/v1"). When APIVersion is empty, it returns
+// the bare server URL so legacy deployments without version prefixes still
+// work. Callers pass this value to HTTP/WebSocket helpers as the serverURL
+// argument so every request path picks up the prefix automatically.
+func (c *Config) APIBaseURL() string {
+	base := strings.TrimRight(c.Server.URL, "/")
+	if c.Server.APIVersion == "" {
+		return base
+	}
+	return base + "/" + c.Server.APIVersion
 }
 
 // ParseLogLevel returns the slog.Level corresponding to the configured log level.
@@ -501,6 +556,7 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "name = %q  (%s)\n", cfg.Name, sources.Name)
 	fmt.Fprintf(&b, "log_level = %q  (%s)\n", cfg.LogLevel, sources.LogLevel)
 	fmt.Fprintf(&b, "server.url = %q  (%s)\n", cfg.Server.URL, sources.ServerURL)
+	fmt.Fprintf(&b, "server.api_version = %q  (%s)\n", cfg.Server.APIVersion, sources.APIVersion)
 	fmt.Fprintf(&b, "identity.key_path = %q  (%s)\n", cfg.Identity.KeyPath, sources.KeyPath)
 	fmt.Fprintf(&b, "identity.secret_backend = %q  (%s)\n", cfg.Identity.SecretBackend, sources.SecretBackend)
 	fmt.Fprintf(&b, "connection.reconnect_interval = %q  (%s)\n", cfg.Connection.ReconnectInterval, sources.ReconnectInterval)
@@ -525,6 +581,11 @@ func CommentedDefaultConfig() string {
 [server]
 # Signaling server URL (env: PMUX_SERVER_URL)
 # url = "https://signal.pmux.io"
+# Signaling server API version prefix (env: PMUX_API_VERSION)
+# Accepted values: "v1" (default) or "" (legacy, unversioned paths)
+# All HTTP/WebSocket endpoints are prefixed with /<api_version> when non-empty.
+# Set to "" only when pointing at a signaling server that predates API versioning.
+# api_version = "v1"
 
 [identity]
 # Path to Ed25519 keypair (env: PMUX_KEY_PATH)
