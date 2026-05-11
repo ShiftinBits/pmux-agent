@@ -145,7 +145,8 @@ func (f *FileSecretStore) ensureLoaded() error {
 	return nil
 }
 
-// flush encrypts and writes the secrets to disk.
+// flush encrypts and writes the secrets to disk using a temp-file-then-rename
+// strategy so that a crash mid-write never corrupts the existing secrets file.
 // Must be called with f.mu held.
 func (f *FileSecretStore) flush() error {
 	data, err := f.encrypt()
@@ -153,13 +154,39 @@ func (f *FileSecretStore) flush() error {
 		return fmt.Errorf("encrypt secrets: %w", err)
 	}
 
+	dir := filepath.Dir(f.filePath)
+
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(f.filePath), 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create keys directory: %w", err)
 	}
 
-	if err := os.WriteFile(f.filePath, data, 0600); err != nil {
-		return fmt.Errorf("write secrets file: %w", err)
+	// Write to a temp file in the same directory, then rename atomically.
+	// Rename is atomic on POSIX when src and dst are on the same filesystem,
+	// which is guaranteed here since both paths share the same parent dir.
+	tmp, err := os.CreateTemp(dir, ".secrets-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp secrets file: %w", err)
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write secrets temp: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("chmod secrets temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("close secrets temp: %w", err)
+	}
+	if err := os.Rename(tmpName, f.filePath); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename secrets file: %w", err)
 	}
 	return nil
 }
