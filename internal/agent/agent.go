@@ -41,12 +41,31 @@ type serverChecker interface {
 	IsServerRunning() bool
 }
 
+const (
+	// maxLogSize is the threshold at which agent.log is rotated.
+	// When the file exceeds this size on startup, it is renamed to agent.log.1
+	// and a fresh agent.log is opened. Only one backup is kept.
+	maxLogSize = 10 * 1024 * 1024 // 10 MiB
+)
+
+// rotateLogIfNeeded renames logPath to logPath+".1" when the file exceeds
+// maxLogSize, making room for a fresh log on the next open. Errors are
+// silently ignored — logging must not block agent startup.
+func rotateLogIfNeeded(logPath string) {
+	info, err := os.Stat(logPath)
+	if err != nil || info.Size() < maxLogSize {
+		return
+	}
+	os.Rename(logPath, logPath+".1") //nolint:errcheck
+}
+
 // Run starts the Pocketmux agent. It connects to the signaling server,
 // handles WebRTC connections, and monitors the tmux server.
 // Blocks until the context is canceled (SIGTERM/SIGINT or fatal error).
 func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMethod string) error {
-	// Set up file logging
+	// Set up file logging with size-based rotation.
 	logFile := filepath.Join(paths.ConfigDir, "agent.log")
+	rotateLogIfNeeded(logFile)
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return fmt.Errorf("open log file: %w", err)
