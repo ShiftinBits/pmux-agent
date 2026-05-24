@@ -48,7 +48,7 @@ func TestPaneSizeTracker_TrackAndResize(t *testing.T) {
 	}
 }
 
-func TestPaneSizeTracker_RestoreWhenPaneKilled(t *testing.T) {
+func TestPaneSizeTracker_ReleaseWhenPaneKilled(t *testing.T) {
 	skipIfNoTmux(t)
 	tc := testClient(t)
 
@@ -85,8 +85,8 @@ func TestPaneSizeTracker_RestoreWhenPaneKilled(t *testing.T) {
 		t.Fatalf("KillSession: %v", err)
 	}
 
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Errorf("RestoreIfLast on killed pane should not error, got: %v", err)
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Errorf("ReleaseIfForced on killed pane should not error, got: %v", err)
 	}
 }
 
@@ -168,9 +168,15 @@ func TestPaneSizeTracker_MultiPaneSplit(t *testing.T) {
 	if rows2 != pane2OrigRows {
 		t.Errorf("pane2 rows = %d, want %d (unchanged)", rows2, pane2OrigRows)
 	}
+
+	// Releasing a multi-pane window is a no-op: resize-pane never pinned
+	// window-size to manual, so there is no override to clear.
+	if err := tracker.ReleaseIfForced(pane1ID); err != nil {
+		t.Errorf("ReleaseIfForced on multi-pane window should not error: %v", err)
+	}
 }
 
-func TestPaneSizeTracker_RestoreReleasesManualWindowSize(t *testing.T) {
+func TestPaneSizeTracker_ReleasesManualWindowSize(t *testing.T) {
 	skipIfNoTmux(t)
 	tc := testClient(t)
 
@@ -205,17 +211,28 @@ func TestPaneSizeTracker_RestoreReleasesManualWindowSize(t *testing.T) {
 	}
 
 	// Detaching the (only) mobile must release the manual override so tmux
-	// resumes auto-fitting the window to attached clients and tracking their
-	// live resizes — instead of leaving it pinned at the mobile's size.
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Fatalf("RestoreIfLast: %v", err)
+	// resumes auto-fitting the window to attached clients and responding to
+	// their resizes — instead of leaving it pinned at the mobile's size.
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Fatalf("ReleaseIfForced: %v", err)
 	}
 
 	out, err := tc.run("show-options", "-w", "-t", wt, "window-size")
 	if err != nil {
-		t.Fatalf("show-options after restore: %v: %s", err, out)
+		t.Fatalf("show-options after release: %v: %s", err, out)
 	}
 	if strings.Contains(out, "manual") {
 		t.Errorf("window-size still manual after detach: %q; expected it released to automatic", out)
+	}
+
+	// The pane must be forgotten, and a repeat release is a harmless no-op.
+	tracker.mu.Lock()
+	stillForced := tracker.forced[paneID]
+	tracker.mu.Unlock()
+	if stillForced {
+		t.Error("expected pane to be forgotten after release")
+	}
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Errorf("second ReleaseIfForced should be a no-op, got: %v", err)
 	}
 }

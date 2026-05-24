@@ -367,6 +367,17 @@ func TestKillSession_InvalidTarget(t *testing.T) {
 	}
 }
 
+func TestClearWindowSizeOverride_InvalidTarget(t *testing.T) {
+	c := NewClient(testSocket)
+	err := c.ClearWindowSizeOverride(";evil-cmd")
+	if err == nil {
+		t.Fatal("expected error for invalid target")
+	}
+	if !errors.Is(err, ErrInvalidTarget) {
+		t.Errorf("expected ErrInvalidTarget, got: %v", err)
+	}
+}
+
 func TestListWindows_InvalidTarget(t *testing.T) {
 	c := NewClient(testSocket)
 	_, err := c.ListWindows(";evil-cmd")

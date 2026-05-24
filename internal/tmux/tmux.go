@@ -341,12 +341,12 @@ func (c *Client) ResizeWindow(windowTarget string, cols, rows int) error {
 }
 
 // ClearWindowSizeOverride removes the manual window-size override on a window —
-// the override tmux sets when a pane is force-resized via ResizePane/
-// ResizeWindow while a terminal client is attached. Unsetting the window-size
-// option reverts the window to tmux's default client-fitting behavior: it
-// refits to the attached terminal client and resumes tracking that client's
-// live resizes. This is the inverse of the manual resize the agent applies
-// while a mobile is driving the window's dimensions.
+// the override tmux pins when a pane or window is force-resized to fixed
+// dimensions via ResizePane/ResizeWindow. Unsetting the window-size option
+// reverts the window to tmux's default client-fitting behavior: tmux refits it
+// to the attached terminal client and responds to that client's terminal
+// resizes. This is the inverse of the manual resize the agent applies while a
+// mobile is driving the window's dimensions.
 func (c *Client) ClearWindowSizeOverride(windowTarget string) error {
 	if err := validateTarget(windowTarget); err != nil {
 		return err
