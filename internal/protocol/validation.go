@@ -22,6 +22,10 @@ const (
 	// MaxInputSize bounds a single input message written to the PTY (16 KiB).
 	MaxInputSize = 16 * 1024
 	// MaxOutputSize bounds a single output message read from the PTY (1 MiB).
+	// Equal to MaxMessageSize by design (matches @pocketmux/shared): an output
+	// event whose payload exceeds this is rejected by the envelope size check
+	// in Decode() before Validate() can run, so OutputEvent.Validate() is
+	// defense-in-depth (output events are also dropped by the IsRequest gate).
 	MaxOutputSize = 1 << 20
 	// MinDimension is the smallest allowed terminal dimension.
 	MinDimension = 1
@@ -69,6 +73,12 @@ func validateByteSize(typ, field string, n, max int) error {
 }
 
 // --- Mobile → Host (Requests): the primary security boundary ---
+//
+// The optional reattach/compression fields on attach (and compression on
+// attached) are not range-checked: msgpack decodes them into statically typed
+// Go fields (bool/string), which is the equivalent of the TypeScript typeof
+// guards. A msgpack integer 0/1 would coerce to bool where TS rejects it, but
+// that is a benign well-formedness divergence, not a security gap.
 
 // Validate enforces bounds on an attach request.
 func (m *AttachRequest) Validate() error {
@@ -140,7 +150,7 @@ func (m *ErrorEvent) Validate() error {
 // Validate enforces bounds on a pong event.
 func (m *PongEvent) Validate() error {
 	if m.Latency < 0 {
-		return fmt.Errorf("pong: %q must be between 0 and Infinity", "latency")
+		return fmt.Errorf("pong: %q must be >= 0", "latency")
 	}
 	return nil
 }

@@ -13,19 +13,6 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/update"
 )
 
-const (
-	// maxResizeDimension is the upper bound for resize column/row values.
-	// No real terminal exceeds 500 columns or rows.
-	maxResizeDimension = 500
-
-	// minResizeDimension is the lower bound for resize column/row values.
-	minResizeDimension = 1
-
-	// maxInputSize is the maximum allowed input request data size.
-	// 16 KB is well within OS ARG_MAX limits for tmux send-keys via execve.
-	maxInputSize = 16 * 1024
-)
-
 // SendFunc sends a protocol message to a specific peer.
 type SendFunc func(peerID string, msg protocol.Message) error
 
@@ -220,12 +207,13 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		return
 	}
 
-	// Validate dimensions (same bounds as handleResize).
-	if req.Cols < minResizeDimension || req.Cols > maxResizeDimension ||
-		req.Rows < minResizeDimension || req.Rows > maxResizeDimension {
+	// Validate dimensions (same bounds as handleResize). Defense-in-depth:
+	// Decode() already enforces these via protocol.AttachRequest.Validate().
+	if req.Cols < protocol.MinDimension || req.Cols > protocol.MaxDimension ||
+		req.Rows < protocol.MinDimension || req.Rows > protocol.MaxDimension {
 		h.sendError(peerID, "attach_failed",
 			fmt.Sprintf("dimensions out of range: cols=%d rows=%d (must be %d-%d)",
-				req.Cols, req.Rows, minResizeDimension, maxResizeDimension))
+				req.Cols, req.Rows, protocol.MinDimension, protocol.MaxDimension))
 		return
 	}
 
@@ -388,9 +376,9 @@ func (h *Handler) handleDetach(peerID string) {
 }
 
 func (h *Handler) handleInput(peerID string, req *protocol.InputRequest) {
-	if len(req.Data) > maxInputSize {
+	if len(req.Data) > protocol.MaxInputSize {
 		h.sendError(peerID, "input_too_large",
-			fmt.Sprintf("input size %d exceeds %d byte limit", len(req.Data), maxInputSize))
+			fmt.Sprintf("input size %d exceeds %d byte limit", len(req.Data), protocol.MaxInputSize))
 		return
 	}
 
@@ -411,11 +399,13 @@ func (h *Handler) handleInput(peerID string, req *protocol.InputRequest) {
 
 func (h *Handler) handleResize(peerID string, req *protocol.ResizeRequest) {
 	// Validate dimensions to prevent resource abuse or unexpected tmux behavior.
-	if req.Cols < minResizeDimension || req.Cols > maxResizeDimension ||
-		req.Rows < minResizeDimension || req.Rows > maxResizeDimension {
+	// Defense-in-depth: Decode() already enforces these via
+	// protocol.ResizeRequest.Validate().
+	if req.Cols < protocol.MinDimension || req.Cols > protocol.MaxDimension ||
+		req.Rows < protocol.MinDimension || req.Rows > protocol.MaxDimension {
 		h.sendError(peerID, "resize_failed",
 			fmt.Sprintf("dimensions out of range: cols=%d rows=%d (must be %d-%d)",
-				req.Cols, req.Rows, minResizeDimension, maxResizeDimension))
+				req.Cols, req.Rows, protocol.MinDimension, protocol.MaxDimension))
 		return
 	}
 

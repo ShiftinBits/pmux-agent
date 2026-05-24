@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -74,20 +75,40 @@ func TestResizeRequestValidate(t *testing.T) {
 }
 
 func TestKillSessionRequestValidate(t *testing.T) {
-	if err := (&KillSessionRequest{Session: strings.Repeat("s", MaxStringIDLength)}).Validate(); err != nil {
-		t.Errorf("max-length session should be valid, got %v", err)
+	tests := []struct {
+		name    string
+		session string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"at max", strings.Repeat("s", MaxStringIDLength), false},
+		{"over max", strings.Repeat("s", MaxStringIDLength+1), true},
 	}
-	if err := (&KillSessionRequest{Session: strings.Repeat("s", MaxStringIDLength+1)}).Validate(); err == nil {
-		t.Error("over-length session should be rejected")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := (&KillSessionRequest{Session: tt.session}).Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
 func TestOutputEventValidate(t *testing.T) {
-	if err := (&OutputEvent{Data: make([]byte, MaxOutputSize)}).Validate(); err != nil {
-		t.Errorf("max-size output should be valid, got %v", err)
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"empty", 0, false},
+		{"at max", MaxOutputSize, false},
+		{"over max", MaxOutputSize + 1, true},
 	}
-	if err := (&OutputEvent{Data: make([]byte, MaxOutputSize+1)}).Validate(); err == nil {
-		t.Error("over-size output should be rejected")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := (&OutputEvent{Data: make([]byte, tt.size)}).Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -185,6 +206,16 @@ func TestDecodeRejectsOutOfBounds(t *testing.T) {
 			msg:     &KillSessionRequest{Type: "kill_session", Session: strings.Repeat("s", MaxStringIDLength+1)},
 			wantSub: `"session"`,
 		},
+		{
+			name:    "over-long attach paneId (valid dimensions)",
+			msg:     &AttachRequest{Type: "attach", PaneID: strings.Repeat("x", MaxStringIDLength+1), Cols: 80, Rows: 24},
+			wantSub: `"paneId"`,
+		},
+		{
+			name:    "oversized resize rows (valid cols)",
+			msg:     &ResizeRequest{Type: "resize", Cols: 80, Rows: MaxDimension + 1},
+			wantSub: `"rows"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,6 +251,39 @@ func TestDecodeAcceptsValid(t *testing.T) {
 		}
 		if _, err := Decode(data); err != nil {
 			t.Errorf("Decode(%T) rejected a valid message: %v", msg, err)
+		}
+	}
+}
+
+// TestRequestsWithFieldsAreValidatable guards the optional-interface pattern:
+// any Mobile → Host request type that carries a field beyond Type MUST
+// implement Validatable, otherwise Decode() would silently skip its bounds.
+// This fails if someone adds a new typed request (or a field to an existing
+// one) without a Validate() method. Keep the list in sync with IsRequest().
+func TestRequestsWithFieldsAreValidatable(t *testing.T) {
+	requests := []Message{
+		&ListSessionsRequest{},
+		&AttachRequest{},
+		&DetachRequest{},
+		&InputRequest{},
+		&ResizeRequest{},
+		&KillSessionRequest{},
+		&CreateSessionRequest{},
+		&PingRequest{},
+	}
+	for _, msg := range requests {
+		if !IsRequest(msg) {
+			t.Errorf("%T is not recognized by IsRequest(); update the list to match", msg)
+		}
+		v := reflect.ValueOf(msg).Elem()
+		var extraFields []string
+		for i := 0; i < v.NumField(); i++ {
+			if name := v.Type().Field(i).Name; name != "Type" {
+				extraFields = append(extraFields, name)
+			}
+		}
+		if _, ok := msg.(Validatable); len(extraFields) > 0 && !ok {
+			t.Errorf("%T carries fields %v but does not implement Validatable; add a Validate() method", msg, extraFields)
 		}
 	}
 }
