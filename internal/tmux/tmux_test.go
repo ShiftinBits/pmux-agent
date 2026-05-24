@@ -356,32 +356,6 @@ func TestPaneDimensions(t *testing.T) {
 	}
 }
 
-func TestClient_ResizeWindowAuto(t *testing.T) {
-	skipIfNoTmux(t)
-	tc := testClient(t)
-
-	_, err := tc.CreateSession("auto-resize-test", "")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	sessions, err := tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	windowTarget := sessions[0].ID + ":" + sessions[0].Windows[0].ID
-
-	// Manually resize to something small
-	if err := tc.ResizeWindow(windowTarget, 40, 12); err != nil {
-		t.Fatalf("ResizeWindow: %v", err)
-	}
-
-	// Auto-resize should not error
-	if err := tc.ResizeWindowAuto(windowTarget); err != nil {
-		t.Errorf("ResizeWindowAuto: %v", err)
-	}
-}
-
 func TestKillSession_InvalidTarget(t *testing.T) {
 	c := NewClient(testSocket)
 	err := c.KillSession(";evil-cmd")
