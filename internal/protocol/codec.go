@@ -92,6 +92,15 @@ func Decode(data []byte) (Message, error) {
 		return nil, fmt.Errorf("decode %s: %w", env.Type, err)
 	}
 
+	// Enforce field-level bounds on the decoded message. The agent is the
+	// security boundary for messages from untrusted mobile clients, so any
+	// out-of-bounds value is rejected before it reaches tmux or the PTY.
+	if v, ok := msg.(Validatable); ok {
+		if err := v.Validate(); err != nil {
+			return nil, fmt.Errorf("decode %s: %w", env.Type, err)
+		}
+	}
+
 	return msg, nil
 }
 

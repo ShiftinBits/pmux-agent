@@ -613,7 +613,7 @@ func TestHandler_InputTooLarge(t *testing.T) {
 	catcher.messages = nil
 	catcher.mu.Unlock()
 
-	largeData := make([]byte, maxInputSize+1)
+	largeData := make([]byte, protocol.MaxInputSize+1)
 	h.HandleMessage("peer1", &protocol.InputRequest{Type: "input", Data: largeData})
 
 	errMsg := catcher.waitFor(t, "error", 2*time.Second)

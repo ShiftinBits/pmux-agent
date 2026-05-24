@@ -1,0 +1,18 @@
+{
+  "projectId": "proj:1194e302be51413482407ba6779a33a2",
+  "branch": "main",
+  "languages": {
+    "go": {
+      "fileExtensions": [
+        ".go"
+      ],
+      "lsp": {
+        "command": "gopls",
+        "args": [
+          "serve"
+        ]
+      }
+    }
+  },
+  "lspEnrichment": true
+}
