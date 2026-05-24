@@ -236,3 +236,43 @@ func TestPaneSizeTracker_ReleasesManualWindowSize(t *testing.T) {
 		t.Errorf("second ReleaseIfForced should be a no-op, got: %v", err)
 	}
 }
+
+func TestPaneSizeTracker_TrackAndResizeError(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	tracker := NewPaneSizeTracker(tc)
+
+	// A well-formed but nonexistent pane: validateTarget passes, the tmux
+	// resize fails, so TrackAndResize returns an error and must NOT mark the
+	// pane as forced (otherwise ReleaseIfForced would later try to release a
+	// window that was never driven by the mobile).
+	if err := tracker.TrackAndResize("%99999", 40, 12); err == nil {
+		t.Fatal("expected error resizing a nonexistent pane")
+	}
+
+	tracker.mu.Lock()
+	forced := tracker.forced["%99999"]
+	tracker.mu.Unlock()
+	if forced {
+		t.Error("pane should not be marked forced when the resize fails")
+	}
+}
+
+func TestPaneSizeTracker_ReleaseToleratesMissingWindow(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	tracker := NewPaneSizeTracker(tc)
+
+	// Seed a forced entry for a pane that does not exist, then release it.
+	// WindowForPane fails (the pane is gone), and ReleaseIfForced must swallow
+	// that and return nil — there is nothing left to release.
+	tracker.mu.Lock()
+	tracker.forced["%99999"] = true
+	tracker.mu.Unlock()
+
+	if err := tracker.ReleaseIfForced("%99999"); err != nil {
+		t.Errorf("ReleaseIfForced should tolerate a missing window, got: %v", err)
+	}
+}

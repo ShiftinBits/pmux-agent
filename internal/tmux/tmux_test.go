@@ -378,6 +378,17 @@ func TestClearWindowSizeOverride_InvalidTarget(t *testing.T) {
 	}
 }
 
+func TestClearWindowSizeOverride_NonexistentWindow(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	// A well-formed target that passes validateTarget but does not exist:
+	// set-window-option fails, exercising the error-wrap path.
+	if err := tc.ClearWindowSizeOverride("$99999:@99999"); err == nil {
+		t.Error("expected error clearing window-size on a nonexistent window")
+	}
+}
+
 func TestListWindows_InvalidTarget(t *testing.T) {
 	c := NewClient(testSocket)
 	_, err := c.ListWindows(";evil-cmd")
