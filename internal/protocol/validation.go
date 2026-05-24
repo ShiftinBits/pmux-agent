@@ -99,7 +99,15 @@ func (m *KillSessionRequest) Validate() error {
 	return validateStringLen("kill_session", "session", m.Session, MaxStringIDLength)
 }
 
-// --- Host → Mobile (Events): validated for full cross-language parity ---
+// --- Host → Mobile (Events) ---
+//
+// Events carry bounded fields and are validated to match the TypeScript
+// validateFields() contract. The sessions and session_created events are
+// intentionally omitted: TypeScript only asserts that their payloads are an
+// array / object respectively (no length or nested-string bounds), and Go's
+// static typing already guarantees those shapes ([]TmuxSession / TmuxSession).
+// Adding bounds here would diverge from the shared contract rather than mirror
+// it.
 
 // Validate enforces bounds on an output event.
 func (m *OutputEvent) Validate() error {

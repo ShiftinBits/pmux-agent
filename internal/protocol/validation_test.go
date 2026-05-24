@@ -176,6 +176,11 @@ func TestDecodeRejectsOutOfBounds(t *testing.T) {
 			wantSub: `"data"`,
 		},
 		{
+			name:    "oversized resize",
+			msg:     &ResizeRequest{Type: "resize", Cols: 99999, Rows: 99999},
+			wantSub: `"cols"`,
+		},
+		{
 			name:    "over-long session name",
 			msg:     &KillSessionRequest{Type: "kill_session", Session: strings.Repeat("s", MaxStringIDLength+1)},
 			wantSub: `"session"`,
