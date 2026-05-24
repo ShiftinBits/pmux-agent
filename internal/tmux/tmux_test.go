@@ -356,32 +356,6 @@ func TestPaneDimensions(t *testing.T) {
 	}
 }
 
-func TestClient_ResizeWindowAuto(t *testing.T) {
-	skipIfNoTmux(t)
-	tc := testClient(t)
-
-	_, err := tc.CreateSession("auto-resize-test", "")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	sessions, err := tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	windowTarget := sessions[0].ID + ":" + sessions[0].Windows[0].ID
-
-	// Manually resize to something small
-	if err := tc.ResizeWindow(windowTarget, 40, 12); err != nil {
-		t.Fatalf("ResizeWindow: %v", err)
-	}
-
-	// Auto-resize should not error
-	if err := tc.ResizeWindowAuto(windowTarget); err != nil {
-		t.Errorf("ResizeWindowAuto: %v", err)
-	}
-}
-
 func TestKillSession_InvalidTarget(t *testing.T) {
 	c := NewClient(testSocket)
 	err := c.KillSession(";evil-cmd")
@@ -390,6 +364,28 @@ func TestKillSession_InvalidTarget(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalidTarget) {
 		t.Errorf("expected ErrInvalidTarget, got: %v", err)
+	}
+}
+
+func TestClearWindowSizeOverride_InvalidTarget(t *testing.T) {
+	c := NewClient(testSocket)
+	err := c.ClearWindowSizeOverride(";evil-cmd")
+	if err == nil {
+		t.Fatal("expected error for invalid target")
+	}
+	if !errors.Is(err, ErrInvalidTarget) {
+		t.Errorf("expected ErrInvalidTarget, got: %v", err)
+	}
+}
+
+func TestClearWindowSizeOverride_NonexistentWindow(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	// A well-formed target that passes validateTarget but does not exist:
+	// set-window-option fails, exercising the error-wrap path.
+	if err := tc.ClearWindowSizeOverride("$99999:@99999"); err == nil {
+		t.Error("expected error clearing window-size on a nonexistent window")
 	}
 }
 

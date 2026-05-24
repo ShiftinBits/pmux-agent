@@ -251,8 +251,8 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 
 		// Undo size tracking if we resized but couldn't attach.
 		if sizeTracked {
-			if restoreErr := h.sizeTracker.RestoreIfLast(req.PaneID); restoreErr != nil {
-				h.logger.Warn("failed to restore pane size after attach failure", "error", restoreErr)
+			if releaseErr := h.sizeTracker.ReleaseIfForced(req.PaneID); releaseErr != nil {
+				h.logger.Warn("failed to release window size after attach failure", "error", releaseErr)
 			}
 		}
 
@@ -699,10 +699,10 @@ func (h *Handler) detachPeer(peerID string) {
 		compressor.Close()
 	}
 
-	// Auto-resize pane window if this was the last mobile attached
+	// Release the forced window size so the desktop window auto-fits again.
 	if paneID != "" {
-		if err := h.sizeTracker.RestoreIfLast(paneID); err != nil {
-			h.logger.Warn("failed to restore pane size", "error", err, "pane", paneID)
+		if err := h.sizeTracker.ReleaseIfForced(paneID); err != nil {
+			h.logger.Warn("failed to release window size", "error", err, "pane", paneID)
 		}
 	}
 }

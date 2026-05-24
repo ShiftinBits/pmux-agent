@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,132 +41,14 @@ func TestPaneSizeTracker_TrackAndResize(t *testing.T) {
 	}
 
 	tracker.mu.Lock()
-	count := tracker.attachCount[paneID]
-	_, hasOrig := tracker.origSize[paneID]
+	forced := tracker.forced[paneID]
 	tracker.mu.Unlock()
-	if count != 1 {
-		t.Errorf("attachCount = %d, want 1", count)
-	}
-	if !hasOrig {
-		t.Error("expected origSize to be saved after first attach")
+	if !forced {
+		t.Error("expected pane to be marked forced after attach")
 	}
 }
 
-func TestPaneSizeTracker_RestoreIfLast(t *testing.T) {
-	skipIfNoTmux(t)
-	tc := testClient(t)
-
-	_, err := tc.CreateSession("resize-restore-test", "")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	sessions, err := tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	paneID := sessions[0].Windows[0].Panes[0].ID
-	origCols := sessions[0].Windows[0].Panes[0].Size.Cols
-	origRows := sessions[0].Windows[0].Panes[0].Size.Rows
-
-	tracker := NewPaneSizeTracker(tc)
-
-	if err := tracker.TrackAndResize(paneID, 40, 12); err != nil {
-		t.Fatalf("TrackAndResize: %v", err)
-	}
-
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Fatalf("RestoreIfLast: %v", err)
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	tracker.mu.Lock()
-	_, tracked := tracker.attachCount[paneID]
-	_, hasOrig := tracker.origSize[paneID]
-	tracker.mu.Unlock()
-	if tracked {
-		t.Error("expected attachCount entry to be removed after last detach")
-	}
-	if hasOrig {
-		t.Error("expected origSize entry to be removed after last detach")
-	}
-
-	// Verify dimensions were restored
-	sessions, err = tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll after restore: %v", err)
-	}
-	size := sessions[0].Windows[0].Panes[0].Size
-	if size.Cols != origCols {
-		t.Errorf("restored cols = %d, want %d", size.Cols, origCols)
-	}
-	if size.Rows != origRows {
-		t.Errorf("restored rows = %d, want %d", size.Rows, origRows)
-	}
-}
-
-func TestPaneSizeTracker_MultipleAttach_RestoreOnlyAfterLast(t *testing.T) {
-	skipIfNoTmux(t)
-	tc := testClient(t)
-
-	_, err := tc.CreateSession("multi-attach-test", "")
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	sessions, err := tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	paneID := sessions[0].Windows[0].Panes[0].ID
-
-	tracker := NewPaneSizeTracker(tc)
-
-	if err := tracker.TrackAndResize(paneID, 40, 12); err != nil {
-		t.Fatalf("TrackAndResize 1: %v", err)
-	}
-
-	if err := tracker.TrackAndResize(paneID, 50, 15); err != nil {
-		t.Fatalf("TrackAndResize 2: %v", err)
-	}
-
-	// First detach — should NOT restore (one still attached)
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Fatalf("RestoreIfLast 1: %v", err)
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	tracker.mu.Lock()
-	count := tracker.attachCount[paneID]
-	tracker.mu.Unlock()
-	if count != 1 {
-		t.Errorf("attachCount after first detach = %d, want 1", count)
-	}
-
-	// Verify size is still mobile-resized (50x15 from second attach)
-	sessions, err = tc.ListAll()
-	if err != nil {
-		t.Fatalf("ListAll: %v", err)
-	}
-	size := sessions[0].Windows[0].Panes[0].Size
-	if size.Cols != 50 || size.Rows != 15 {
-		t.Errorf("size after first detach = %dx%d, want 50x15", size.Cols, size.Rows)
-	}
-
-	// Second detach — should restore original dimensions
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Fatalf("RestoreIfLast 2: %v", err)
-	}
-
-	tracker.mu.Lock()
-	_, tracked := tracker.attachCount[paneID]
-	tracker.mu.Unlock()
-	if tracked {
-		t.Error("expected attachCount entry to be removed after last detach")
-	}
-}
-
-func TestPaneSizeTracker_RestoreWhenPaneKilled(t *testing.T) {
+func TestPaneSizeTracker_ReleaseWhenPaneKilled(t *testing.T) {
 	skipIfNoTmux(t)
 	tc := testClient(t)
 
@@ -202,8 +85,8 @@ func TestPaneSizeTracker_RestoreWhenPaneKilled(t *testing.T) {
 		t.Fatalf("KillSession: %v", err)
 	}
 
-	if err := tracker.RestoreIfLast(paneID); err != nil {
-		t.Errorf("RestoreIfLast on killed pane should not error, got: %v", err)
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Errorf("ReleaseIfForced on killed pane should not error, got: %v", err)
 	}
 }
 
@@ -284,5 +167,112 @@ func TestPaneSizeTracker_MultiPaneSplit(t *testing.T) {
 	// Rows should be unchanged (horizontal split shares rows)
 	if rows2 != pane2OrigRows {
 		t.Errorf("pane2 rows = %d, want %d (unchanged)", rows2, pane2OrigRows)
+	}
+
+	// Releasing a multi-pane window is a no-op: resize-pane never pinned
+	// window-size to manual, so there is no override to clear.
+	if err := tracker.ReleaseIfForced(pane1ID); err != nil {
+		t.Errorf("ReleaseIfForced on multi-pane window should not error: %v", err)
+	}
+}
+
+func TestPaneSizeTracker_ReleasesManualWindowSize(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	if _, err := tc.CreateSession("ws-release-test", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+	wt, err := tc.WindowForPane(paneID)
+	if err != nil {
+		t.Fatalf("WindowForPane: %v", err)
+	}
+
+	tracker := NewPaneSizeTracker(tc)
+	if err := tracker.TrackAndResize(paneID, 40, 12); err != nil {
+		t.Fatalf("TrackAndResize: %v", err)
+	}
+
+	// Model the manual window-size override tmux applies to a window when a
+	// pane is force-resized while a terminal client is attached. The test
+	// harness has no attached client, so set it explicitly to recreate the
+	// real-world precondition the bug is about.
+	if out, err := tc.run("set-window-option", "-t", wt, "window-size", "manual"); err != nil {
+		t.Fatalf("set window-size manual: %v: %s", err, out)
+	}
+	if out, _ := tc.run("show-options", "-w", "-t", wt, "window-size"); !strings.Contains(out, "manual") {
+		t.Fatalf("precondition: expected window-size manual, got %q", out)
+	}
+
+	// Detaching the (only) mobile must release the manual override so tmux
+	// resumes auto-fitting the window to attached clients and responding to
+	// their resizes — instead of leaving it pinned at the mobile's size.
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Fatalf("ReleaseIfForced: %v", err)
+	}
+
+	out, err := tc.run("show-options", "-w", "-t", wt, "window-size")
+	if err != nil {
+		t.Fatalf("show-options after release: %v: %s", err, out)
+	}
+	if strings.Contains(out, "manual") {
+		t.Errorf("window-size still manual after detach: %q; expected it released to automatic", out)
+	}
+
+	// The pane must be forgotten, and a repeat release is a harmless no-op.
+	tracker.mu.Lock()
+	stillForced := tracker.forced[paneID]
+	tracker.mu.Unlock()
+	if stillForced {
+		t.Error("expected pane to be forgotten after release")
+	}
+	if err := tracker.ReleaseIfForced(paneID); err != nil {
+		t.Errorf("second ReleaseIfForced should be a no-op, got: %v", err)
+	}
+}
+
+func TestPaneSizeTracker_TrackAndResizeError(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	tracker := NewPaneSizeTracker(tc)
+
+	// A well-formed but nonexistent pane: validateTarget passes, the tmux
+	// resize fails, so TrackAndResize returns an error and must NOT mark the
+	// pane as forced (otherwise ReleaseIfForced would later try to release a
+	// window that was never driven by the mobile).
+	if err := tracker.TrackAndResize("%99999", 40, 12); err == nil {
+		t.Fatal("expected error resizing a nonexistent pane")
+	}
+
+	tracker.mu.Lock()
+	forced := tracker.forced["%99999"]
+	tracker.mu.Unlock()
+	if forced {
+		t.Error("pane should not be marked forced when the resize fails")
+	}
+}
+
+func TestPaneSizeTracker_ReleaseToleratesMissingWindow(t *testing.T) {
+	skipIfNoTmux(t)
+	tc := testClient(t)
+
+	tracker := NewPaneSizeTracker(tc)
+
+	// Seed a forced entry for a pane that does not exist, then release it.
+	// WindowForPane fails (the pane is gone), and ReleaseIfForced must swallow
+	// that and return nil — there is nothing left to release.
+	tracker.mu.Lock()
+	tracker.forced["%99999"] = true
+	tracker.mu.Unlock()
+
+	if err := tracker.ReleaseIfForced("%99999"); err != nil {
+		t.Errorf("ReleaseIfForced should tolerate a missing window, got: %v", err)
 	}
 }

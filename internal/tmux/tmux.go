@@ -340,12 +340,20 @@ func (c *Client) ResizeWindow(windowTarget string, cols, rows int) error {
 	return nil
 }
 
-// ResizeWindowAuto tells tmux to auto-adjust a window to fit the currently
-// attached clients. Uses the -A flag of resize-window.
-func (c *Client) ResizeWindowAuto(windowTarget string) error {
-	out, err := c.run("resize-window", "-A", "-t", windowTarget)
+// ClearWindowSizeOverride removes the manual window-size override on a window —
+// the override tmux pins when a pane or window is force-resized to fixed
+// dimensions via ResizePane/ResizeWindow. Unsetting the window-size option
+// reverts the window to tmux's default client-fitting behavior: tmux refits it
+// to the attached terminal client and responds to that client's terminal
+// resizes. This is the inverse of the manual resize the agent applies while a
+// mobile is driving the window's dimensions.
+func (c *Client) ClearWindowSizeOverride(windowTarget string) error {
+	if err := validateTarget(windowTarget); err != nil {
+		return err
+	}
+	out, err := c.run("set-window-option", "-t", windowTarget, "-u", "window-size")
 	if err != nil {
-		return fmt.Errorf("resize-window -A: %w: %s", err, out)
+		return fmt.Errorf("unset window-size: %w: %s", err, out)
 	}
 	return nil
 }
