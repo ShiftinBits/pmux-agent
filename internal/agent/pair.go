@@ -58,7 +58,12 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 		}
 	}
 
+	// serverURL is the bare host URL — used for the HTTP warning check below
+	// and the QR code payload (the mobile decodes the bare URL and adds its
+	// own version prefix). apiBaseURL carries the configured API version
+	// suffix and is passed to every HTTP/WS helper.
 	serverURL := cfg.ServerURL()
+	apiBaseURL := cfg.APIBaseURL()
 
 	// Warn if using unencrypted HTTP for non-local server
 	if strings.HasPrefix(serverURL, "http://") || strings.HasPrefix(serverURL, "ws://") {
@@ -86,12 +91,14 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	// Initiate pairing with signaling server
 	fmt.Fprintln(w, "Contacting signaling server...")
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	pairResp, err := auth.InitiatePairing(id, x25519kp.PublicKeyBase64(), serverURL, httpClient, hostName, hmacSecret)
+	pairResp, err := auth.InitiatePairing(id, x25519kp.PublicKeyBase64(), apiBaseURL, httpClient, hostName, hmacSecret)
 	if err != nil {
 		return fmt.Errorf("failed to initiate pairing: %w", err)
 	}
 
-	// Build and display QR code
+	// Build and display QR code. BuildQRPayload uses the bare server URL so
+	// the mobile client stores a versionless host address; the mobile app
+	// adds its own API version prefix when it opens connections.
 	qrData, err := auth.BuildQRPayload(
 		pairResp.PairingCode,
 		x25519kp.PublicKeyBase64(),
@@ -138,7 +145,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	}
 
 	// Get JWT for WebSocket auth
-	jwt, err := auth.ExchangeToken(id, serverURL, httpClient, hmacSecret)
+	jwt, err := auth.ExchangeToken(id, apiBaseURL, httpClient, hmacSecret)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
@@ -147,7 +154,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	ctx, cancel := context.WithTimeout(context.Background(), auth.PairTimeout)
 	defer cancel()
 
-	pairComplete, err := auth.WaitForPairComplete(ctx, serverURL, jwt, hmacSecret)
+	pairComplete, err := auth.WaitForPairComplete(ctx, apiBaseURL, jwt, hmacSecret)
 	if err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
 	}

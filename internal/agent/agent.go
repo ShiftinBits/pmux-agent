@@ -137,7 +137,11 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		logger.Debug("failed to set PROMPT_EOL_MARK (tmux server may not be running yet)", "error", err)
 	}
 
-	serverURL := cfg.ServerURL()
+	// apiBaseURL carries the configured API version suffix (e.g. ".../v1")
+	// so every HTTP/WS call made via the signaling client and peer manager
+	// picks up the prefix automatically. Raw cfg.ServerURL() is still used
+	// for logging and any user-facing display.
+	apiBaseURL := cfg.APIBaseURL()
 
 	// Create components with forward references (resolved via closures)
 	var peerManager *webrtc.PeerManager
@@ -152,7 +156,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	if hostName == "" {
 		hostName = config.DefaultHostName()
 	}
-	signalingClient := webrtc.NewSignalingClient(identity, serverURL, hostName, func(msg webrtc.SignalingMessage) {
+	signalingClient := webrtc.NewSignalingClient(identity, apiBaseURL, hostName, func(msg webrtc.SignalingMessage) {
 		if msg.Type == "mobile_name_updated" && msg.DeviceID != "" && msg.Name != "" {
 			// Only accept name updates for the currently paired device.
 			if allowedID := peerManager.AllowedDeviceID(); allowedID == "" || msg.DeviceID != allowedID {
@@ -177,7 +181,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	peerManager = webrtc.NewPeerManager(
 		logger,
 		signalingClient,
-		serverURL,
+		apiBaseURL,
 		signalingClient.JWT,
 		handler.HandleMessage,
 		hmacSecret,
@@ -257,7 +261,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	}
 
 	// Run signaling client (blocks until context is canceled)
-	logger.Info("connecting to signaling server", "url", serverURL)
+	logger.Info("connecting to signaling server", "url", apiBaseURL)
 	err = signalingClient.Run(ctx)
 
 	// Cleanup
