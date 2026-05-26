@@ -152,6 +152,11 @@ func TestRunUninstall_KeepConfig(t *testing.T) {
 	if err != nil {
 		t.Error("private key should have been preserved in secret store")
 	}
+
+	// Server un-registration must be skipped: no server messages in output
+	if strings.Contains(output, "un-register") || strings.Contains(output, "Un-register") {
+		t.Errorf("--keep-config must not un-register from server, got: %s", output)
+	}
 }
 
 func TestRunUninstall_NoIdentity(t *testing.T) {
@@ -229,5 +234,9 @@ func TestRunUninstall_YesFlag_WithKeepConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		t.Error("config directory should have been preserved")
+	}
+	// --yes + --keep-config must not un-register from server (this is the brew upgrade path)
+	if strings.Contains(output, "un-register") || strings.Contains(output, "Un-register") {
+		t.Errorf("--keep-config must not un-register from server, got: %s", output)
 	}
 }

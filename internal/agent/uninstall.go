@@ -17,14 +17,15 @@ import (
 // RunUninstall removes Pocketmux completely — the reverse of init.
 // It stops the agent, uninstalls the OS service, un-registers from the
 // signaling server, and removes local config/keys.
-// If keepConfig is true, local config and keys are preserved.
+// If keepConfig is true, the server un-registration and local config/keys
+// removal are skipped, preserving the existing pairing for a future reinstall.
 func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, hmacSecret string, skipConfirm bool, r io.Reader, w io.Writer) error {
 	if skipConfirm {
 		fmt.Fprintln(w, "Uninstalling Pocketmux from this host:")
 		fmt.Fprintln(w, "  • Stop the agent process")
 		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
-		fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 		if !keepConfig {
+			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
 		}
 		fmt.Fprintln(w)
@@ -33,8 +34,8 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 		fmt.Fprintln(w, "This will remove Pocketmux from this host:")
 		fmt.Fprintln(w, "  • Stop the agent process")
 		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
-		fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 		if !keepConfig {
+			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
 		}
 		fmt.Fprint(w, "\nProceed with uninstall? [y/N] ")
@@ -67,19 +68,24 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 		fmt.Fprintln(w, "Agent service uninstalled.")
 	}
 
-	// Step 4: Un-register from signaling server (best-effort)
-	identity, identErr := auth.LoadIdentity(paths.KeysDir, store, slog.Default())
-	if identErr == nil {
-		cfg, _ := config.LoadConfig(paths.ConfigFile)
-		httpClient := &http.Client{Timeout: 10 * time.Second}
-		if err := auth.DeleteDevice(identity, cfg.APIBaseURL(), httpClient, hmacSecret); err != nil {
-			fmt.Fprintf(w, "Warning: could not un-register from server: %v\n", err)
-			fmt.Fprintln(w, "  The host may still appear on your mobile device.")
+	// Step 4: Un-register from signaling server (skipped when --keep-config, so the
+	// existing registration can be reused after reinstall or upgrade).
+	var identErr error
+	var identity *auth.Identity
+	if !keepConfig {
+		identity, identErr = auth.LoadIdentity(paths.KeysDir, store, slog.Default())
+		if identErr == nil {
+			cfg, _ := config.LoadConfig(paths.ConfigFile)
+			httpClient := &http.Client{Timeout: 10 * time.Second}
+			if err := auth.DeleteDevice(identity, cfg.APIBaseURL(), httpClient, hmacSecret); err != nil {
+				fmt.Fprintf(w, "Warning: could not un-register from server: %v\n", err)
+				fmt.Fprintln(w, "  The host may still appear on your mobile device.")
+			} else {
+				fmt.Fprintln(w, "Host un-registered from signaling server.")
+			}
 		} else {
-			fmt.Fprintln(w, "Host un-registered from signaling server.")
+			fmt.Fprintln(w, "No identity found, skipping server un-registration.")
 		}
-	} else {
-		fmt.Fprintln(w, "No identity found, skipping server un-registration.")
 	}
 
 	// Step 5: Clean up config and secrets (if not --keep-config)
