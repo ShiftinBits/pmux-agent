@@ -76,6 +76,11 @@ type PeerManager struct {
 	// Defaults to 1 (single-pairing mode). Set after construction to override.
 	MaxPeers int
 
+	// ForceRelay forces ICE into relay-only (TURN) mode when true. Used for
+	// testing/debugging the TURN path — a successful connection proves TURN works.
+	// Defaults to false (ICETransportPolicyAll). Set after construction to override.
+	ForceRelay bool
+
 	// allowedDeviceID is the single paired mobile device ID.
 	// When set, only this device is allowed to connect; others are rejected.
 	// Access via SetAllowedDeviceID/getAllowedDeviceID for thread safety.
@@ -87,30 +92,31 @@ type PeerManager struct {
 	OnPeerDisconnect func(deviceID string)
 
 	mu               sync.Mutex
-	peers            map[string]*Peer          // keyed by mobile device ID
-	disconnectTimers map[string]*time.Timer    // grace timers for disconnected peers
-	disconnectTimes  map[string]time.Time      // wall-clock time of disconnect (for sleep detection)
-	cleanupWg        sync.WaitGroup            // tracks background cleanup goroutines
-	closed           bool                       // true after CloseAll() returns
-	turnCache        []webrtc.ICEServer        // cached TURN credentials
-	turnCacheTime    time.Time                 // when turnCache was last populated
+	peers            map[string]*Peer       // keyed by mobile device ID
+	disconnectTimers map[string]*time.Timer // grace timers for disconnected peers
+	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
+	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
+	closed           bool                   // true after CloseAll() returns
+	turnCache        []webrtc.ICEServer     // cached TURN credentials
+	turnCacheTime    time.Time              // when turnCache was last populated
 }
 
 // Peer represents a single WebRTC peer connection to a mobile device.
 type Peer struct {
-	DeviceID     string
-	conn         *webrtc.PeerConnection
-	dc           *webrtc.DataChannel
-	logger       *slog.Logger
-	signaling    MessageSender
-	handler      ProtocolHandler
-	stateHandler func(peer *Peer, state webrtc.PeerConnectionState)
-	mu             sync.Mutex
-	closed         bool
-	sendReady      chan struct{} // signaled by OnBufferedAmountLow when buffer drains
-	done           chan struct{} // closed by Close() to unblock waitForSendReady
-	remoteDescSet  bool                      // true after SetRemoteDescription succeeds
-	iceCandidates  []webrtc.ICECandidateInit // buffered candidates received before remote desc
+	DeviceID      string
+	conn          *webrtc.PeerConnection
+	dc            *webrtc.DataChannel
+	logger        *slog.Logger
+	signaling     MessageSender
+	handler       ProtocolHandler
+	stateHandler  func(peer *Peer, state webrtc.PeerConnectionState)
+	mu            sync.Mutex
+	closed        bool
+	sendReady     chan struct{}             // signaled by OnBufferedAmountLow when buffer drains
+	done          chan struct{}             // closed by Close() to unblock waitForSendReady
+	remoteDescSet bool                      // true after SetRemoteDescription succeeds
+	iceCandidates []webrtc.ICECandidateInit // buffered candidates received before remote desc
+	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
 }
 
 // SetAllowedDeviceID updates the allowed device ID under the mutex.
@@ -371,6 +377,15 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	// unencrypted fallback. Do NOT set config fields that would weaken or disable
 	// DTLS (e.g., do not set InsecureSkipVerify or disable certificate verification).
 	config := webrtc.Configuration{}
+
+	// Testing/debugging: force ICE into relay-only mode so all traffic must
+	// traverse a TURN server. A successful connection proves the TURN path works;
+	// a failure isolates TURN (rather than ICE in general) as the culprit.
+	if pm.ForceRelay {
+		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+		pm.logger.Info("ICE transport policy forced to relay-only (force_relay)")
+	}
+
 	if pm.API == nil {
 		iceServers, err := pm.fetchTurnCredentials()
 		if err != nil {
@@ -408,6 +423,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		stateHandler: pm.handlePeerStateChange,
 		sendReady:    make(chan struct{}, 1),
 		done:         make(chan struct{}),
+		forceRelay:   pm.ForceRelay,
 	}
 
 	pm.mu.Lock()
@@ -843,6 +859,9 @@ func (p *Peer) setupHandlers() {
 			// This confirms encryption is active and records the cipher suite
 			// for security auditing and potential future fingerprint pinning.
 			p.logDTLSInfo()
+			// Log the selected ICE candidate pair so it's clear whether the
+			// connection went direct (host/srflx) or via TURN relay.
+			p.logSelectedCandidatePair()
 		}
 
 		if state == webrtc.PeerConnectionStateFailed ||
@@ -930,6 +949,45 @@ func (p *Peer) logDTLSInfo() {
 			"remoteCertificateId", transport.RemoteCertificateID,
 		)
 	}
+}
+
+// logSelectedCandidatePair logs the nominated ICE candidate pair and the types
+// of its local and remote candidates (host / srflx / relay). This makes it
+// obvious whether the established connection went direct or via a TURN relay,
+// which is the key diagnostic when validating the TURN path.
+func (p *Peer) logSelectedCandidatePair() {
+	stats := p.conn.GetStats()
+
+	// Index candidate stats by ID so we can resolve the pair's endpoints.
+	candidates := make(map[string]webrtc.ICECandidateStats)
+	for _, s := range stats {
+		if c, ok := s.(webrtc.ICECandidateStats); ok {
+			candidates[c.ID] = c
+		}
+	}
+
+	for _, s := range stats {
+		pair, ok := s.(webrtc.ICECandidatePairStats)
+		if !ok || !pair.Nominated {
+			continue
+		}
+		local := candidates[pair.LocalCandidateID]
+		remote := candidates[pair.RemoteCandidateID]
+		usingRelay := local.CandidateType == webrtc.ICECandidateTypeRelay ||
+			remote.CandidateType == webrtc.ICECandidateTypeRelay
+		p.logger.Info("ICE candidate pair selected",
+			"localType", local.CandidateType.String(),
+			"localProtocol", local.Protocol,
+			"remoteType", remote.CandidateType.String(),
+			"remoteAddress", remote.IP,
+			"remotePort", remote.Port,
+			"remoteProtocol", remote.Protocol,
+			"usingRelay", usingRelay,
+			"forceRelay", p.forceRelay,
+		)
+		return
+	}
+	p.logger.Warn("no nominated ICE candidate pair found in stats")
 }
 
 // waitForSendReady blocks if the DataChannel buffer exceeds maxBufferedAmount,
@@ -1035,4 +1093,3 @@ func (p *Peer) Close() {
 func boolPtr(b bool) *bool {
 	return &b
 }
-

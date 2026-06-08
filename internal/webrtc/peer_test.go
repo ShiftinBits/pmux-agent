@@ -790,6 +790,44 @@ func TestPeerManager_DTLSNotDisabled(t *testing.T) {
 	pm.CloseAll()
 }
 
+func TestPeerManager_ForceRelay(t *testing.T) {
+	// When ForceRelay is set, the peer connection must be created with
+	// ICETransportPolicyRelay so all traffic is forced through TURN (used for
+	// testing/debugging the relay path).
+	sender := &mockSender{}
+	logger := testLogger()
+	turnServer := mockTurnServer(t)
+	defer turnServer.Close()
+
+	api := fastAPI(t)
+	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
+	pm.API = api
+	pm.ForceRelay = true
+
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: "mobile-relay",
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	pm.mu.Lock()
+	peer, ok := pm.peers["mobile-relay"]
+	pm.mu.Unlock()
+	if !ok {
+		t.Fatal("peer should exist")
+	}
+
+	config := peer.conn.GetConfiguration()
+	if config.ICETransportPolicy != webrtc.ICETransportPolicyRelay {
+		t.Errorf("ICETransportPolicy = %v, want Relay (force_relay enabled)", config.ICETransportPolicy)
+	}
+	if !peer.forceRelay {
+		t.Error("peer.forceRelay should be true when PeerManager.ForceRelay is set")
+	}
+
+	pm.CloseAll()
+}
+
 // --- PeerConnection state handling + ICE restart tests ---
 
 func TestPeerManager_DisconnectedStartsGraceTimer(t *testing.T) {

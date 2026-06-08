@@ -29,16 +29,17 @@ const (
 	EnvServerURL = "PMUX_AGENT_SIGNAL_URL"
 
 	// Environment variable names for config overrides.
-	EnvNewServerURL    = "PMUX_SERVER_URL"
-	EnvAPIVersion      = "PMUX_API_VERSION"
-	EnvKeyPath         = "PMUX_KEY_PATH"
-	EnvSocketName      = "PMUX_SOCKET_NAME"
-	EnvMaxConnections  = "PMUX_MAX_CONNECTIONS"
-	EnvSecretBackend   = "PMUX_SECRET_BACKEND"
-	EnvTmuxPath        = "PMUX_TMUX_PATH"
-	EnvLogLevel        = "PMUX_LOG_LEVEL"
-	EnvUpdateEnabled   = "PMUX_UPDATE_ENABLED"
-	EnvUpdateInterval  = "PMUX_UPDATE_INTERVAL"
+	EnvNewServerURL   = "PMUX_SERVER_URL"
+	EnvAPIVersion     = "PMUX_API_VERSION"
+	EnvKeyPath        = "PMUX_KEY_PATH"
+	EnvSocketName     = "PMUX_SOCKET_NAME"
+	EnvMaxConnections = "PMUX_MAX_CONNECTIONS"
+	EnvSecretBackend  = "PMUX_SECRET_BACKEND"
+	EnvTmuxPath       = "PMUX_TMUX_PATH"
+	EnvLogLevel       = "PMUX_LOG_LEVEL"
+	EnvUpdateEnabled  = "PMUX_UPDATE_ENABLED"
+	EnvUpdateInterval = "PMUX_UPDATE_INTERVAL"
+	EnvForceRelay     = "PMUX_FORCE_RELAY"
 )
 
 // Config holds user-editable Pocketmux configuration from config.toml.
@@ -77,13 +78,13 @@ type fileServerConfig struct {
 // fileConfig mirrors Config but uses fileUpdateConfig for the [update] section
 // and fileServerConfig for the [server] section. Only used during TOML parsing.
 type fileConfig struct {
-	Name       string           `toml:"name,omitempty"`
-	LogLevel   string           `toml:"log_level,omitempty"`
-	Server     fileServerConfig `toml:"server"`
-	Identity   IdentityConfig   `toml:"identity"`
-	Connection ConnectionConfig `toml:"connection"`
-	Tmux       TmuxConfig       `toml:"tmux"`
-	Update     fileUpdateConfig `toml:"update"`
+	Name       string               `toml:"name,omitempty"`
+	LogLevel   string               `toml:"log_level,omitempty"`
+	Server     fileServerConfig     `toml:"server"`
+	Identity   IdentityConfig       `toml:"identity"`
+	Connection fileConnectionConfig `toml:"connection"`
+	Tmux       TmuxConfig           `toml:"tmux"`
+	Update     fileUpdateConfig     `toml:"update"`
 }
 
 // ServerConfig holds signaling server configuration.
@@ -103,6 +104,16 @@ type ConnectionConfig struct {
 	ReconnectInterval    string `toml:"reconnect_interval"`     // duration string, e.g., "5s"
 	KeepaliveInterval    string `toml:"keepalive_interval"`     // duration string, e.g., "30s"
 	MaxMobileConnections int    `toml:"max_mobile_connections"` // 1-20
+	ForceRelay           bool   `toml:"force_relay"`            // testing: force ICE relay-only (TURN)
+}
+
+// fileConnectionConfig is used for TOML unmarshaling so we can distinguish
+// "force_relay absent" (nil) from "force_relay = false" (pointer to false).
+type fileConnectionConfig struct {
+	ReconnectInterval    string `toml:"reconnect_interval"`
+	KeepaliveInterval    string `toml:"keepalive_interval"`
+	MaxMobileConnections int    `toml:"max_mobile_connections"`
+	ForceRelay           *bool  `toml:"force_relay"`
 }
 
 // TmuxConfig holds tmux-related configuration.
@@ -140,6 +151,7 @@ type ConfigSources struct {
 	ReconnectInterval    configSource
 	KeepaliveInterval    configSource
 	MaxMobileConnections configSource
+	ForceRelay           configSource
 	SocketName           configSource
 	TmuxPath             configSource
 	Name                 configSource
@@ -248,6 +260,9 @@ func overlayFile(cfg *Config, fileCfg *fileConfig) {
 	if fileCfg.Connection.MaxMobileConnections != 0 {
 		cfg.Connection.MaxMobileConnections = fileCfg.Connection.MaxMobileConnections
 	}
+	if fileCfg.Connection.ForceRelay != nil {
+		cfg.Connection.ForceRelay = *fileCfg.Connection.ForceRelay
+	}
 	if fileCfg.Tmux.SocketName != "" {
 		cfg.Tmux.SocketName = fileCfg.Tmux.SocketName
 	}
@@ -299,6 +314,10 @@ func overlayFileTracked(cfg *Config, fileCfg *fileConfig, sources *ConfigSources
 	if fileCfg.Connection.MaxMobileConnections != 0 {
 		cfg.Connection.MaxMobileConnections = fileCfg.Connection.MaxMobileConnections
 		sources.MaxMobileConnections = sourceFile
+	}
+	if fileCfg.Connection.ForceRelay != nil {
+		cfg.Connection.ForceRelay = *fileCfg.Connection.ForceRelay
+		sources.ForceRelay = sourceFile
 	}
 	if fileCfg.Tmux.SocketName != "" {
 		cfg.Tmux.SocketName = fileCfg.Tmux.SocketName
@@ -358,6 +377,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv(EnvUpdateInterval); v != "" {
 		cfg.Update.CheckInterval = v
 	}
+	if v := os.Getenv(EnvForceRelay); v != "" {
+		cfg.Connection.ForceRelay = v == "true" || v == "1" || v == "yes"
+	}
 }
 
 // applyEnvOverridesTracked is like applyEnvOverrides but records source annotations.
@@ -406,6 +428,10 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 	if v := os.Getenv(EnvUpdateInterval); v != "" {
 		cfg.Update.CheckInterval = v
 		sources.UpdateCheckInterval = sourceEnv
+	}
+	if v := os.Getenv(EnvForceRelay); v != "" {
+		cfg.Connection.ForceRelay = v == "true" || v == "1" || v == "yes"
+		sources.ForceRelay = sourceEnv
 	}
 }
 
@@ -562,6 +588,7 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "connection.reconnect_interval = %q  (%s)\n", cfg.Connection.ReconnectInterval, sources.ReconnectInterval)
 	fmt.Fprintf(&b, "connection.keepalive_interval = %q  (%s)\n", cfg.Connection.KeepaliveInterval, sources.KeepaliveInterval)
 	fmt.Fprintf(&b, "connection.max_mobile_connections = %d  (%s)\n", cfg.Connection.MaxMobileConnections, sources.MaxMobileConnections)
+	fmt.Fprintf(&b, "connection.force_relay = %v  (%s)\n", cfg.Connection.ForceRelay, sources.ForceRelay)
 	fmt.Fprintf(&b, "tmux.socket_name = %q  (%s)\n", cfg.Tmux.SocketName, sources.SocketName)
 	fmt.Fprintf(&b, "tmux.tmux_path = %q  (%s)\n", cfg.Tmux.TmuxPath, sources.TmuxPath)
 	fmt.Fprintf(&b, "update.enabled = %v  (%s)\n", cfg.Update.Enabled, sources.UpdateEnabled)
@@ -600,6 +627,11 @@ func CommentedDefaultConfig() string {
 # reconnect_interval = "5s"
 # keepalive_interval = "30s"
 # max_mobile_connections = 1
+# Force ICE into relay-only (TURN) mode for testing/debugging (env: PMUX_FORCE_RELAY).
+# When true, the agent gathers only TURN-relayed candidates — a successful connection
+# proves the TURN path works; a failure isolates TURN as the problem. Leave false in
+# normal use, as it disables direct peer-to-peer connections.
+# force_relay = false
 
 [tmux]
 # socket_name = "pmux"

@@ -187,6 +187,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		hmacSecret,
 	)
 	peerManager.MaxPeers = cfg.Connection.MaxMobileConnections
+	peerManager.ForceRelay = cfg.Connection.ForceRelay
 	peerManager.OnPeerDisconnect = handler.PeerDisconnected
 
 	// Load paired device for connection validation.

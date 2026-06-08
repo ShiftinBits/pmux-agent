@@ -652,6 +652,79 @@ func TestLoadConfig_UpdateConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_ForceRelayFromFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval, EnvForceRelay} {
+		t.Setenv(env, "")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[connection]
+force_relay = true
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, sources, err := LoadConfigWithSources(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if !cfg.Connection.ForceRelay {
+		t.Error("Connection.ForceRelay should be true from file")
+	}
+	if sources.ForceRelay != sourceFile {
+		t.Errorf("ForceRelay source = %v, want file", sources.ForceRelay)
+	}
+}
+
+func TestLoadConfig_ForceRelayDefaultsFalse(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval, EnvForceRelay} {
+		t.Setenv(env, "")
+	}
+
+	// Config file with a [connection] section but no force_relay key — must
+	// stay false rather than being clobbered by the zero value.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[connection]
+reconnect_interval = "10s"
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Connection.ForceRelay {
+		t.Error("Connection.ForceRelay should default to false when absent")
+	}
+}
+
+func TestLoadConfig_ForceRelayFromEnv(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval} {
+		t.Setenv(env, "")
+	}
+
+	t.Setenv(EnvForceRelay, "1")
+
+	cfg, sources, err := LoadConfigWithSources("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if !cfg.Connection.ForceRelay {
+		t.Error("Connection.ForceRelay should be true from env (PMUX_FORCE_RELAY=1)")
+	}
+	if sources.ForceRelay != sourceEnv {
+		t.Errorf("ForceRelay source = %v, want env", sources.ForceRelay)
+	}
+}
+
 func TestValidate_SecretBackend(t *testing.T) {
 	tests := []struct {
 		name    string
