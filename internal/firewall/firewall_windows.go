@@ -51,23 +51,24 @@ func (windowsManager) Allow(binPath string) error {
 	if !isElevated() {
 		return fmt.Errorf("firewall changes require Administrator; run: pmux agent firewall-allow")
 	}
-	_ = execCommand("powershell", "-NonInteractive", "-Command",
-		"Remove-NetFirewallRule", "-DisplayName", fwRuleName, "-ErrorAction", "SilentlyContinue").Run()
-	out, err := execCommand("powershell", "-NonInteractive", "-Command",
-		"New-NetFirewallRule",
-		"-DisplayName", fwRuleName,
-		"-Direction", "Inbound",
-		"-Program", binPath,
-		"-Action", "Allow",
-		"-Profile", "Private,Domain").CombinedOutput()
+	// Remove any existing same-name rule first (idempotent; ignore "no rules match").
+	_ = execCommand("netsh", "advfirewall", "firewall", "delete", "rule",
+		"name="+fwRuleName).Run()
+	out, err := execCommand("netsh", "advfirewall", "firewall", "add", "rule",
+		"name="+fwRuleName,
+		"dir=in",
+		"action=allow",
+		"program="+binPath,
+		"enable=yes",
+		"profile=private,domain").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("New-NetFirewallRule: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("netsh advfirewall firewall add rule: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
 
 func (windowsManager) RemediationText(binPath string) string {
 	return fmt.Sprintf(
-		`New-NetFirewallRule -DisplayName '%s' -Direction Inbound -Program '%s' -Action Allow -Profile Private,Domain  (run in an elevated PowerShell)`,
-		fwRuleName, strings.ReplaceAll(binPath, "'", "''"))
+		`netsh advfirewall firewall add rule name="%s" dir=in action=allow program="%s" enable=yes profile=private,domain (run in an elevated Command Prompt)`,
+		fwRuleName, binPath)
 }
