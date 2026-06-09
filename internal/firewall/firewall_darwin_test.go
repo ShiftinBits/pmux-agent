@@ -48,12 +48,15 @@ func TestDarwinProbe(t *testing.T) {
 		global, ba, la string
 		wantEnabled    bool
 		wantAuthorized bool
+		wantConf       Confidence
 	}{
-		{"disabled", "mac_global_off", "mac_blockall_off", "mac_listapps_absent", false, true},
-		{"blockall", "mac_global_on", "mac_blockall_on", "mac_listapps_allowed", true, false},
-		{"absent", "mac_global_on", "mac_blockall_off", "mac_listapps_absent", true, false},
-		{"allowed", "mac_global_on", "mac_blockall_off", "mac_listapps_allowed", true, true},
-		{"blocked", "mac_global_on", "mac_blockall_off", "mac_listapps_blocked", true, false},
+		{"disabled", "mac_global_off", "mac_blockall_off", "mac_listapps_absent", false, true, ConfidenceHigh},
+		{"blockall", "mac_global_on", "mac_blockall_on", "mac_listapps_allowed", true, false, ConfidenceHigh},
+		{"absent", "mac_global_on", "mac_blockall_off", "mac_listapps_absent", true, false, ConfidenceHigh},
+		{"allowed", "mac_global_on", "mac_blockall_off", "mac_listapps_allowed", true, true, ConfidenceHigh},
+		{"blocked", "mac_global_on", "mac_blockall_off", "mac_listapps_blocked", true, false, ConfidenceHigh},
+		{"globalstate_error", "failure", "mac_blockall_off", "mac_listapps_absent", false, false, ConfidenceUnknown},
+		{"listapps_error", "mac_global_on", "mac_blockall_off", "failure", true, false, ConfidenceUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +71,9 @@ func TestDarwinProbe(t *testing.T) {
 			}
 			if st.Authorized != tc.wantAuthorized {
 				t.Errorf("Authorized = %v, want %v (detail=%q)", st.Authorized, tc.wantAuthorized, st.Detail)
+			}
+			if st.Confidence != tc.wantConf {
+				t.Errorf("Confidence = %v, want %v", st.Confidence, tc.wantConf)
 			}
 		})
 	}

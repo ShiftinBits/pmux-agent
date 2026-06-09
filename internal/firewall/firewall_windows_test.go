@@ -32,10 +32,13 @@ func TestWindowsProbe(t *testing.T) {
 		profile, rule  string
 		wantEnabled    bool
 		wantAuthorized bool
+		wantConf       Confidence
 	}{
-		{"disabled", "win_profile_off", "win_rule_absent", false, true},
-		{"absent", "win_profile_on", "win_rule_absent", true, false},
-		{"present", "win_profile_on", "win_rule_present", true, true},
+		{"disabled", "win_profile_off", "win_rule_absent", false, true, ConfidenceHigh},
+		{"absent", "win_profile_on", "win_rule_absent", true, false, ConfidenceHigh},
+		{"present", "win_profile_on", "win_rule_present", true, true, ConfidenceHigh},
+		{"profile_error", "failure", "win_rule_absent", false, false, ConfidenceUnknown},
+		{"rule_error", "win_profile_on", "failure", true, false, ConfidenceUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +50,9 @@ func TestWindowsProbe(t *testing.T) {
 			}
 			if st.Authorized != tc.wantAuthorized {
 				t.Errorf("Authorized=%v want %v (%s)", st.Authorized, tc.wantAuthorized, st.Detail)
+			}
+			if st.Confidence != tc.wantConf {
+				t.Errorf("Confidence=%v want %v", st.Confidence, tc.wantConf)
 			}
 		})
 	}

@@ -534,6 +534,9 @@ func handleAgentInstall() {
 		os.Exit(1)
 	}
 	fmt.Println("Service installed. Agent is running.")
+	// PrintFirewallNotice resolves the symlink internally (firewall keys on the
+	// real binary path); intentionally different from the symlink path used for
+	// the service manager above.
 	agent.PrintFirewallNotice(os.Stdout)
 }
 
@@ -560,6 +563,11 @@ func handleAgentFirewallAllow() {
 		os.Exit(1)
 	}
 	mgr := firewall.NewManager()
+
+	if st := mgr.Probe(binPath); !st.Supported {
+		fmt.Println("Firewall management is not supported on this platform.")
+		return
+	}
 
 	if err := mgr.Allow(binPath); err != nil {
 		// Not elevated (or unsupported): self-elevate and re-run. The elevated

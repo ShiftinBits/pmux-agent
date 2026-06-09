@@ -90,6 +90,11 @@ func PrintFirewallNotice(w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "\n⚠ The host firewall may block mobile connections to pmux (%s).\n", st.Detail)
-	fmt.Fprintln(w, "  Authorize it now with:")
-	fmt.Fprintln(w, "    pmux agent firewall-allow")
+	if st.Confidence == firewall.ConfidenceHigh {
+		fmt.Fprintln(w, "  Authorize it now with:")
+		fmt.Fprintln(w, "    pmux agent firewall-allow")
+	} else {
+		// Advisory (e.g. Linux ufw/firewalld): no automated fix available.
+		fmt.Fprintf(w, "  %s\n", mgr.RemediationText(exePath))
+	}
 }
