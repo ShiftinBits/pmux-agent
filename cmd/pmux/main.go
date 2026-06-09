@@ -534,6 +534,13 @@ func handleAgentInstall() {
 		os.Exit(1)
 	}
 	fmt.Println("Service installed. Agent is running.")
+	if exePath, errFW := firewall.ExecutablePath(); errFW == nil {
+		mgr := firewall.NewManager()
+		if st := mgr.Probe(exePath); firewall.NeedsAttention(st) {
+			fmt.Printf("\n⚠ The host firewall may block mobile connections (%s).\n", st.Detail)
+			fmt.Println("  Authorize it now with: pmux agent firewall-allow")
+		}
+	}
 }
 
 func handleAgentUninstall() {
