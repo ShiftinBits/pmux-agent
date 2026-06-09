@@ -54,6 +54,21 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case "win_rule_absent":
 		os.Exit(0) // empty output => not found
+	case "linux_ufw_active":
+		fmt.Println("Status: active")
+		os.Exit(0)
+	case "linux_ufw_inactive":
+		fmt.Println("Status: inactive")
+		os.Exit(0)
+	case "linux_ufw_missing":
+		fmt.Fprintln(os.Stderr, "ufw: command not found")
+		os.Exit(127)
+	case "linux_fwd_running":
+		fmt.Println("running")
+		os.Exit(0)
+	case "linux_fwd_absent":
+		fmt.Fprintln(os.Stderr, "not running")
+		os.Exit(1)
 	case "success":
 		os.Exit(0)
 	case "failure":
