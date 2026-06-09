@@ -43,6 +43,17 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Println("1 : /opt/homebrew/bin/other ")
 		fmt.Println("             (Allow incoming connections) ")
 		os.Exit(0)
+	case "win_profile_on":
+		fmt.Println("True")
+		os.Exit(0)
+	case "win_profile_off":
+		fmt.Println("False")
+		os.Exit(0)
+	case "win_rule_present":
+		fmt.Println("pmux agent")
+		os.Exit(0)
+	case "win_rule_absent":
+		os.Exit(0) // empty output => not found
 	case "success":
 		os.Exit(0)
 	case "failure":
