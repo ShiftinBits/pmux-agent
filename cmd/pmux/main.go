@@ -398,13 +398,13 @@ func handleAgent(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: pmux agent <command>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
-		fmt.Fprintln(os.Stderr, "  run        Run the agent in the foreground")
-		fmt.Fprintln(os.Stderr, "  start      Start the agent")
-		fmt.Fprintln(os.Stderr, "  stop       Stop the agent")
-		fmt.Fprintln(os.Stderr, "  status     Show agent status")
+		fmt.Fprintln(os.Stderr, "  run            Run the agent in the foreground")
+		fmt.Fprintln(os.Stderr, "  start          Start the agent")
+		fmt.Fprintln(os.Stderr, "  stop           Stop the agent")
+		fmt.Fprintln(os.Stderr, "  status         Show agent status")
 		fmt.Fprintln(os.Stderr, "  install        Install as OS service (launchd/systemd)")
 		fmt.Fprintln(os.Stderr, "  uninstall      Remove OS service registration")
-		fmt.Fprintln(os.Stderr, "  firewall-allow  Authorize this binary in the host firewall (elevates)")
+		fmt.Fprintln(os.Stderr, "  firewall-allow Authorize this binary in the host firewall (elevates)")
 		os.Exit(1)
 	}
 
@@ -554,10 +554,11 @@ func handleAgentFirewallAllow() {
 	mgr := firewall.NewManager()
 
 	if err := mgr.Allow(binPath); err != nil {
-		// Not elevated (or unsupported): try to self-elevate and re-run this command.
+		// Not elevated (or unsupported): self-elevate and re-run. The elevated
+		// child performs the change and prints the result, so the parent stays
+		// silent on success to avoid a duplicate line.
+		fmt.Println("Requesting elevated privileges...")
 		if firewall.Elevate("agent", "firewall-allow") {
-			st := mgr.Probe(binPath)
-			printFirewallResult(st)
 			return
 		}
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
@@ -650,21 +651,22 @@ func printHelp() {
 	fmt.Println(`pmux — Pocketmux terminal access agent
 
 Pocketmux commands:
-  init              Generate identity and configure agent
-  pair              Pair with a mobile device (displays QR code)
-  config            Show effective configuration with sources
-  status            Show agent, service, and pairing status
-  unpair            Remove the paired mobile device
-  update            Check for and apply updates
-  uninstall [-y]    Remove Pocketmux completely (reverses 'init')
-  agent run         Run the agent in the foreground
-  agent start       Start the agent
-  agent stop        Stop the agent
-  agent status      Show agent status and recent logs
-  agent install     Install as OS service (auto-start on login)
-  agent uninstall   Remove OS service registration
-  --version         Show version
-  --help            Show this help
+  init                 Generate identity and configure agent
+  pair                 Pair with a mobile device (displays QR code)
+  config               Show effective configuration with sources
+  status               Show agent, service, and pairing status
+  unpair               Remove the paired mobile device
+  update               Check for and apply updates
+  uninstall [-y]       Remove Pocketmux completely (reverses 'init')
+  agent run            Run the agent in the foreground
+  agent start          Start the agent
+  agent stop           Stop the agent
+  agent status         Show agent status and recent logs
+  agent install        Install as OS service (auto-start on login)
+  agent uninstall      Remove OS service registration
+  agent firewall-allow Authorize pmux in the host firewall (elevates)
+  --version            Show version
+  --help               Show this help
 
 All other commands are passed through to tmux -L pmux.
 Run 'pmux' with no args to start a new session.
