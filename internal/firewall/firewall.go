@@ -10,6 +10,7 @@ package firewall
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func NeedsAttention(s Status) bool {
 func ExecutablePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("firewall: resolve executable path: %w", err)
 	}
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
@@ -94,7 +95,7 @@ type unsupportedManager struct{}
 func (unsupportedManager) Probe(binPath string) Status {
 	return Status{Supported: false, Confidence: ConfidenceUnknown, Path: binPath}
 }
-func (unsupportedManager) Allow(string) error { return errUnsupported }
+func (unsupportedManager) Allow(binPath string) error { return errUnsupported }
 func (unsupportedManager) RemediationText(string) string {
 	return "Automatic firewall configuration is not supported on this platform."
 }

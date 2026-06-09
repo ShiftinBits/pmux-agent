@@ -39,14 +39,14 @@ func TestExecutablePath(t *testing.T) {
 }
 
 func TestShellQuote(t *testing.T) {
-	cases := map[string]string{
-		"/opt/pmux":       "'/opt/pmux'",
-		"/Users/a b/pmux": "'/Users/a b/pmux'",
-		"/x/o'brien/pmux": `'/x/o'\''brien/pmux'`,
+	cases := []struct{ in, want string }{
+		{"/opt/pmux", "'/opt/pmux'"},
+		{"/Users/a b/pmux", "'/Users/a b/pmux'"},
+		{"/x/o'brien/pmux", `'/x/o'\''brien/pmux'`},
 	}
-	for in, want := range cases {
-		if got := shellQuote(in); got != want {
-			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+	for _, tc := range cases {
+		if got := shellQuote(tc.in); got != tc.want {
+			t.Errorf("shellQuote(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
