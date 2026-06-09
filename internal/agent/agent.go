@@ -14,6 +14,7 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
+	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 	"github.com/shiftinbits/pmux-agent/internal/update"
@@ -119,6 +120,19 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		return &FatalInitError{Err: fmt.Errorf("load identity: %w", err)}
 	}
 	logger.Info("identity loaded", "deviceID", identity.DeviceID)
+
+	// Best-effort: warn if the host firewall is likely blocking inbound
+	// connections to this binary (the common failure after an upgrade installs
+	// the binary at a new, un-authorized path). Never fatal.
+	if exePath, errFW := firewall.ExecutablePath(); errFW == nil {
+		fwm := firewall.NewManager()
+		if st := fwm.Probe(exePath); firewall.NeedsAttention(st) {
+			logger.Warn("host firewall may be blocking incoming connections; mobile clients may fail to connect",
+				"detail", st.Detail,
+				"path", st.Path,
+				"fix", "pmux agent firewall-allow")
+		}
+	}
 
 	// Create tmux client targeting the configured socket.
 	// Use the configured tmux path (resolved at init time) so the agent works

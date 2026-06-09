@@ -10,6 +10,7 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
+	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
@@ -72,5 +73,28 @@ func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 		fmt.Fprintln(w, "\nService installed. Agent is running.")
 	}
 
+	PrintFirewallNotice(w)
 	return nil
+}
+
+// PrintFirewallNotice probes the host firewall for the running binary and, if
+// it is likely blocking inbound connections, prints a short guided notice to w.
+func PrintFirewallNotice(w io.Writer) {
+	exePath, err := firewall.ExecutablePath()
+	if err != nil {
+		return
+	}
+	mgr := firewall.NewManager()
+	st := mgr.Probe(exePath)
+	if !firewall.NeedsAttention(st) {
+		return
+	}
+	fmt.Fprintf(w, "\n⚠ The host firewall may block mobile connections to pmux (%s).\n", st.Detail)
+	if st.Confidence == firewall.ConfidenceHigh {
+		fmt.Fprintln(w, "  Authorize it now with:")
+		fmt.Fprintln(w, "    pmux agent firewall-allow")
+	} else {
+		// Advisory (e.g. Linux ufw/firewalld): no automated fix available.
+		fmt.Fprintf(w, "  %s\n", mgr.RemediationText(exePath))
+	}
 }
