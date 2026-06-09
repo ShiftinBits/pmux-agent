@@ -73,13 +73,13 @@ func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 		fmt.Fprintln(w, "\nService installed. Agent is running.")
 	}
 
-	printFirewallNotice(w)
+	PrintFirewallNotice(w)
 	return nil
 }
 
-// printFirewallNotice probes the host firewall for the running binary and, if
-// it is likely blocking inbound connections, prints a short guided notice.
-func printFirewallNotice(w io.Writer) {
+// PrintFirewallNotice probes the host firewall for the running binary and, if
+// it is likely blocking inbound connections, prints a short guided notice to w.
+func PrintFirewallNotice(w io.Writer) {
 	exePath, err := firewall.ExecutablePath()
 	if err != nil {
 		return
