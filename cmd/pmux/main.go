@@ -15,6 +15,7 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/agent"
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
+	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/proxy"
 	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
@@ -401,8 +402,9 @@ func handleAgent(args []string) {
 		fmt.Fprintln(os.Stderr, "  start      Start the agent")
 		fmt.Fprintln(os.Stderr, "  stop       Stop the agent")
 		fmt.Fprintln(os.Stderr, "  status     Show agent status")
-		fmt.Fprintln(os.Stderr, "  install    Install as OS service (launchd/systemd)")
-		fmt.Fprintln(os.Stderr, "  uninstall  Remove OS service registration")
+		fmt.Fprintln(os.Stderr, "  install        Install as OS service (launchd/systemd)")
+		fmt.Fprintln(os.Stderr, "  uninstall      Remove OS service registration")
+		fmt.Fprintln(os.Stderr, "  firewall-allow  Authorize this binary in the host firewall (elevates)")
 		os.Exit(1)
 	}
 
@@ -436,6 +438,8 @@ func handleAgent(args []string) {
 		handleAgentInstall()
 	case "uninstall":
 		handleAgentUninstall()
+	case "firewall-allow":
+		handleAgentFirewallAllow()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown agent command: %s\n", args[0])
 		os.Exit(1)
@@ -541,6 +545,37 @@ func handleAgentUninstall() {
 	fmt.Println("Service uninstalled.")
 }
 
+func handleAgentFirewallAllow() {
+	binPath, err := firewall.ExecutablePath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ could not resolve binary path: %v\n", err)
+		os.Exit(1)
+	}
+	mgr := firewall.NewManager()
+
+	if err := mgr.Allow(binPath); err != nil {
+		// Not elevated (or unsupported): try to self-elevate and re-run this command.
+		if firewall.Elevate("agent", "firewall-allow") {
+			st := mgr.Probe(binPath)
+			printFirewallResult(st)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Manual fix:\n    %s\n", mgr.RemediationText(binPath))
+		os.Exit(1)
+	}
+
+	st := mgr.Probe(binPath)
+	printFirewallResult(st)
+}
+
+func printFirewallResult(st firewall.Status) {
+	if st.Authorized {
+		fmt.Printf("Firewall: pmux is authorized (%s)\n", st.Path)
+	} else {
+		fmt.Printf("Firewall: pmux still NOT authorized (%s) — %s\n", st.Path, st.Detail)
+	}
+}
 
 // isPocketmuxCommand returns true for intercepted Pocketmux commands
 // (not tmux passthrough). Used to show the update banner.

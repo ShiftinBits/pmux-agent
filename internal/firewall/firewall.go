@@ -91,6 +91,21 @@ func shellQuote(s string) string {
 
 var errUnsupported = errors.New("automatic firewall configuration is not supported on this platform")
 
+// Elevate re-execs the current binary with the given args under elevation
+// (sudo on macOS/Linux, UAC on Windows). Returns true if the elevated process
+// ran to completion successfully. If already elevated, it returns false so the
+// caller performs the action in-process.
+func Elevate(args ...string) bool {
+	if isElevated() {
+		return false
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	return relaunchElevated(self, args) == nil
+}
+
 // unsupportedManager is returned on platforms without a known firewall mechanism.
 type unsupportedManager struct{}
 
