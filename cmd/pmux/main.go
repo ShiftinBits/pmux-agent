@@ -377,6 +377,12 @@ func handleStatus() {
 		tmuxClient.TmuxBin = cfg.Tmux.TmuxPath
 	}
 
+	var fwStatus *firewall.Status
+	if exePath, errFW := firewall.ExecutablePath(); errFW == nil {
+		st := firewall.NewManager().Probe(exePath)
+		fwStatus = &st
+	}
+
 	params := agent.StatusParams{
 		Version:           version,
 		PairedDevicesPath: paths.PairedDevices,
@@ -384,6 +390,7 @@ func handleStatus() {
 		PIDFilePath:       agent.PIDFilePath(paths),
 		ServiceManager:    mgr,
 		Sessions:          tmuxClient,
+		FirewallStatus:    fwStatus,
 	}
 
 	if err := agent.RunStatus(params, os.Stdout); err != nil {

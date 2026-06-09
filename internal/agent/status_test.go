@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
+	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 )
@@ -28,12 +29,14 @@ type mockServiceManager struct {
 	installed bool
 }
 
-func (m *mockServiceManager) IsInstalled() bool                    { return m.installed }
-func (m *mockServiceManager) Status() (service.Status, error)      { return service.Status{Installed: m.installed}, nil }
-func (m *mockServiceManager) Install() error                       { return nil }
-func (m *mockServiceManager) Uninstall() error                     { return nil }
-func (m *mockServiceManager) Start() error                         { return nil }
-func (m *mockServiceManager) Stop() error                          { return nil }
+func (m *mockServiceManager) IsInstalled() bool { return m.installed }
+func (m *mockServiceManager) Status() (service.Status, error) {
+	return service.Status{Installed: m.installed}, nil
+}
+func (m *mockServiceManager) Install() error   { return nil }
+func (m *mockServiceManager) Uninstall() error { return nil }
+func (m *mockServiceManager) Start() error     { return nil }
+func (m *mockServiceManager) Stop() error      { return nil }
 
 // --- Helper ---
 
@@ -208,5 +211,29 @@ func TestRunStatus_StalePID(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Agent:    not running") {
 		t.Errorf("expected 'Agent:    not running' for stale PID, got: %s", output)
+	}
+}
+
+func TestRunStatusFirewallLine(t *testing.T) {
+	dir := t.TempDir()
+	store := auth.NewMemorySecretStore()
+	params := testStatusParams(dir, store)
+	params.FirewallStatus = &firewall.Status{
+		Supported:       true,
+		FirewallEnabled: true,
+		Authorized:      false,
+		Confidence:      firewall.ConfidenceHigh,
+		Path:            "/x/pmux",
+		Detail:          "not in allow-list",
+	}
+
+	var buf bytes.Buffer
+	if err := RunStatus(params, &buf); err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Firewall:") || !strings.Contains(out, "NOT authorized") || !strings.Contains(out, "firewall-allow") {
+		t.Errorf("expected firewall NOT-authorized line, got:\n%s", out)
 	}
 }

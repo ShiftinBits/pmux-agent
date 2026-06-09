@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
+	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 )
@@ -23,6 +24,8 @@ type StatusParams struct {
 	PIDFilePath       string
 	ServiceManager    service.Manager // nil-safe: treated as "not installed"
 	Sessions          SessionLister   // nil-safe: treated as 0 sessions
+	// FirewallStatus is the probed host-firewall status; nil omits the line.
+	FirewallStatus *firewall.Status
 }
 
 // RunStatus shows a comprehensive status overview: agent process, service
@@ -64,6 +67,20 @@ func RunStatus(params StatusParams, w io.Writer) error {
 		}
 	}
 	fmt.Fprintf(w, "Sessions: %s\n", sessionLine)
+
+	// --- Firewall ---
+	if fw := params.FirewallStatus; fw != nil && fw.Supported {
+		switch {
+		case !fw.FirewallEnabled:
+			fmt.Fprintf(w, "Firewall: disabled\n")
+		case fw.Authorized:
+			fmt.Fprintf(w, "Firewall: enabled, authorized (%s)\n", fw.Path)
+		case fw.Confidence == firewall.ConfidenceLow:
+			fmt.Fprintf(w, "Firewall: %s\n", fw.Detail)
+		default:
+			fmt.Fprintf(w, "Firewall: enabled, NOT authorized (%s) — run: pmux agent firewall-allow\n", fw.Path)
+		}
+	}
 
 	// --- Blank separator ---
 	fmt.Fprintln(w)
