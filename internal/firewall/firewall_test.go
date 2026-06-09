@@ -11,10 +11,12 @@ func TestNeedsAttention(t *testing.T) {
 		s    Status
 		want bool
 	}{
-		{"unsupported", Status{Supported: false, FirewallEnabled: true, Authorized: false}, false},
-		{"disabled", Status{Supported: true, FirewallEnabled: false, Authorized: false}, false},
-		{"authorized", Status{Supported: true, FirewallEnabled: true, Authorized: true}, false},
-		{"blocked", Status{Supported: true, FirewallEnabled: true, Authorized: false}, true},
+		{"unsupported", Status{Supported: false, FirewallEnabled: true, Authorized: false, Confidence: ConfidenceHigh}, false},
+		{"disabled", Status{Supported: true, FirewallEnabled: false, Authorized: false, Confidence: ConfidenceHigh}, false},
+		{"authorized", Status{Supported: true, FirewallEnabled: true, Authorized: true, Confidence: ConfidenceHigh}, false},
+		{"blocked", Status{Supported: true, FirewallEnabled: true, Authorized: false, Confidence: ConfidenceHigh}, true},
+		{"blocked-but-unknown", Status{Supported: true, FirewallEnabled: true, Authorized: false, Confidence: ConfidenceUnknown}, false},
+		{"blocked-low-confidence", Status{Supported: true, FirewallEnabled: true, Authorized: false, Confidence: ConfidenceLow}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

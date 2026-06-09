@@ -61,8 +61,10 @@ type Manager interface {
 
 // NeedsAttention reports whether the firewall is likely blocking the agent.
 // Package-level (not on Manager) because the logic is platform-independent.
+// A Status with Unknown confidence (e.g. a transient probe failure) does not
+// trigger attention, to avoid false alarms.
 func NeedsAttention(s Status) bool {
-	return s.Supported && s.FirewallEnabled && !s.Authorized
+	return s.Supported && s.FirewallEnabled && !s.Authorized && s.Confidence != ConfidenceUnknown
 }
 
 // ExecutablePath returns the fully resolved path of the running executable
