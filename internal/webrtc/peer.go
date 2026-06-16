@@ -81,8 +81,13 @@ type PeerManager struct {
 	// Defaults to false (ICETransportPolicyAll). Set after construction to override.
 	ForceRelay bool
 
-	// allowedDeviceID is the single paired mobile device ID.
-	// When set, only this device is allowed to connect; others are rejected.
+	// allowedDeviceID is the single paired mobile device ID; only this device
+	// may connect, all others are rejected. The guard is fail-closed: an empty
+	// value rejects everyone, so an unpaired agent never accepts a peer. Agent
+	// startup always sets a non-empty value — a real device ID when paired, or
+	// a "!"-prefixed sentinel ("!unpaired", "!invalid-load-error") that can
+	// never match a real Ed25519 device ID — so the empty case is a safety net
+	// rather than a normal runtime state.
 	// Access via SetAllowedDeviceID/getAllowedDeviceID for thread safety.
 	allowedDeviceID string
 
