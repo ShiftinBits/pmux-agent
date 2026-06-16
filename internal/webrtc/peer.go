@@ -302,9 +302,10 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	requestStart := time.Now()
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
 
-	// Validate device is the paired device
+	// Validate device is the paired device. Fail closed: an empty allowedID
+	// (e.g. an unpaired agent) rejects all connections rather than accepting any.
 	allowedID := pm.getAllowedDeviceID()
-	if allowedID != "" && mobileDeviceID != allowedID {
+	if allowedID == "" || mobileDeviceID != allowedID {
 		pm.logger.Warn("connection rejected: device not paired",
 			"mobile", mobileDeviceID, "expected", allowedID)
 		if err := pm.signaling.Send(SignalingMessage{

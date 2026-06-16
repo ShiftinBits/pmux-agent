@@ -210,6 +210,10 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		peerManager.SetAllowedDeviceID("!invalid-load-error")
 	} else if pairedDevice != nil {
 		peerManager.SetAllowedDeviceID(pairedDevice.DeviceID)
+	} else {
+		// Unpaired (LoadPairedDevice returned nil, nil): set an explicit sentinel
+		// so the guard fails closed and rejects any device until pairing completes.
+		peerManager.SetAllowedDeviceID("!unpaired")
 	}
 
 	// Create a cancelable context for the agent
