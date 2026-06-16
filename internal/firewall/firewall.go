@@ -1,20 +1,24 @@
 // Package firewall detects whether the host firewall is likely blocking
-// inbound connections to the pmux agent binary, and (when run elevated)
-// applies an allow rule. It mirrors the internal/service package's structure:
-// build-tag-selected NewManager() plus an injectable execCommand for tests.
+// inbound connections to the pmux agent binary. It is detection-only: it
+// mirrors the internal/service package's structure (build-tag-selected
+// NewManager() plus an injectable execCommand for tests) and never mutates the
+// firewall.
 //
-// Probing is read-only and never elevates. Mutation (Allow) is guarded to
-// require elevation and is reached only via the explicit, user-invoked
-// `pmux agent firewall-allow` command.
+// When a probe suggests the firewall may be blocking, callers surface the
+// Warning message. There is deliberately no automatic fix: modern macOS can't
+// add an exception from the CLI, and the mobile app falls back to a TURN relay
+// automatically when a direct connection can't form.
 package firewall
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
+
+// Warning is the single user-facing message shown whenever the host firewall is
+// suspected of blocking inbound connections to the agent.
+const Warning = "Warning: Your firewall may be blocking pmux agent connectivity. Ensure pmux is allowed in your firewall to support direct peer-to-peer connections."
 
 // Confidence expresses how much to trust a Status.Authorized value.
 type Confidence int
@@ -42,21 +46,16 @@ type Status struct {
 	FirewallEnabled bool       // host firewall is on
 	Authorized      bool       // our binary is allowed inbound (best-effort)
 	Confidence      Confidence // trust level for Authorized
-	Detail          string     // human-readable explanation
+	Detail          string     // human-readable explanation (diagnostics/logs)
 	Path            string     // resolved binary path that was probed
 }
 
-// Manager probes and (only when elevated) mutates the host firewall.
+// Manager probes the host firewall. Detection-only; it never mutates the
+// firewall.
 type Manager interface {
-	// Probe is read-only, never elevates, and never returns a fatal error;
-	// on uncertainty it returns Confidence Unknown.
+	// Probe is read-only and never returns a fatal error; on uncertainty it
+	// returns Confidence Unknown.
 	Probe(binPath string) Status
-	// Allow applies an inbound allow rule for binPath. It MUST be run
-	// elevated; implementations guard on this and return an error otherwise.
-	Allow(binPath string) error
-	// RemediationText returns the exact, copy-pasteable elevated command
-	// for this OS, with the path safely quoted.
-	RemediationText(binPath string) string
 }
 
 // NeedsAttention reports whether the firewall is likely blocking the agent.
@@ -83,42 +82,9 @@ func ExecutablePath() (string, error) {
 	return resolved, nil
 }
 
-// shellQuote wraps s in POSIX single quotes, escaping embedded single quotes,
-// so it is safe to display in a copy-paste shell command with spaces/specials.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-var errUnsupported = errors.New("automatic firewall configuration is not supported on this platform")
-
-// ErrManualOnly indicates the firewall can only be configured manually on this
-// platform/OS version (macOS 15+, where socketfilterfw is decoupled from
-// enforcement; or Linux). Callers should show RemediationText rather than
-// attempting elevation, which cannot help. Wrap it with %w so errors.Is works.
-var ErrManualOnly = errors.New("firewall must be configured manually on this platform")
-
-// Elevate re-execs the current binary with the given args under elevation
-// (sudo on macOS/Linux, UAC on Windows). Returns true if the elevated process
-// ran to completion successfully. If already elevated, it returns false so the
-// caller performs the action in-process.
-func Elevate(args ...string) bool {
-	if isElevated() {
-		return false
-	}
-	self, err := os.Executable()
-	if err != nil {
-		return false
-	}
-	return relaunchElevated(self, args) == nil
-}
-
 // unsupportedManager is returned on platforms without a known firewall mechanism.
 type unsupportedManager struct{}
 
 func (unsupportedManager) Probe(binPath string) Status {
 	return Status{Supported: false, Confidence: ConfidenceUnknown, Path: binPath}
-}
-func (unsupportedManager) Allow(binPath string) error { return errUnsupported }
-func (unsupportedManager) RemediationText(string) string {
-	return "Automatic firewall configuration is not supported on this platform."
 }

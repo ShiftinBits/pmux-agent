@@ -233,8 +233,11 @@ func TestRunStatusFirewallLine(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Firewall:") || !strings.Contains(out, "NOT authorized") || !strings.Contains(out, "firewall-allow") {
-		t.Errorf("expected firewall NOT-authorized line, got:\n%s", out)
+	if !strings.Contains(out, firewall.Warning) {
+		t.Errorf("expected firewall warning, got:\n%s", out)
+	}
+	if strings.Contains(out, "firewall-allow") {
+		t.Errorf("firewall-allow command was removed; should not appear:\n%s", out)
 	}
 }
 
@@ -253,8 +256,8 @@ func TestRunStatusFirewallLine_Disabled(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "Firewall: disabled") {
-		t.Errorf("expected 'Firewall: disabled', got:\n%s", out)
+	if strings.Contains(out, firewall.Warning) {
+		t.Errorf("disabled firewall should produce no warning, got:\n%s", out)
 	}
 }
 
@@ -275,11 +278,8 @@ func TestRunStatusFirewallLine_Authorized(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "authorized") {
-		t.Errorf("expected 'authorized' in firewall line, got:\n%s", out)
-	}
-	if !strings.Contains(out, "/x/pmux") {
-		t.Errorf("expected path '/x/pmux' in firewall line, got:\n%s", out)
+	if strings.Contains(out, firewall.Warning) {
+		t.Errorf("authorized firewall should produce no warning, got:\n%s", out)
 	}
 }
 
@@ -301,10 +301,10 @@ func TestRunStatusFirewallLine_LowConfidence(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "ufw active") {
-		t.Errorf("expected detail 'ufw active' in output, got:\n%s", out)
+	if !strings.Contains(out, firewall.Warning) {
+		t.Errorf("expected firewall warning for low-confidence advisory, got:\n%s", out)
 	}
 	if strings.Contains(out, "firewall-allow") {
-		t.Errorf("expected no 'firewall-allow' for low-confidence advisory, got:\n%s", out)
+		t.Errorf("firewall-allow command was removed; should not appear:\n%s", out)
 	}
 }

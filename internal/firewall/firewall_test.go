@@ -40,15 +40,3 @@ func TestExecutablePath(t *testing.T) {
 	}
 }
 
-func TestShellQuote(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"/opt/pmux", "'/opt/pmux'"},
-		{"/Users/a b/pmux", "'/Users/a b/pmux'"},
-		{"/x/o'brien/pmux", `'/x/o'\''brien/pmux'`},
-	}
-	for _, tc := range cases {
-		if got := shellQuote(tc.in); got != tc.want {
-			t.Errorf("shellQuote(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}

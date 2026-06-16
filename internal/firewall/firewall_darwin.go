@@ -3,7 +3,6 @@
 package firewall
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -43,13 +42,13 @@ func (darwinManager) Probe(binPath string) Status {
 
 	// macOS 15 (Sequoia) decoupled socketfilterfw's per-app store from actual
 	// enforcement: --listapps no longer reflects real/GUI allow entries and
-	// --add silently no-ops. We can neither verify nor set per-app status
-	// programmatically, so report a low-confidence advisory (rendered as a
-	// plain hint, never the "run firewall-allow" CTA) pointing at the GUI.
+	// --add silently no-ops. We can't verify per-app status programmatically, so
+	// report a low-confidence "may be blocking" advisory and let callers surface
+	// the standard Warning.
 	if osMajor() >= 15 {
 		st.Authorized = false
 		st.Confidence = ConfidenceLow
-		st.Detail = "enabled — can't auto-verify pmux on macOS 15+; if your phone can't connect, allow pmux in System Settings ▸ Network ▸ Firewall ▸ Options"
+		st.Detail = "macOS 15+: cannot verify per-app firewall status"
 		return st
 	}
 
@@ -72,36 +71,6 @@ func (darwinManager) Probe(binPath string) Status {
 		st.Detail = "pmux is allowed"
 	}
 	return st
-}
-
-func (darwinManager) Allow(binPath string) error {
-	// On macOS 15+ socketfilterfw --add no longer affects enforcement; the only
-	// working path is the GUI. Signal that so the caller shows the steps instead
-	// of (uselessly) elevating.
-	if osMajor() >= 15 {
-		return fmt.Errorf("%w:\n%s", ErrManualOnly, darwinManager{}.RemediationText(binPath))
-	}
-	if !isElevated() {
-		return fmt.Errorf("firewall changes require root; run: pmux agent firewall-allow")
-	}
-	if out, err := execCommand(sfw, "--add", binPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("socketfilterfw --add: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	if out, err := execCommand(sfw, "--unblockapp", binPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("socketfilterfw --unblockapp: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func (darwinManager) RemediationText(binPath string) string {
-	if osMajor() >= 15 {
-		return "macOS 15+ can't add firewall exceptions from the command line. Allow pmux manually:\n" +
-			"    1. Open System Settings ▸ Network ▸ Firewall ▸ Options…\n" +
-			"    2. Click + and add: " + binPath + "\n" +
-			"    3. Set it to \"Allow incoming connections\""
-	}
-	q := shellQuote(binPath)
-	return fmt.Sprintf("sudo %s --add %s && sudo %s --unblockapp %s", sfw, q, sfw, q)
 }
 
 // macOSMajor returns the running macOS major version (e.g. 26), or 0 if it

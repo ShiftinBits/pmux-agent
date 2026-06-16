@@ -3,9 +3,7 @@
 package firewall
 
 import (
-	"errors"
 	"os/exec"
-	"strings"
 	"testing"
 )
 
@@ -93,8 +91,7 @@ func TestDarwinProbe(t *testing.T) {
 
 // TestDarwinProbeSequoia covers macOS 15+, where socketfilterfw's per-app store
 // is decoupled from enforcement: Probe must not consult --listapps and instead
-// returns a low-confidence advisory (so callers show a hint, never NeedsAttention
-// with the firewall-allow CTA that can't work here).
+// returns a low-confidence advisory so NeedsAttention surfaces the Warning.
 func TestDarwinProbeSequoia(t *testing.T) {
 	pinOSMajor(t, 26)
 	const p = "/opt/homebrew/Caskroom/pmux/0.4.0/pmux"
@@ -115,11 +112,8 @@ func TestDarwinProbeSequoia(t *testing.T) {
 	if st.Confidence != ConfidenceLow {
 		t.Errorf("Confidence = %v, want Low", st.Confidence)
 	}
-	if !strings.Contains(st.Detail, "System Settings") {
-		t.Errorf("Detail should point at System Settings, got %q", st.Detail)
-	}
-	// Low confidence + not authorized → advisory, but must still NeedAttention so
-	// the hint surfaces.
+	// Low confidence + not authorized → advisory that must still NeedAttention so
+	// the standard Warning surfaces.
 	if !NeedsAttention(st) {
 		t.Error("expected NeedsAttention=true for the macOS 15+ advisory")
 	}
@@ -131,43 +125,3 @@ func TestDarwinProbeSequoia(t *testing.T) {
 	}
 }
 
-func TestDarwinRemediationText(t *testing.T) {
-	t.Run("legacy", func(t *testing.T) {
-		pinOSMajor(t, 14)
-		got := darwinManager{}.RemediationText("/Users/a b/pmux")
-		if !strings.Contains(got, "--unblockapp '/Users/a b/pmux'") {
-			t.Errorf("RemediationText missing quoted --unblockapp: %q", got)
-		}
-		if strings.Contains(got, "--unblock ") {
-			t.Errorf("RemediationText uses wrong flag --unblock: %q", got)
-		}
-	})
-	t.Run("sequoia", func(t *testing.T) {
-		pinOSMajor(t, 26)
-		got := darwinManager{}.RemediationText("/opt/homebrew/Caskroom/pmux/0.4.0/pmux")
-		if !strings.Contains(got, "System Settings") || !strings.Contains(got, "0.4.0/pmux") {
-			t.Errorf("RemediationText should give GUI steps with the path, got %q", got)
-		}
-		if strings.Contains(got, "socketfilterfw") {
-			t.Errorf("macOS 15+ RemediationText must not suggest socketfilterfw: %q", got)
-		}
-	})
-}
-
-func TestDarwinAllowSequoiaManualOnly(t *testing.T) {
-	pinOSMajor(t, 26)
-	err := darwinManager{}.Allow("/opt/homebrew/Caskroom/pmux/0.4.0/pmux")
-	if !errors.Is(err, ErrManualOnly) {
-		t.Fatalf("Allow on macOS 15+ should return ErrManualOnly, got %v", err)
-	}
-}
-
-func TestDarwinAllowRequiresElevation(t *testing.T) {
-	pinOSMajor(t, 14) // exercise the legacy elevation guard, not the 15+ path
-	if isElevated() {
-		t.Skip("test runner is elevated; skipping non-elevated guard check")
-	}
-	if err := (darwinManager{}).Allow("/opt/pmux"); err == nil {
-		t.Fatal("expected Allow to error when not elevated")
-	}
-}

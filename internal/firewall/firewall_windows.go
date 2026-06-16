@@ -3,7 +3,6 @@
 package firewall
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -45,30 +44,4 @@ func (windowsManager) Probe(binPath string) Status {
 		st.Detail = "no inbound allow rule for pmux"
 	}
 	return st
-}
-
-func (windowsManager) Allow(binPath string) error {
-	if !isElevated() {
-		return fmt.Errorf("firewall changes require Administrator; run: pmux agent firewall-allow")
-	}
-	// Remove any existing same-name rule first (idempotent; ignore "no rules match").
-	_ = execCommand("netsh", "advfirewall", "firewall", "delete", "rule",
-		"name="+fwRuleName).Run()
-	out, err := execCommand("netsh", "advfirewall", "firewall", "add", "rule",
-		"name="+fwRuleName,
-		"dir=in",
-		"action=allow",
-		"program="+binPath,
-		"enable=yes",
-		"profile=private,domain").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("netsh advfirewall firewall add rule: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func (windowsManager) RemediationText(binPath string) string {
-	return fmt.Sprintf(
-		`netsh advfirewall firewall add rule name="%s" dir=in action=allow program="%s" enable=yes profile=private,domain (run in an elevated Command Prompt)`,
-		fwRuleName, binPath)
 }
