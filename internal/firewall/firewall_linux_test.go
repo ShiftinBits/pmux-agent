@@ -4,7 +4,6 @@ package firewall
 
 import (
 	"os/exec"
-	"strings"
 	"testing"
 )
 
@@ -38,17 +37,3 @@ func TestLinuxProbe(t *testing.T) {
 	}
 }
 
-func TestLinuxRemediationAdvisory(t *testing.T) {
-	got := linuxManager{}.RemediationText("/usr/bin/pmux")
-	if !strings.Contains(strings.ToLower(got), "ufw") {
-		t.Errorf("expected advisory mentioning ufw, got %q", got)
-	}
-}
-
-func TestLinuxAllowAdvisory(t *testing.T) {
-	// Linux Allow is advisory-only: it must return a non-nil informative error
-	// rather than silently doing nothing or mutating the firewall.
-	if err := (linuxManager{}).Allow("/usr/bin/pmux"); err == nil {
-		t.Fatal("expected advisory error from linux Allow")
-	}
-}

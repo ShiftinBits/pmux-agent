@@ -69,17 +69,10 @@ func RunStatus(params StatusParams, w io.Writer) error {
 	fmt.Fprintf(w, "Sessions: %s\n", sessionLine)
 
 	// --- Firewall ---
-	if fw := params.FirewallStatus; fw != nil && fw.Supported {
-		switch {
-		case !fw.FirewallEnabled:
-			fmt.Fprintf(w, "Firewall: disabled\n")
-		case fw.Authorized:
-			fmt.Fprintf(w, "Firewall: enabled, authorized (%s)\n", fw.Path)
-		case fw.Confidence == firewall.ConfidenceLow:
-			fmt.Fprintf(w, "Firewall: %s\n", fw.Detail)
-		default:
-			fmt.Fprintf(w, "Firewall: enabled, NOT authorized (%s) — run: pmux agent firewall-allow\n", fw.Path)
-		}
+	// Detection-only: surface the standard warning when the firewall is suspected
+	// of blocking inbound connections; stay silent otherwise.
+	if fw := params.FirewallStatus; fw != nil && firewall.NeedsAttention(*fw) {
+		fmt.Fprintf(w, "%s\n", firewall.Warning)
 	}
 
 	// --- Blank separator ---

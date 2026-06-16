@@ -4,7 +4,6 @@ package firewall
 
 import (
 	"os/exec"
-	"strings"
 	"testing"
 )
 
@@ -15,6 +14,14 @@ func stubMac(global, blockall, listapps string) func(string, ...string) *exec.Cm
 		sfw + " --getblockall":    blockall,
 		sfw + " --listapps":       listapps,
 	})
+}
+
+// pinOSMajor sets osMajor to a fixed version for the duration of a test.
+func pinOSMajor(t *testing.T, v int) {
+	t.Helper()
+	prev := osMajor
+	osMajor = func() int { return v }
+	t.Cleanup(func() { osMajor = prev })
 }
 
 func TestListappsAuthorized(t *testing.T) {
@@ -41,7 +48,10 @@ func TestListappsAuthorized(t *testing.T) {
 	}
 }
 
+// TestDarwinProbe covers the legacy (macOS < 15) socketfilterfw path, where the
+// per-app allow-list still drives enforcement.
 func TestDarwinProbe(t *testing.T) {
+	pinOSMajor(t, 14)
 	const p = "/opt/homebrew/Caskroom/pmux/0.3.2/pmux"
 	cases := []struct {
 		name           string
@@ -79,21 +89,39 @@ func TestDarwinProbe(t *testing.T) {
 	}
 }
 
-func TestDarwinRemediationText(t *testing.T) {
-	got := darwinManager{}.RemediationText("/Users/a b/pmux")
-	if !strings.Contains(got, "--unblockapp '/Users/a b/pmux'") {
-		t.Errorf("RemediationText missing quoted --unblockapp: %q", got)
+// TestDarwinProbeSequoia covers macOS 15+, where socketfilterfw's per-app store
+// is decoupled from enforcement: Probe must not consult --listapps and instead
+// returns a low-confidence advisory so NeedsAttention surfaces the Warning.
+func TestDarwinProbeSequoia(t *testing.T) {
+	pinOSMajor(t, 26)
+	const p = "/opt/homebrew/Caskroom/pmux/0.4.0/pmux"
+
+	// Firewall on, not block-all → advisory. --listapps must never be consulted;
+	// stub it to fail so the test breaks if Probe falls through to it.
+	execCommand = fakeByArg(map[string]string{
+		sfw + " --getglobalstate": "mac_global_on",
+		sfw + " --getblockall":    "mac_blockall_off",
+		sfw + " --listapps":       "failure",
+	})
+	defer func() { execCommand = exec.Command }()
+
+	st := darwinManager{}.Probe(p)
+	if st.Authorized {
+		t.Errorf("Authorized = true, want false on macOS 15+ (can't verify)")
 	}
-	if strings.Contains(got, "--unblock ") {
-		t.Errorf("RemediationText uses wrong flag --unblock: %q", got)
+	if st.Confidence != ConfidenceLow {
+		t.Errorf("Confidence = %v, want Low", st.Confidence)
+	}
+	// Low confidence + not authorized → advisory that must still NeedAttention so
+	// the standard Warning surfaces.
+	if !NeedsAttention(st) {
+		t.Error("expected NeedsAttention=true for the macOS 15+ advisory")
+	}
+
+	// Firewall disabled short-circuits to authorized regardless of version.
+	execCommand = fakeByArg(map[string]string{sfw + " --getglobalstate": "mac_global_off"})
+	if st := (darwinManager{}).Probe(p); !st.Authorized {
+		t.Error("expected Authorized=true when firewall disabled")
 	}
 }
 
-func TestDarwinAllowRequiresElevation(t *testing.T) {
-	if isElevated() {
-		t.Skip("test runner is elevated; skipping non-elevated guard check")
-	}
-	if err := (darwinManager{}).Allow("/opt/pmux"); err == nil {
-		t.Fatal("expected Allow to error when not elevated")
-	}
-}

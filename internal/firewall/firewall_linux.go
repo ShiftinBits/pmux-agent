@@ -3,15 +3,15 @@
 package firewall
 
 import (
-	"fmt"
 	"strings"
 )
 
 type linuxManager struct{}
 
-// NewManager returns the Linux Manager. Detection is best-effort and
-// remediation is advisory: per-binary inbound UDP rules are not cleanly
-// expressible in ufw/firewalld, so we never mutate the firewall automatically.
+// NewManager returns the Linux Manager. Detection is best-effort; we never
+// mutate the firewall (per-binary inbound UDP rules aren't cleanly expressible
+// in ufw/firewalld). When blocking is suspected, callers surface the Warning
+// and the mobile app falls back to a TURN relay.
 func NewManager() Manager { return linuxManager{} }
 
 func (linuxManager) Probe(binPath string) Status {
@@ -38,15 +38,4 @@ func (linuxManager) Probe(binPath string) Status {
 	}
 	st.Detail = "no active host firewall detected (or could not verify without root)"
 	return st
-}
-
-func (linuxManager) Allow(binPath string) error {
-	return fmt.Errorf("automatic firewall rules are not supported on Linux; %s",
-		linuxManager{}.RemediationText(binPath))
-}
-
-func (linuxManager) RemediationText(binPath string) string {
-	return "If ufw/firewalld is active and blocking inbound UDP, the TURN relay path will not help — " +
-		"allow inbound UDP for pmux, e.g. `sudo ufw allow proto udp from any to any` (scope to your LAN as appropriate), " +
-		"or add a firewalld rule. See the pmux docs for guidance."
 }

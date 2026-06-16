@@ -164,6 +164,8 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 		pm.handleSDPAnswer(msg.TargetDeviceID, msg.SDP)
 	case "ice_candidate":
 		pm.handleICECandidate(msg.TargetDeviceID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
+	case "presence_ack":
+		// Server acknowledgement of our presence heartbeat; nothing to do.
 	default:
 		pm.logger.Debug("unhandled signaling message type", "type", msg.Type)
 	}

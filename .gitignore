@@ -6,6 +6,7 @@
 bin/
 build/
 dist/
+temp/
 *.exe
 *.test
 *.out

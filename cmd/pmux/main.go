@@ -411,7 +411,6 @@ func handleAgent(args []string) {
 		fmt.Fprintln(os.Stderr, "  status         Show agent status")
 		fmt.Fprintln(os.Stderr, "  install        Install as OS service (launchd/systemd)")
 		fmt.Fprintln(os.Stderr, "  uninstall      Remove OS service registration")
-		fmt.Fprintln(os.Stderr, "  firewall-allow Authorize this binary in the host firewall (elevates)")
 		os.Exit(1)
 	}
 
@@ -445,8 +444,6 @@ func handleAgent(args []string) {
 		handleAgentInstall()
 	case "uninstall":
 		handleAgentUninstall()
-	case "firewall-allow":
-		handleAgentFirewallAllow()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown agent command: %s\n", args[0])
 		os.Exit(1)
@@ -556,44 +553,6 @@ func handleAgentUninstall() {
 	fmt.Println("Service uninstalled.")
 }
 
-func handleAgentFirewallAllow() {
-	binPath, err := firewall.ExecutablePath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ could not resolve binary path: %v\n", err)
-		os.Exit(1)
-	}
-	mgr := firewall.NewManager()
-
-	if st := mgr.Probe(binPath); !st.Supported {
-		fmt.Println("Firewall management is not supported on this platform.")
-		return
-	}
-
-	if err := mgr.Allow(binPath); err != nil {
-		// Not elevated (or unsupported): self-elevate and re-run. The elevated
-		// child performs the change and prints the result, so the parent stays
-		// silent on success to avoid a duplicate line.
-		fmt.Println("Requesting elevated privileges...")
-		if firewall.Elevate("agent", "firewall-allow") {
-			return
-		}
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
-		fmt.Fprintf(os.Stderr, "  Manual fix:\n    %s\n", mgr.RemediationText(binPath))
-		os.Exit(1)
-	}
-
-	st := mgr.Probe(binPath)
-	printFirewallResult(st)
-}
-
-func printFirewallResult(st firewall.Status) {
-	if st.Authorized {
-		fmt.Printf("Firewall: pmux is authorized (%s)\n", st.Path)
-	} else {
-		fmt.Printf("Firewall: pmux still NOT authorized (%s) — %s\n", st.Path, st.Detail)
-	}
-}
-
 // isPocketmuxCommand returns true for intercepted Pocketmux commands
 // (not tmux passthrough). Used to show the update banner.
 func isPocketmuxCommand(cmd string) bool {
@@ -680,7 +639,6 @@ Pocketmux commands:
   agent status         Show agent status and recent logs
   agent install        Install as OS service (auto-start on login)
   agent uninstall      Remove OS service registration
-  agent firewall-allow Authorize pmux in the host firewall (elevates)
   --version            Show version
   --help               Show this help
 

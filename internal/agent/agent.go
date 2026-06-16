@@ -122,15 +122,11 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	logger.Info("identity loaded", "deviceID", identity.DeviceID)
 
 	// Best-effort: warn if the host firewall is likely blocking inbound
-	// connections to this binary (the common failure after an upgrade installs
-	// the binary at a new, un-authorized path). Never fatal.
+	// connections to this binary. Detection-only — the mobile app falls back to
+	// a TURN relay when a direct connection can't form. Never fatal.
 	if exePath, errFW := firewall.ExecutablePath(); errFW == nil {
-		fwm := firewall.NewManager()
-		if st := fwm.Probe(exePath); firewall.NeedsAttention(st) {
-			logger.Warn("host firewall may be blocking incoming connections; mobile clients may fail to connect",
-				"detail", st.Detail,
-				"path", st.Path,
-				"fix", "pmux agent firewall-allow")
+		if st := firewall.NewManager().Probe(exePath); firewall.NeedsAttention(st) {
+			logger.Warn(firewall.Warning)
 		}
 	}
 

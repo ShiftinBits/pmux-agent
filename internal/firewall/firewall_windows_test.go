@@ -58,15 +58,3 @@ func TestWindowsProbe(t *testing.T) {
 	}
 }
 
-func TestWindowsRemediationText(t *testing.T) {
-	got := windowsManager{}.RemediationText(`C:\Program Files\pmux\pmux.exe`)
-	if !strings.Contains(got, "netsh advfirewall firewall add rule") {
-		t.Errorf("expected netsh add rule command: %q", got)
-	}
-	if !strings.Contains(got, `program="C:\Program Files\pmux\pmux.exe"`) {
-		t.Errorf("expected quoted program path: %q", got)
-	}
-	if !strings.Contains(got, "profile=private,domain") {
-		t.Errorf("expected profile scope: %q", got)
-	}
-}
