@@ -92,6 +92,7 @@ func TestPeerManager_HandleConnectRequest(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-1")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-1",
@@ -130,6 +131,7 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-2")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-2",
@@ -203,6 +205,7 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, handler, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-dc")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-dc",
@@ -344,6 +347,7 @@ func TestPeerManager_ClosePeer(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-close")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-close",
@@ -375,6 +379,7 @@ func TestPeerManager_CloseAllClearsAllPeers(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID("m1")
 
 	// Connect a single peer and verify CloseAll removes it
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
@@ -406,6 +411,7 @@ func TestPeerManager_NoTurnWithCustomAPI(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-noturn")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-noturn",
@@ -493,6 +499,7 @@ func TestPeerManager_Reconnect(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID("mobile-re")
 
 	// First connection
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-re"})
@@ -537,8 +544,9 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
+	pm.SetAllowedDeviceID("m1")
 
-	// Connect one peer (should succeed)
+	// Connect the paired peer (should succeed)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -546,7 +554,9 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 		t.Fatalf("expected 1 peer, got %d", pm.PeerCount())
 	}
 
-	// Second peer should be rejected
+	// A second, distinct device must not exceed capacity. Under single-pairing the
+	// pairing guard rejects it (reason "not_paired") before the connection-limit
+	// check is reached — so capacity can never be exceeded by a foreign device.
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m2"})
 	time.Sleep(200 * time.Millisecond)
 
@@ -558,12 +568,12 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 	rejections := sender.messagesOfType("connection_rejected")
 	found := false
 	for _, e := range rejections {
-		if e.TargetDeviceID == "m2" && e.Reason == "already_connected" {
+		if e.TargetDeviceID == "m2" && e.Reason == "not_paired" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected connection_rejected with reason already_connected sent to m2")
+		t.Error("expected connection_rejected with reason not_paired sent to m2")
 	}
 
 	pm.CloseAll()
@@ -609,6 +619,38 @@ func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
 	pm.CloseAll()
 }
 
+// TestPeerManager_RejectsWhenNoAllowedDevice verifies the guard fails closed:
+// with no allowed device set (empty allowedID, e.g. an unpaired agent), any
+// connect_request must be rejected rather than accepted. Regression for SB-997.
+func TestPeerManager_RejectsWhenNoAllowedDevice(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.API = fastAPI(t)
+	// Intentionally do NOT call SetAllowedDeviceID — allowedID stays "".
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "any-device-789"})
+	time.Sleep(200 * time.Millisecond)
+
+	if pm.PeerCount() != 0 {
+		t.Errorf("expected 0 peers when no allowed device is set, got %d", pm.PeerCount())
+	}
+
+	rejections := sender.messagesOfType("connection_rejected")
+	found := false
+	for _, e := range rejections {
+		if e.TargetDeviceID == "any-device-789" && e.Reason == "not_paired" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected connection_rejected with reason not_paired when no allowed device is set")
+	}
+
+	pm.CloseAll()
+}
+
 func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
@@ -616,6 +658,7 @@ func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
+	pm.SetAllowedDeviceID("m1")
 
 	// Fill to capacity (single device)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
@@ -656,6 +699,7 @@ func TestPeerManager_DataChannelOrdered(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-ordered")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-ordered",
@@ -744,6 +788,7 @@ func TestPeerManager_DTLSNotDisabled(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-dtls")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-dtls",
@@ -803,6 +848,7 @@ func TestPeerManager_ForceRelay(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 	pm.ForceRelay = true
+	pm.SetAllowedDeviceID("mobile-relay")
 
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
@@ -838,6 +884,7 @@ func TestPeerManager_DisconnectedStartsGraceTimer(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	// Create a peer via connect_request
+	pm.SetAllowedDeviceID("mobile-disc")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-disc"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -865,6 +912,7 @@ func TestPeerManager_ConnectedDuringGraceCancelsTimer(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID("mobile-recover")
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-recover"})
 	time.Sleep(500 * time.Millisecond)
@@ -904,6 +952,7 @@ func TestPeerManager_FailedClosesPeerImmediately(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-fail")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-fail"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -929,6 +978,7 @@ func TestPeerManager_DisconnectTimerFiresICERestart(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-ice")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-ice"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -967,6 +1017,7 @@ func TestPeerManager_ICERestartSendsOffer(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-iceoff")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-iceoff"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1036,6 +1087,7 @@ func TestPeerManager_CloseAllCancelsDisconnectTimers(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-t1")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-t1"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1074,6 +1126,7 @@ func TestPeerManager_PeerStates(t *testing.T) {
 	}
 
 	// Add a peer
+	pm.SetAllowedDeviceID("mobile-ps")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-ps"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1106,6 +1159,7 @@ func TestPeerManager_ClosePeerCancelsDisconnectTimer(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-cpt")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-cpt"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1146,6 +1200,7 @@ func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
 	}
 
 	// Connect a peer
+	pm.SetAllowedDeviceID("mobile-fail")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-fail",
@@ -1186,6 +1241,7 @@ func TestPeerManager_ICECandidateBuffering(t *testing.T) {
 	const deviceID = "mobile-icebuf"
 
 	// 1. Send connect_request to create a peer (and generate an SDP offer).
+	pm.SetAllowedDeviceID(deviceID)
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: deviceID,
@@ -1283,6 +1339,7 @@ func TestPeer_BackpressureCallbackRegistered(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-bp")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-bp",
@@ -1333,6 +1390,7 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-send")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-send",
@@ -1518,6 +1576,7 @@ func TestPeer_CloseUnblocksWaitingBackpressure(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-close-bp")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-close-bp",
@@ -1601,6 +1660,7 @@ func TestWaitForSendReady_DoneChannel(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = api
 
+	pm.SetAllowedDeviceID("mobile-done")
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-done",
@@ -1719,6 +1779,7 @@ func TestOnDisconnectTimerFired_PeerRecovered(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 
+	pm.SetAllowedDeviceID("mobile-recovered")
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-recovered"})
 	time.Sleep(500 * time.Millisecond)
 
