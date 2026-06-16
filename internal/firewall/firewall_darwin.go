@@ -4,10 +4,15 @@ package firewall
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 const sfw = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+
+// osMajor returns the macOS major version (e.g. 26). It is a package var so
+// tests can pin a version without execing sw_vers.
+var osMajor = macOSMajor
 
 type darwinManager struct{}
 
@@ -36,6 +41,18 @@ func (darwinManager) Probe(binPath string) Status {
 		return st
 	}
 
+	// macOS 15 (Sequoia) decoupled socketfilterfw's per-app store from actual
+	// enforcement: --listapps no longer reflects real/GUI allow entries and
+	// --add silently no-ops. We can neither verify nor set per-app status
+	// programmatically, so report a low-confidence advisory (rendered as a
+	// plain hint, never the "run firewall-allow" CTA) pointing at the GUI.
+	if osMajor() >= 15 {
+		st.Authorized = false
+		st.Confidence = ConfidenceLow
+		st.Detail = "enabled — can't auto-verify pmux on macOS 15+; if your phone can't connect, allow pmux in System Settings ▸ Network ▸ Firewall ▸ Options"
+		return st
+	}
+
 	listOut, err := execCommand(sfw, "--listapps").CombinedOutput()
 	if err != nil {
 		st.Confidence = ConfidenceUnknown
@@ -58,6 +75,12 @@ func (darwinManager) Probe(binPath string) Status {
 }
 
 func (darwinManager) Allow(binPath string) error {
+	// On macOS 15+ socketfilterfw --add no longer affects enforcement; the only
+	// working path is the GUI. Signal that so the caller shows the steps instead
+	// of (uselessly) elevating.
+	if osMajor() >= 15 {
+		return fmt.Errorf("%w:\n%s", ErrManualOnly, darwinManager{}.RemediationText(binPath))
+	}
 	if !isElevated() {
 		return fmt.Errorf("firewall changes require root; run: pmux agent firewall-allow")
 	}
@@ -71,8 +94,27 @@ func (darwinManager) Allow(binPath string) error {
 }
 
 func (darwinManager) RemediationText(binPath string) string {
+	if osMajor() >= 15 {
+		return "macOS 15+ can't add firewall exceptions from the command line. Allow pmux manually:\n" +
+			"    1. Open System Settings ▸ Network ▸ Firewall ▸ Options…\n" +
+			"    2. Click + and add: " + binPath + "\n" +
+			"    3. Set it to \"Allow incoming connections\""
+	}
 	q := shellQuote(binPath)
 	return fmt.Sprintf("sudo %s --add %s && sudo %s --unblockapp %s", sfw, q, sfw, q)
+}
+
+// macOSMajor returns the running macOS major version (e.g. 26), or 0 if it
+// can't be determined. Best-effort: callers treat 0 as "pre-15" (the legacy
+// socketfilterfw path), which is the safe default for the rare parse failure.
+func macOSMajor() int {
+	out, err := execCommand("sw_vers", "-productVersion").CombinedOutput()
+	if err != nil {
+		return 0
+	}
+	major, _, _ := strings.Cut(strings.TrimSpace(string(out)), ".")
+	n, _ := strconv.Atoi(major)
+	return n
 }
 
 // listappsAuthorized parses `socketfilterfw --listapps` output and reports
@@ -80,6 +122,8 @@ func (darwinManager) RemediationText(binPath string) string {
 //
 //	12 : /path/to/binary
 //	             (Allow incoming connections)
+//
+// Only meaningful on macOS < 15; on 15+ this store is decoupled from enforcement.
 func listappsAuthorized(out, binPath string) (allowed, found bool) {
 	lines := strings.Split(out, "\n")
 	for i := 0; i < len(lines); i++ {

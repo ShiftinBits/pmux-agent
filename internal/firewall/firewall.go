@@ -91,6 +91,12 @@ func shellQuote(s string) string {
 
 var errUnsupported = errors.New("automatic firewall configuration is not supported on this platform")
 
+// ErrManualOnly indicates the firewall can only be configured manually on this
+// platform/OS version (macOS 15+, where socketfilterfw is decoupled from
+// enforcement; or Linux). Callers should show RemediationText rather than
+// attempting elevation, which cannot help. Wrap it with %w so errors.Is works.
+var ErrManualOnly = errors.New("firewall must be configured manually on this platform")
+
 // Elevate re-execs the current binary with the given args under elevation
 // (sudo on macOS/Linux, UAC on Windows). Returns true if the elevated process
 // ran to completion successfully. If already elevated, it returns false so the

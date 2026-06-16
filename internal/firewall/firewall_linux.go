@@ -41,8 +41,7 @@ func (linuxManager) Probe(binPath string) Status {
 }
 
 func (linuxManager) Allow(binPath string) error {
-	return fmt.Errorf("automatic firewall rules are not supported on Linux; %s",
-		linuxManager{}.RemediationText(binPath))
+	return fmt.Errorf("%w: %s", ErrManualOnly, linuxManager{}.RemediationText(binPath))
 }
 
 func (linuxManager) RemediationText(binPath string) string {

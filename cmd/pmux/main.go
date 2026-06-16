@@ -570,6 +570,12 @@ func handleAgentFirewallAllow() {
 	}
 
 	if err := mgr.Allow(binPath); err != nil {
+		// Some platforms (macOS 15+, Linux) can't be configured from the CLI at
+		// all — elevation wouldn't help. Print the manual steps and stop.
+		if errors.Is(err, firewall.ErrManualOnly) {
+			fmt.Println(mgr.RemediationText(binPath))
+			return
+		}
 		// Not elevated (or unsupported): self-elevate and re-run. The elevated
 		// child performs the change and prints the result, so the parent stays
 		// silent on success to avoid a duplicate line.
