@@ -123,7 +123,8 @@ func IsRequest(msg Message) bool {
 func IsEvent(msg Message) bool {
 	switch msg.(type) {
 	case *SessionsEvent, *OutputEvent, *AttachedEvent, *DetachedEvent,
-		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent:
+		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent,
+		*AuthChallengeEvent:
 		return true
 	}
 	return false

@@ -90,6 +90,53 @@ func TestPeer_VerifyAuthResponse_WrongTypeDoesNotAuthenticate(t *testing.T) {
 	}
 }
 
+func TestPeer_FailAuthNoOpAfterSuccess(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, nonce),
+	})
+
+	p.mu.Lock()
+	if !p.authenticated || !p.authResolved {
+		p.mu.Unlock()
+		t.Fatal("expected authenticated and resolved after a valid response")
+	}
+	p.mu.Unlock()
+
+	// A late timeout must not tear down a peer that already authenticated.
+	p.failAuth("authentication timeout")
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.authenticated {
+		t.Fatal("failAuth after a successful handshake must be a no-op")
+	}
+}
+
+func TestPeer_VerifySuccessIgnoredAfterFailAuth(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	// The timeout resolves auth first.
+	p.failAuth("authentication timeout")
+
+	// A valid response arriving afterwards must NOT flip authenticated — the
+	// peer is already being torn down.
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, nonce),
+	})
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.authenticated {
+		t.Fatal("a valid response after failAuth must be ignored")
+	}
+}
+
 // TestPeerManager_RejectsWhenSharedSecretUnavailable verifies the connect-time
 // fail-closed behaviour: if the shared secret cannot be loaded, the agent cannot
 // authenticate the peer, so the connection is rejected before any offer (SB-992).

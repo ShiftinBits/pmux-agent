@@ -140,6 +140,7 @@ type Peer struct {
 	pm            *PeerManager // back-reference, used to close on auth failure
 	sharedSecret  []byte       // pairing secret; set once at creation, never mutated
 	authenticated bool         // true once the peer proved key possession
+	authResolved  bool         // true once auth concluded (success or failure); makes verify and the timeout mutually exclusive
 	authNonce     []byte       // per-connection challenge nonce sent to the peer
 	authTimer     *time.Timer  // closes the peer if it doesn't authenticate in time
 }
@@ -147,6 +148,9 @@ type Peer struct {
 // authChallengeTimeout bounds how long a peer may take to prove key possession
 // after the DataChannel opens. A peer that hasn't authenticated by then is
 // closed so an unauthenticated connection can't hold the single peer slot.
+// 10s is generous: the response is a single HMAC computed and sent over the
+// already-open DataChannel, so a legitimate mobile answers in well under a
+// second even over a TURN relay.
 const authChallengeTimeout = 10 * time.Second
 
 // authNonceSize is the length in bytes of the per-connection challenge nonce.
@@ -1033,13 +1037,10 @@ func (p *Peer) sendAuthChallenge() {
 
 	p.mu.Lock()
 	p.authNonce = nonce
+	// failAuth is a no-op once auth has resolved, so the timer never tears down
+	// a peer that authenticated in the meantime.
 	p.authTimer = time.AfterFunc(authChallengeTimeout, func() {
-		p.mu.Lock()
-		authed := p.authenticated
-		p.mu.Unlock()
-		if !authed {
-			p.failAuth("authentication timeout")
-		}
+		p.failAuth("authentication timeout")
 	})
 	p.mu.Unlock()
 
@@ -1066,19 +1067,30 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		return
 	}
 
+	// Capture both nonce and secret under the lock. sharedSecret is set once at
+	// creation, but reading it here under mu keeps the race detector satisfied
+	// (the write happened on a different goroutine).
 	p.mu.Lock()
 	nonce := p.authNonce
+	secret := p.sharedSecret
 	p.mu.Unlock()
 
-	mac := hmac.New(sha256.New, p.sharedSecret)
+	mac := hmac.New(sha256.New, secret)
 	mac.Write(nonce)
-	expected := mac.Sum(nil)
-	if !hmac.Equal(expected, gotMAC) {
+	if !hmac.Equal(mac.Sum(nil), gotMAC) {
 		p.failAuth("auth response MAC mismatch")
 		return
 	}
 
+	// Commit the successful handshake, unless auth already resolved (e.g. the
+	// timeout fired first and is tearing the peer down). authResolved makes
+	// verify-success and the timeout mutually exclusive.
 	p.mu.Lock()
+	if p.authResolved {
+		p.mu.Unlock()
+		return
+	}
+	p.authResolved = true
 	p.authenticated = true
 	if p.authTimer != nil {
 		p.authTimer.Stop()
@@ -1088,10 +1100,24 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	p.logger.Info("peer authenticated: key possession proven", "mobile", p.DeviceID)
 }
 
-// failAuth tears down a peer that failed the key-possession proof. The close
-// runs on its own goroutine because callers may be inside a Pion DataChannel
-// callback, where a synchronous PeerConnection Close() can block.
+// failAuth tears down a peer that failed the key-possession proof. It is a
+// no-op if auth already resolved (a successful verify or an earlier failure),
+// so it is safe to call from the timeout, the verify path, and the challenge
+// sender. The close runs on its own goroutine because callers may be inside a
+// Pion DataChannel callback, where a synchronous PeerConnection Close() can block.
 func (p *Peer) failAuth(reason string) {
+	p.mu.Lock()
+	if p.authResolved {
+		p.mu.Unlock()
+		return
+	}
+	p.authResolved = true
+	if p.authTimer != nil {
+		p.authTimer.Stop()
+		p.authTimer = nil
+	}
+	p.mu.Unlock()
+
 	p.logger.Warn("closing peer: authentication failed", "reason", reason, "mobile", p.DeviceID)
 	if p.pm != nil {
 		go p.pm.ClosePeer(p.DeviceID)
