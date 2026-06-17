@@ -133,6 +133,7 @@ type Peer struct {
 	remoteDescSet bool                      // true after SetRemoteDescription succeeds
 	iceCandidates []webrtc.ICECandidateInit // buffered candidates received before remote desc
 	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
+	silenced      bool                      // when true, OnICECandidate stops sending; set synchronously on reconnect (SB-1007)
 
 	// Key-possession proof (SB-992). The peer must prove it holds the pairing
 	// shared secret before any request is processed. Set at creation; auth
@@ -444,6 +445,11 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	pm.mu.Lock()
 	oldPeer, hadOld := pm.peers[mobileDeviceID]
 	if hadOld {
+		// Silence synchronously before releasing the map slot: the old peer's
+		// connection keeps gathering ICE until conn.Close() finishes (async
+		// below), and any candidate it emits would be applied against the new
+		// peer's negotiation. Silencing here closes that window (SB-1007).
+		oldPeer.silence()
 		delete(pm.peers, mobileDeviceID)
 	}
 	if timer, hasTimer := pm.disconnectTimers[mobileDeviceID]; hasTimer {
@@ -927,35 +933,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 
 // setupHandlers configures ICE and connection state handlers on the peer connection.
 func (p *Peer) setupHandlers() {
-	p.conn.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			p.logger.Debug("ICE gathering complete")
-			return
-		}
-		p.logger.Debug("ICE candidate gathered", "type", c.Typ.String(), "address", c.Address, "port", c.Port, "protocol", c.Protocol.String())
-		init := c.ToJSON()
-
-		var mLineIndex *int
-		if init.SDPMLineIndex != nil {
-			v := int(*init.SDPMLineIndex)
-			mLineIndex = &v
-		}
-
-		var sdpMid string
-		if init.SDPMid != nil {
-			sdpMid = *init.SDPMid
-		}
-
-		if err := p.signaling.Send(SignalingMessage{
-			Type:           "ice_candidate",
-			TargetDeviceID: p.DeviceID,
-			Candidate:      init.Candidate,
-			SDPMid:         sdpMid,
-			SDPMLineIndex:  mLineIndex,
-		}); err != nil {
-			p.logger.Warn("failed to send ICE candidate", "error", err)
-		}
-	})
+	p.conn.OnICECandidate(p.sendICECandidate)
 
 	p.conn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		p.logger.Info("peer connection state", "state", state.String())
@@ -982,6 +960,60 @@ func (p *Peer) setupHandlers() {
 			p.stateHandler(p, state)
 		}
 	})
+}
+
+// sendICECandidate relays a locally-gathered ICE candidate to the mobile via
+// signaling. It drops candidates once the peer is silenced (SB-1007): on
+// reconnect the old peer is silenced synchronously before the new peer is
+// registered, so its still-gathering connection can no longer emit candidates
+// that would be applied against the new peer's negotiation.
+func (p *Peer) sendICECandidate(c *webrtc.ICECandidate) {
+	if c == nil {
+		p.logger.Debug("ICE gathering complete")
+		return
+	}
+
+	p.mu.Lock()
+	silenced := p.silenced
+	p.mu.Unlock()
+	if silenced {
+		p.logger.Debug("dropping ICE candidate from silenced peer", "mobile", p.DeviceID)
+		return
+	}
+
+	p.logger.Debug("ICE candidate gathered", "type", c.Typ.String(), "address", c.Address, "port", c.Port, "protocol", c.Protocol.String())
+	init := c.ToJSON()
+
+	var mLineIndex *int
+	if init.SDPMLineIndex != nil {
+		v := int(*init.SDPMLineIndex)
+		mLineIndex = &v
+	}
+
+	var sdpMid string
+	if init.SDPMid != nil {
+		sdpMid = *init.SDPMid
+	}
+
+	if err := p.signaling.Send(SignalingMessage{
+		Type:           "ice_candidate",
+		TargetDeviceID: p.DeviceID,
+		Candidate:      init.Candidate,
+		SDPMid:         sdpMid,
+		SDPMLineIndex:  mLineIndex,
+	}); err != nil {
+		p.logger.Warn("failed to send ICE candidate", "error", err)
+	}
+}
+
+// silence stops the peer's OnICECandidate callback from sending further
+// candidates. Distinct from Close()/closed: it is set synchronously during a
+// reconnect so a still-open old peer cannot corrupt the new connection, while
+// the (potentially slow) resource teardown still runs in the background.
+func (p *Peer) silence() {
+	p.mu.Lock()
+	p.silenced = true
+	p.mu.Unlock()
 }
 
 // setupDataChannelHandlers sets up handlers on a DataChannel.

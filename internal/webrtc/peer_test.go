@@ -2030,6 +2030,33 @@ func TestPeer_SendRaw_NoDataChannel(t *testing.T) {
 	}
 }
 
+// TestPeer_SilencedDropsICECandidate verifies the SB-1007 guard: a peer relays
+// ICE candidates normally, but after silence() it drops them so a reconnect's
+// old peer can't corrupt the new connection's negotiation.
+func TestPeer_SilencedDropsICECandidate(t *testing.T) {
+	sender := &mockSender{}
+	p := &Peer{
+		DeviceID:  "mobile-1",
+		logger:    testLogger(),
+		signaling: sender,
+		sendReady: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+	}
+
+	cand := &webrtc.ICECandidate{Foundation: "1", Protocol: webrtc.ICEProtocolUDP, Address: "127.0.0.1", Port: 5000, Typ: webrtc.ICECandidateTypeHost}
+
+	p.sendICECandidate(cand)
+	if got := len(sender.messagesOfType("ice_candidate")); got != 1 {
+		t.Fatalf("before silence: expected 1 ice_candidate, got %d", got)
+	}
+
+	p.silence()
+	p.sendICECandidate(cand)
+	if got := len(sender.messagesOfType("ice_candidate")); got != 1 {
+		t.Fatalf("after silence: expected candidate dropped (still 1), got %d", got)
+	}
+}
+
 func TestPeer_WaitForSendReady_Done(t *testing.T) {
 	done := make(chan struct{})
 	close(done) // simulate closed peer
