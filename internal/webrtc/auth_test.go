@@ -1,0 +1,207 @@
+package webrtc
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/shiftinbits/pmux-agent/internal/protocol"
+)
+
+// authMAC computes the base64 key-possession proof for a raw nonce, mirroring
+// the agent's verifyAuthResponse and the mobile client.
+func authMAC(secret, nonce []byte) string {
+	m := hmac.New(sha256.New, secret)
+	m.Write(nonce)
+	return base64.StdEncoding.EncodeToString(m.Sum(nil))
+}
+
+// authResponseForChallenge builds the base64 MAC response for a base64-encoded
+// challenge nonce (the wire form). Used by the end-to-end handshake tests.
+func authResponseForChallenge(secret []byte, nonceB64 string) string {
+	nonce, _ := base64.StdEncoding.DecodeString(nonceB64)
+	return authMAC(secret, nonce)
+}
+
+// newAuthTestPeer builds a minimal Peer suitable for exercising the auth gate
+// directly (no real PeerConnection). pm is nil, so failAuth closes via p.Close(),
+// which tolerates a nil conn.
+func newAuthTestPeer(nonce []byte) *Peer {
+	return &Peer{
+		DeviceID:     "mobile-auth",
+		logger:       testLogger(),
+		sharedSecret: testSharedSecret,
+		authNonce:    nonce,
+		sendReady:    make(chan struct{}, 1),
+		done:         make(chan struct{}),
+	}
+}
+
+func TestPeer_VerifyAuthResponse_ValidMACAuthenticates(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, nonce),
+	})
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.authenticated {
+		t.Fatal("peer with valid MAC should be authenticated")
+	}
+}
+
+func TestPeer_VerifyAuthResponse_WrongMACDoesNotAuthenticate(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	// MAC computed over the wrong nonce — an attacker without the secret cannot
+	// produce a valid proof.
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, []byte("wrong-nonce-wrong-nonce-wrong-no")),
+	})
+
+	p.mu.Lock()
+	authed := p.authenticated
+	p.mu.Unlock()
+	if authed {
+		t.Fatal("peer with wrong MAC must not be authenticated")
+	}
+}
+
+func TestPeer_VerifyAuthResponse_WrongTypeDoesNotAuthenticate(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	// First message is not an auth_response — must be rejected.
+	p.verifyAuthResponse(&protocol.PingRequest{Type: "ping"})
+
+	p.mu.Lock()
+	authed := p.authenticated
+	p.mu.Unlock()
+	if authed {
+		t.Fatal("peer whose first message is not auth_response must not be authenticated")
+	}
+}
+
+func TestPeer_FailAuthNoOpAfterSuccess(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, nonce),
+	})
+
+	p.mu.Lock()
+	if !p.authenticated || !p.authResolved {
+		p.mu.Unlock()
+		t.Fatal("expected authenticated and resolved after a valid response")
+	}
+	p.mu.Unlock()
+
+	// A late timeout must not tear down a peer that already authenticated.
+	p.failAuth("authentication timeout")
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.authenticated {
+		t.Fatal("failAuth after a successful handshake must be a no-op")
+	}
+}
+
+func TestPeer_VerifySuccessIgnoredAfterFailAuth(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	p := newAuthTestPeer(nonce)
+
+	// The timeout resolves auth first.
+	p.failAuth("authentication timeout")
+
+	// A valid response arriving afterwards must NOT flip authenticated — the
+	// peer is already being torn down.
+	p.verifyAuthResponse(&protocol.AuthResponseRequest{
+		Type: "auth_response",
+		Mac:  authMAC(testSharedSecret, nonce),
+	})
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.authenticated {
+		t.Fatal("a valid response after failAuth must be ignored")
+	}
+}
+
+// TestPeer_FailAuthDoesNotEvictReplacementPeer guards the reconnect-replace race:
+// a stale peer's auth-failure teardown must not close the new peer that already
+// replaced it under the same device ID.
+func TestPeer_FailAuthDoesNotEvictReplacementPeer(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+
+	// The new peer currently tracked under the device ID.
+	peerB := &Peer{DeviceID: "m", logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+	pm.mu.Lock()
+	pm.peers["m"] = peerB
+	pm.mu.Unlock()
+
+	// A stale peer A (same device ID, never inserted) fails auth.
+	peerA := &Peer{DeviceID: "m", pm: pm, logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+	peerA.failAuth("authentication timeout")
+
+	// failAuth closes on a goroutine; wait for it to settle.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pm.mu.Lock()
+		settled := pm.peers["m"] == peerB
+		pm.mu.Unlock()
+		if settled {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.peers["m"] != peerB {
+		t.Fatal("failAuth on a stale peer must not evict the replacement peer")
+	}
+}
+
+// TestPeerManager_RejectsWhenSharedSecretUnavailable verifies the connect-time
+// fail-closed behaviour: if the shared secret cannot be loaded, the agent cannot
+// authenticate the peer, so the connection is rejected before any offer (SB-992).
+func TestPeerManager_RejectsWhenSharedSecretUnavailable(t *testing.T) {
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID("mobile-nosecret")
+	pm.SharedSecretFn = func(string) ([]byte, error) {
+		return nil, fmt.Errorf("secret store unavailable")
+	}
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-nosecret"})
+	time.Sleep(200 * time.Millisecond)
+
+	if pm.PeerCount() != 0 {
+		t.Errorf("expected 0 peers when shared secret is unavailable, got %d", pm.PeerCount())
+	}
+	if len(sender.messagesOfType("sdp_offer")) != 0 {
+		t.Error("no SDP offer should be sent when the peer cannot be authenticated")
+	}
+	rejected := false
+	for _, m := range sender.messagesOfType("connection_rejected") {
+		if m.TargetDeviceID == "mobile-nosecret" {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Error("expected connection_rejected sent to the device")
+	}
+
+	pm.CloseAll()
+}

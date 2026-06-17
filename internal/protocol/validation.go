@@ -31,6 +31,10 @@ const (
 	MinDimension = 1
 	// MaxDimension is the largest allowed terminal dimension.
 	MaxDimension = 500
+	// MaxAuthBlobLength bounds the base64-encoded auth nonce/mac strings. Both
+	// are 32 bytes (HMAC-SHA256) → ~44 base64 chars; 128 gives headroom.
+	// Matches MAX_AUTH_BLOB_LENGTH in @pocketmux/shared (src/codec.ts).
+	MaxAuthBlobLength = 128
 )
 
 // Validatable is implemented by message types that carry fields requiring
@@ -94,6 +98,20 @@ func (m *AttachRequest) Validate() error {
 // Validate enforces bounds on an input request.
 func (m *InputRequest) Validate() error {
 	return validateByteSize("input", "data", len(m.Data), MaxInputSize)
+}
+
+// Validate enforces bounds on an auth-response request. An empty mac is
+// unambiguously malformed (it would also fail the HMAC compare, but reject it
+// here so the contract is complete and the failure is diagnostic).
+//
+// AuthChallengeEvent intentionally has no Validate: it is host→mobile, so the
+// agent only ever *sends* it and never decodes a peer-supplied one. The TS
+// codec validates the nonce on the mobile's decode side.
+func (m *AuthResponseRequest) Validate() error {
+	if len(m.Mac) == 0 {
+		return fmt.Errorf("auth_response: %q must not be empty", "mac")
+	}
+	return validateStringLen("auth_response", "mac", m.Mac, MaxAuthBlobLength)
 }
 
 // Validate enforces bounds on a resize request.

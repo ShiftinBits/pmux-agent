@@ -63,6 +63,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &PingRequest{}
 	case "create_session":
 		msg = &CreateSessionRequest{}
+	case "auth_response":
+		msg = &AuthResponseRequest{}
 
 	// Events (Host → Mobile)
 	case "sessions":
@@ -79,6 +81,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &PaneClosedEvent{}
 	case "session_created":
 		msg = &SessionCreatedEvent{}
+	case "auth_challenge":
+		msg = &AuthChallengeEvent{}
 	case "error":
 		msg = &ErrorEvent{}
 	case "pong":
@@ -105,6 +109,10 @@ func Decode(data []byte) (Message, error) {
 }
 
 // IsRequest returns true if the message is a Mobile → Host request.
+//
+// AuthResponseRequest is intentionally EXCLUDED: it is consumed by the
+// pre-auth handshake gate (see peer.go) and must never be treated as an
+// operational request, so a post-auth replay is dropped. Do not add it here.
 func IsRequest(msg Message) bool {
 	switch msg.(type) {
 	case *ListSessionsRequest, *AttachRequest, *DetachRequest,
@@ -119,7 +127,8 @@ func IsRequest(msg Message) bool {
 func IsEvent(msg Message) bool {
 	switch msg.(type) {
 	case *SessionsEvent, *OutputEvent, *AttachedEvent, *DetachedEvent,
-		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent:
+		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent,
+		*AuthChallengeEvent:
 		return true
 	}
 	return false

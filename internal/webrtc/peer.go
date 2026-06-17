@@ -1,6 +1,10 @@
 package webrtc
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,6 +100,13 @@ type PeerManager struct {
 	// which triggers bridge teardown and pane size restore.
 	OnPeerDisconnect func(deviceID string)
 
+	// SharedSecretFn returns the pairing shared secret (raw bytes) for a device.
+	// Used to verify the connect-time key-possession proof. Wired from the
+	// SecretStore in agent.go. If nil, or it returns an error or an empty
+	// secret, connections are rejected (fail closed) — without the secret the
+	// agent cannot authenticate the peer independently of the signaling server.
+	SharedSecretFn func(deviceID string) ([]byte, error)
+
 	mu               sync.Mutex
 	peers            map[string]*Peer       // keyed by mobile device ID
 	disconnectTimers map[string]*time.Timer // grace timers for disconnected peers
@@ -122,7 +133,28 @@ type Peer struct {
 	remoteDescSet bool                      // true after SetRemoteDescription succeeds
 	iceCandidates []webrtc.ICECandidateInit // buffered candidates received before remote desc
 	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
+
+	// Key-possession proof (SB-992). The peer must prove it holds the pairing
+	// shared secret before any request is processed. Set at creation; auth
+	// state guarded by mu.
+	pm            *PeerManager // back-reference, used to close on auth failure
+	sharedSecret  []byte       // pairing secret; set once at creation, never mutated
+	authenticated bool         // true once the peer proved key possession
+	authResolved  bool         // true once auth concluded (success or failure); makes verify and the timeout mutually exclusive
+	authNonce     []byte       // per-connection challenge nonce sent to the peer
+	authTimer     *time.Timer  // closes the peer if it doesn't authenticate in time
 }
+
+// authChallengeTimeout bounds how long a peer may take to prove key possession
+// after the DataChannel opens. A peer that hasn't authenticated by then is
+// closed so an unauthenticated connection can't hold the single peer slot.
+// 10s is generous: the response is a single HMAC computed and sent over the
+// already-open DataChannel, so a legitimate mobile answers in well under a
+// second even over a TURN relay.
+const authChallengeTimeout = 10 * time.Second
+
+// authNonceSize is the length in bytes of the per-connection challenge nonce.
+const authNonceSize = 32
 
 // SetAllowedDeviceID updates the allowed device ID under the mutex.
 // Safe to call from any goroutine (e.g., SIGUSR2 handler).
@@ -130,6 +162,23 @@ func (pm *PeerManager) SetAllowedDeviceID(id string) {
 	pm.mu.Lock()
 	pm.allowedDeviceID = id
 	pm.mu.Unlock()
+}
+
+// getSharedSecret returns the pairing shared secret for a device, or an error
+// if no source is configured or the secret is missing/empty. Used to fail
+// closed: a connection that cannot be authenticated is rejected.
+func (pm *PeerManager) getSharedSecret(deviceID string) ([]byte, error) {
+	if pm.SharedSecretFn == nil {
+		return nil, fmt.Errorf("no shared secret source configured")
+	}
+	secret, err := pm.SharedSecretFn(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if len(secret) == 0 {
+		return nil, fmt.Errorf("empty shared secret for device %s", deviceID)
+	}
+	return secret, nil
 }
 
 // getAllowedDeviceID returns the allowed device ID under the mutex.
@@ -204,6 +253,29 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 			"goroutines", runtime.NumGoroutine(),
 		)
 	}
+}
+
+// ClosePeerIfCurrent closes a peer only if it is still the peer tracked under
+// deviceID, removing it from the map. If the peer has already been replaced
+// (e.g. a reconnect installed a new peer under the same device ID), it is closed
+// directly without touching the map — so a stale peer's auth-failure teardown
+// can never evict the peer that replaced it. The identity check and map removal
+// happen under a single lock hold to avoid a check-then-act race.
+func (pm *PeerManager) ClosePeerIfCurrent(deviceID string, peer *Peer) {
+	pm.mu.Lock()
+	if pm.peers[deviceID] != peer {
+		pm.mu.Unlock()
+		peer.Close()
+		return
+	}
+	delete(pm.peers, deviceID)
+	if timer, ok := pm.disconnectTimers[deviceID]; ok {
+		timer.Stop()
+		delete(pm.disconnectTimers, deviceID)
+	}
+	delete(pm.disconnectTimes, deviceID)
+	pm.mu.Unlock()
+	peer.Close()
 }
 
 // CloseAll closes all peer connections and waits for background cleanup
@@ -323,6 +395,23 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		return
 	}
 
+	// Load the pairing shared secret used to verify the connect-time
+	// key-possession proof. Fail closed if it is unavailable — without it the
+	// agent cannot authenticate the peer independently of the signaling server.
+	sharedSecret, ssErr := pm.getSharedSecret(mobileDeviceID)
+	if ssErr != nil {
+		pm.logger.Warn("connection rejected: shared secret unavailable",
+			"mobile", mobileDeviceID, "error", ssErr)
+		if err := pm.signaling.Send(SignalingMessage{
+			Type:           "connection_rejected",
+			Reason:         "not_paired",
+			TargetDeviceID: mobileDeviceID,
+		}); err != nil {
+			pm.logger.Warn("failed to send rejection", "error", err)
+		}
+		return
+	}
+
 	// Check connection limit (don't count the requesting device — they may be reconnecting)
 	pm.mu.Lock()
 	currentCount := len(pm.peers)
@@ -432,6 +521,8 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		sendReady:    make(chan struct{}, 1),
 		done:         make(chan struct{}),
 		forceRelay:   pm.ForceRelay,
+		pm:           pm,
+		sharedSecret: sharedSecret,
 	}
 
 	pm.mu.Lock()
@@ -752,6 +843,13 @@ func (pm *PeerManager) onDisconnectTimerFired(deviceID string) {
 // attemptICERestart creates a new SDP offer with the ICE restart flag and sends
 // it to the mobile via signaling. If any step fails, the peer is closed and the
 // mobile will need to perform a full reconnect.
+//
+// Note (SB-992): an ICE restart reuses the existing Peer, DTLS session, and
+// DataChannel — dc.OnOpen does NOT re-fire — so the key-possession handshake is
+// intentionally NOT re-run and p.authenticated is left true. The DTLS session
+// (already bound to the authenticated peer) is preserved across the restart. Do
+// not reset the auth flag here; a brand-new connection arrives as a separate
+// connect_request that builds a fresh Peer and runs the full handshake.
 func (pm *PeerManager) attemptICERestart(deviceID string) {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
@@ -905,6 +1003,9 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 
 	dc.OnOpen(func() {
 		p.logger.Info("DataChannel opened", "label", dc.Label())
+		// Challenge the peer to prove it possesses the pairing shared secret
+		// before any request is processed (SB-992).
+		p.sendAuthChallenge()
 	})
 
 	dc.OnClose(func() {
@@ -926,7 +1027,21 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 			return
 		}
 
-		// Only accept request-direction messages from mobile.
+		// Key-possession gate (SB-992): until the peer proves it holds the
+		// pairing shared secret, the only message accepted is the auth
+		// response. This authenticates the peer independently of the
+		// (untrusted) signaling server.
+		p.mu.Lock()
+		authed := p.authenticated
+		p.mu.Unlock()
+		if !authed {
+			p.verifyAuthResponse(decoded)
+			return
+		}
+
+		// Only accept request-direction messages from mobile. (auth_response
+		// is deliberately excluded from IsRequest, so a post-auth replay is
+		// dropped here.)
 		if !protocol.IsRequest(decoded) {
 			p.logger.Debug("ignoring non-request message from mobile",
 				"type", decoded.MessageType(), "device", p.DeviceID)
@@ -937,6 +1052,119 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 			p.handler(p.DeviceID, decoded)
 		}
 	})
+}
+
+// sendAuthChallenge generates a random nonce, sends it to the peer as an
+// auth_challenge, and arms a deadline that closes the connection if the peer
+// fails to prove key possession in time.
+func (p *Peer) sendAuthChallenge() {
+	nonce := make([]byte, authNonceSize)
+	if _, err := rand.Read(nonce); err != nil {
+		p.logger.Error("failed to generate auth nonce", "error", err)
+		p.failAuth("nonce generation failed")
+		return
+	}
+
+	p.mu.Lock()
+	p.authNonce = nonce
+	// failAuth is a no-op once auth has resolved, so the timer never tears down
+	// a peer that authenticated in the meantime.
+	p.authTimer = time.AfterFunc(authChallengeTimeout, func() {
+		p.failAuth("authentication timeout")
+	})
+	p.mu.Unlock()
+
+	challenge := &protocol.AuthChallengeEvent{Type: "auth_challenge", Nonce: base64.StdEncoding.EncodeToString(nonce)}
+	if err := p.SendMessage(challenge); err != nil {
+		p.logger.Warn("failed to send auth challenge", "error", err)
+		p.failAuth("challenge send failed")
+	}
+}
+
+// verifyAuthResponse checks the peer's first DataChannel message proves
+// possession of the pairing shared secret (mac == HMAC-SHA256(secret, nonce)).
+// On success the peer is marked authenticated; on any failure it is closed.
+func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
+	resp, ok := decoded.(*protocol.AuthResponseRequest)
+	if !ok {
+		p.failAuth(fmt.Sprintf("expected auth_response, got %s", decoded.MessageType()))
+		return
+	}
+
+	gotMAC, err := base64.StdEncoding.DecodeString(resp.Mac)
+	if err != nil {
+		p.failAuth("auth response MAC not valid base64")
+		return
+	}
+
+	// Capture both nonce and secret under the lock. sharedSecret is set once at
+	// creation, but reading it here under mu keeps the race detector satisfied
+	// (the write happened on a different goroutine).
+	p.mu.Lock()
+	nonce := p.authNonce
+	secret := p.sharedSecret
+	p.mu.Unlock()
+
+	// Defensive: a response must never arrive before the challenge nonce is set
+	// (Pion delivers OnOpen before OnMessage). Reject rather than hash a nil
+	// nonce, which would otherwise produce a misleading "MAC mismatch" log.
+	if len(nonce) == 0 {
+		p.failAuth("auth response received before challenge nonce was set")
+		return
+	}
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(nonce)
+	if !hmac.Equal(mac.Sum(nil), gotMAC) {
+		p.failAuth("auth response MAC mismatch")
+		return
+	}
+
+	// Commit the successful handshake, unless auth already resolved (e.g. the
+	// timeout fired first and is tearing the peer down). authResolved makes
+	// verify-success and the timeout mutually exclusive.
+	p.mu.Lock()
+	if p.authResolved {
+		p.mu.Unlock()
+		return
+	}
+	p.authResolved = true
+	p.authenticated = true
+	p.authNonce = nil // no longer needed; drop it to shrink the memory-forensics surface
+	if p.authTimer != nil {
+		p.authTimer.Stop()
+		p.authTimer = nil
+	}
+	p.mu.Unlock()
+	p.logger.Info("peer authenticated: key possession proven", "mobile", p.DeviceID)
+}
+
+// failAuth tears down a peer that failed the key-possession proof. It is a
+// no-op if auth already resolved (a successful verify or an earlier failure),
+// so it is safe to call from the timeout, the verify path, and the challenge
+// sender. The close runs on its own goroutine because callers may be inside a
+// Pion DataChannel callback, where a synchronous PeerConnection Close() can block.
+func (p *Peer) failAuth(reason string) {
+	p.mu.Lock()
+	if p.authResolved {
+		p.mu.Unlock()
+		return
+	}
+	p.authResolved = true
+	if p.authTimer != nil {
+		p.authTimer.Stop()
+		p.authTimer = nil
+	}
+	p.mu.Unlock()
+
+	p.logger.Warn("closing peer: authentication failed", "reason", reason, "mobile", p.DeviceID)
+	if p.pm != nil {
+		// ClosePeerIfCurrent (not ClosePeer): if a reconnect has already replaced
+		// us under this device ID, we must not evict the new peer.
+		go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
+	} else {
+		go p.Close()
+	}
 }
 
 // logDTLSInfo logs DTLS transport stats (cipher suite, state, certificate IDs) when the
@@ -1087,6 +1315,11 @@ func (p *Peer) Close() {
 	}
 	p.closed = true
 	close(p.done) // unblock any waiting senders immediately
+
+	if p.authTimer != nil {
+		p.authTimer.Stop()
+		p.authTimer = nil
+	}
 
 	if p.dc != nil {
 		p.dc.Close()

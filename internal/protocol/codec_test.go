@@ -184,12 +184,56 @@ func TestRoundTripCreateSession(t *testing.T) {
 	}
 }
 
+func TestRoundTripAuthResponse(t *testing.T) {
+	msg := &AuthResponseRequest{Type: "auth_response", Mac: "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*AuthResponseRequest)
+	if !ok {
+		t.Fatalf("expected *AuthResponseRequest, got %T", decoded)
+	}
+	if got.Mac != msg.Mac {
+		t.Errorf("mac = %q, want %q", got.Mac, msg.Mac)
+	}
+}
+
+func TestRoundTripAuthChallenge(t *testing.T) {
+	msg := &AuthChallengeEvent{Type: "auth_challenge", Nonce: "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo="}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*AuthChallengeEvent)
+	if !ok {
+		t.Fatalf("expected *AuthChallengeEvent, got %T", decoded)
+	}
+	if got.Nonce != msg.Nonce {
+		t.Errorf("nonce = %q, want %q", got.Nonce, msg.Nonce)
+	}
+}
+
+func TestAuthResponseValidateRejectsEmptyMac(t *testing.T) {
+	if err := (&AuthResponseRequest{Type: "auth_response", Mac: ""}).Validate(); err == nil {
+		t.Error("expected validation error for empty mac")
+	}
+}
+
 func TestRoundTripSessionCreated(t *testing.T) {
 	msg := &SessionCreatedEvent{
 		Type: "session_created",
 		Session: TmuxSession{
-			ID:   "$5",
-			Name: "3",
+			ID:        "$5",
+			Name:      "3",
 			CreatedAt: 1708700500,
 			Windows: []TmuxWindow{
 				{
@@ -210,7 +254,7 @@ func TestRoundTripSessionCreated(t *testing.T) {
 				},
 			},
 			LastActivityAt: 1708700500,
-			Attached:     false,
+			Attached:       false,
 		},
 	}
 	data, err := Encode(msg)
@@ -243,8 +287,8 @@ func TestRoundTripSessions(t *testing.T) {
 		Type: "sessions",
 		Sessions: []TmuxSession{
 			{
-				ID:      "$1",
-				Name:    "dev",
+				ID:        "$1",
+				Name:      "dev",
 				CreatedAt: 1708700000,
 				Windows: []TmuxWindow{
 					{
@@ -265,7 +309,7 @@ func TestRoundTripSessions(t *testing.T) {
 					},
 				},
 				LastActivityAt: 1708700100,
-				Attached:     false,
+				Attached:       false,
 			},
 		},
 	}
@@ -555,6 +599,7 @@ func TestIsEvent(t *testing.T) {
 		&ErrorEvent{Type: "error"},
 		&PongEvent{Type: "pong"},
 		&SessionCreatedEvent{Type: "session_created"},
+		&AuthChallengeEvent{Type: "auth_challenge"},
 	}
 	for _, msg := range events {
 		if !IsEvent(msg) {
@@ -563,6 +608,19 @@ func TestIsEvent(t *testing.T) {
 		if IsRequest(msg) {
 			t.Errorf("IsRequest(%T) = true, want false", msg)
 		}
+	}
+}
+
+// TestAuthResponseUnclassified asserts auth_response is in NEITHER IsRequest nor
+// IsEvent. It is consumed only by the pre-auth handshake gate, so a post-auth
+// replay must be dropped — guarding the deliberate omission from IsRequest.
+func TestAuthResponseUnclassified(t *testing.T) {
+	msg := &AuthResponseRequest{Type: "auth_response", Mac: "AAAA"}
+	if IsRequest(msg) {
+		t.Error("IsRequest(auth_response) = true, want false")
+	}
+	if IsEvent(msg) {
+		t.Error("IsEvent(auth_response) = true, want false")
 	}
 }
 
@@ -611,19 +669,19 @@ func fixturesDir() string {
 // fixtureJSON represents the JSON companion file for a fixture.
 // The "data" field for binary messages is an array of integers.
 type fixtureJSON struct {
-	Type           string        `json:"type"`
-	PaneID         string        `json:"paneId,omitempty"`
-	Cols           *int          `json:"cols,omitempty"`
-	Rows           *int          `json:"rows,omitempty"`
-	Reattach       *bool         `json:"reattach,omitempty"`
-	Data           []int         `json:"data,omitempty"`
-	Name           *string       `json:"name,omitempty"`
-	Command        *string       `json:"command,omitempty"`
-	Session        json.RawMessage `json:"session,omitempty"`
-	Sessions       []interface{} `json:"sessions,omitempty"`
-	Code           string        `json:"code,omitempty"`
-	Message        string        `json:"message,omitempty"`
-	Latency        *int          `json:"latency,omitempty"`
+	Type     string          `json:"type"`
+	PaneID   string          `json:"paneId,omitempty"`
+	Cols     *int            `json:"cols,omitempty"`
+	Rows     *int            `json:"rows,omitempty"`
+	Reattach *bool           `json:"reattach,omitempty"`
+	Data     []int           `json:"data,omitempty"`
+	Name     *string         `json:"name,omitempty"`
+	Command  *string         `json:"command,omitempty"`
+	Session  json.RawMessage `json:"session,omitempty"`
+	Sessions []interface{}   `json:"sessions,omitempty"`
+	Code     string          `json:"code,omitempty"`
+	Message  string          `json:"message,omitempty"`
+	Latency  *int            `json:"latency,omitempty"`
 }
 
 func TestCrossLanguageFixtures(t *testing.T) {
@@ -783,8 +841,8 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 		Type: "sessions",
 		Sessions: []TmuxSession{
 			{
-				ID:      "$0",
-				Name:    "work",
+				ID:        "$0",
+				Name:      "work",
 				CreatedAt: 1708700000,
 				Windows: []TmuxWindow{
 					{
@@ -805,11 +863,11 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 					},
 				},
 				LastActivityAt: 1708700100,
-				Attached:     false,
+				Attached:       false,
 			},
 			{
-				ID:      "$1",
-				Name:    "shell",
+				ID:        "$1",
+				Name:      "shell",
 				CreatedAt: 1708700200,
 				Windows: []TmuxWindow{
 					{
@@ -830,7 +888,7 @@ func TestGoEncodedSessionsHasMapKeys(t *testing.T) {
 					},
 				},
 				LastActivityAt: 1708700300,
-				Attached:     true,
+				Attached:       true,
 			},
 		},
 	}

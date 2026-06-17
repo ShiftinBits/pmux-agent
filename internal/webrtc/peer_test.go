@@ -46,6 +46,19 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// testSharedSecret is a fixed 32-byte pairing secret. testSharedSecretFn wires
+// it into a PeerManager so handleConnectRequest can authenticate peers (SB-992);
+// the full challenge/response handshake is exercised separately in auth_test.go.
+var testSharedSecret = func() []byte {
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = 0x42
+	}
+	return b
+}()
+
+func testSharedSecretFn(string) ([]byte, error) { return testSharedSecret, nil }
+
 // getPeer retrieves a peer from the PeerManager by device ID (test helper).
 func getPeer(pm *PeerManager, deviceID string) *Peer {
 	pm.mu.Lock()
@@ -93,6 +106,7 @@ func TestPeerManager_HandleConnectRequest(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-1")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-1",
@@ -132,6 +146,7 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-2")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-2",
@@ -206,6 +221,7 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-dc")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-dc",
@@ -226,6 +242,19 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 
 	dcOpened := make(chan *webrtc.DataChannel, 1)
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
+		// Answer the agent's key-possession challenge (SB-992) so the agent
+		// authenticates this peer and starts processing requests.
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			decoded, err := protocol.Decode(msg.Data)
+			if err != nil {
+				return
+			}
+			if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
+				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
+				data, _ := protocol.Encode(resp)
+				dc.Send(data)
+			}
+		})
 		dc.OnOpen(func() {
 			dcOpened <- dc
 		})
@@ -312,6 +341,10 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 			t.Errorf("DataChannel label = %q, want %q", dc.Label(), DataChannelLabel)
 		}
 
+		// Allow the challenge/response handshake to complete before sending a
+		// request — pre-auth requests are dropped by the agent.
+		time.Sleep(300 * time.Millisecond)
+
 		// Send a ping message over the DataChannel
 		pingMsg := &protocol.PingRequest{Type: "ping"}
 		data, _ := protocol.Encode(pingMsg)
@@ -348,6 +381,7 @@ func TestPeerManager_ClosePeer(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-close")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-close",
@@ -380,6 +414,7 @@ func TestPeerManager_CloseAllClearsAllPeers(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.SetAllowedDeviceID("m1")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	// Connect a single peer and verify CloseAll removes it
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
@@ -412,6 +447,7 @@ func TestPeerManager_NoTurnWithCustomAPI(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-noturn")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-noturn",
@@ -500,6 +536,7 @@ func TestPeerManager_Reconnect(t *testing.T) {
 	pm := NewPeerManager(logger, sender, turnServer.URL, func() string { return "test-jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.SetAllowedDeviceID("mobile-re")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	// First connection
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-re"})
@@ -545,6 +582,7 @@ func TestPeerManager_MaxConnectionLimit(t *testing.T) {
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
 	pm.SetAllowedDeviceID("m1")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	// Connect the paired peer (should succeed)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
@@ -586,6 +624,7 @@ func TestPeerManager_RejectsUnpairedDevice(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.SetAllowedDeviceID("paired-device-123")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	// Attempt connection from a different (unpaired) device
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "rogue-device-456"})
@@ -659,6 +698,7 @@ func TestPeerManager_ReconnectDoesNotExceedLimit(t *testing.T) {
 	pm.API = fastAPI(t)
 	pm.MaxPeers = 1
 	pm.SetAllowedDeviceID("m1")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	// Fill to capacity (single device)
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "m1"})
@@ -700,6 +740,7 @@ func TestPeerManager_DataChannelOrdered(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-ordered")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-ordered",
@@ -789,6 +830,7 @@ func TestPeerManager_DTLSNotDisabled(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-dtls")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-dtls",
@@ -849,6 +891,7 @@ func TestPeerManager_ForceRelay(t *testing.T) {
 	pm.API = api
 	pm.ForceRelay = true
 	pm.SetAllowedDeviceID("mobile-relay")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
@@ -885,6 +928,7 @@ func TestPeerManager_DisconnectedStartsGraceTimer(t *testing.T) {
 
 	// Create a peer via connect_request
 	pm.SetAllowedDeviceID("mobile-disc")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-disc"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -913,6 +957,7 @@ func TestPeerManager_ConnectedDuringGraceCancelsTimer(t *testing.T) {
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 	pm.API = fastAPI(t)
 	pm.SetAllowedDeviceID("mobile-recover")
+	pm.SharedSecretFn = testSharedSecretFn
 
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-recover"})
 	time.Sleep(500 * time.Millisecond)
@@ -953,6 +998,7 @@ func TestPeerManager_FailedClosesPeerImmediately(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-fail")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-fail"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -979,6 +1025,7 @@ func TestPeerManager_DisconnectTimerFiresICERestart(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-ice")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-ice"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1018,6 +1065,7 @@ func TestPeerManager_ICERestartSendsOffer(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-iceoff")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-iceoff"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1088,6 +1136,7 @@ func TestPeerManager_CloseAllCancelsDisconnectTimers(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-t1")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-t1"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1127,6 +1176,7 @@ func TestPeerManager_PeerStates(t *testing.T) {
 
 	// Add a peer
 	pm.SetAllowedDeviceID("mobile-ps")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-ps"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1160,6 +1210,7 @@ func TestPeerManager_ClosePeerCancelsDisconnectTimer(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-cpt")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-cpt"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -1201,6 +1252,7 @@ func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
 
 	// Connect a peer
 	pm.SetAllowedDeviceID("mobile-fail")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-fail",
@@ -1242,6 +1294,7 @@ func TestPeerManager_ICECandidateBuffering(t *testing.T) {
 
 	// 1. Send connect_request to create a peer (and generate an SDP offer).
 	pm.SetAllowedDeviceID(deviceID)
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: deviceID,
@@ -1340,6 +1393,7 @@ func TestPeer_BackpressureCallbackRegistered(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-bp")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-bp",
@@ -1391,6 +1445,7 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-send")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-send",
@@ -1411,6 +1466,17 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			// Answer the key-possession challenge (SB-992) and keep it out of the
+			// received stream; raw SendRaw payloads aren't valid protocol messages
+			// so they fall through to the channel.
+			if decoded, err := protocol.Decode(msg.Data); err == nil {
+				if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
+					resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
+					out, _ := protocol.Encode(resp)
+					dc.Send(out)
+					return
+				}
+			}
 			data := make([]byte, len(msg.Data))
 			copy(data, msg.Data)
 			received <- data
@@ -1577,6 +1643,7 @@ func TestPeer_CloseUnblocksWaitingBackpressure(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-close-bp")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-close-bp",
@@ -1661,6 +1728,7 @@ func TestWaitForSendReady_DoneChannel(t *testing.T) {
 	pm.API = api
 
 	pm.SetAllowedDeviceID("mobile-done")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{
 		Type:           "connect_request",
 		TargetDeviceID: "mobile-done",
@@ -1780,6 +1848,7 @@ func TestOnDisconnectTimerFired_PeerRecovered(t *testing.T) {
 	pm.API = fastAPI(t)
 
 	pm.SetAllowedDeviceID("mobile-recovered")
+	pm.SharedSecretFn = testSharedSecretFn
 	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-recovered"})
 	time.Sleep(500 * time.Millisecond)
 
@@ -2013,6 +2082,7 @@ func TestPeerManager_AllowedDeviceID(t *testing.T) {
 	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
 
 	pm.SetAllowedDeviceID("device-1")
+	pm.SharedSecretFn = testSharedSecretFn
 	if got := pm.AllowedDeviceID(); got != "device-1" {
 		t.Errorf("AllowedDeviceID() = %q, want device-1", got)
 	}

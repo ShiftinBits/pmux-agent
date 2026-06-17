@@ -76,6 +76,18 @@ type CreateSessionRequest struct {
 
 func (m *CreateSessionRequest) MessageType() string { return "create_session" }
 
+// AuthResponseRequest proves the connecting peer possesses the pairing shared
+// secret. Mac is HMAC-SHA256(sharedSecret, challenge nonce). It is sent as the
+// first DataChannel message in reply to an AuthChallengeEvent; the host rejects
+// the connection if it is missing, malformed, or fails verification. This
+// authenticates the peer independently of the (untrusted) signaling server.
+type AuthResponseRequest struct {
+	Type string `msgpack:"type"`
+	Mac  string `msgpack:"mac"` // base64-encoded HMAC-SHA256(sharedSecret, nonce)
+}
+
+func (m *AuthResponseRequest) MessageType() string { return "auth_response" }
+
 // --- Host → Mobile (Events) ---
 
 // SessionsEvent returns the full session tree.
@@ -154,6 +166,17 @@ type SessionCreatedEvent struct {
 }
 
 func (m *SessionCreatedEvent) MessageType() string { return "session_created" }
+
+// AuthChallengeEvent carries a per-connection random nonce the host sends as the
+// first DataChannel message. The mobile must reply with an AuthResponseRequest
+// carrying HMAC-SHA256(sharedSecret, nonce). The random nonce binds the proof to
+// this connection, preventing replay of a captured response across sessions.
+type AuthChallengeEvent struct {
+	Type  string `msgpack:"type"`
+	Nonce string `msgpack:"nonce"` // base64-encoded per-connection random nonce
+}
+
+func (m *AuthChallengeEvent) MessageType() string { return "auth_challenge" }
 
 // --- tmux Data Types ---
 
