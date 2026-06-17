@@ -22,8 +22,22 @@ func TestInitiatePairing(t *testing.T) {
 		t.Fatalf("GenerateIdentity() error: %v", err)
 	}
 
+	const testNonce = "pair-nonce-xyz789"
+
+	// pairHandler wraps a /auth/pair/initiate handler, serving nonces at /auth/challenge.
+	pairHandler := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth/challenge" && r.Method == "POST" {
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"nonce":"` + testNonce + `"}`))
+				return
+			}
+			h(w, r)
+		}
+	}
+
 	t.Run("successful initiation", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/auth/pair/initiate" {
 				t.Errorf("unexpected path: %s", r.URL.Path)
 			}
@@ -32,11 +46,11 @@ func TestInitiatePairing(t *testing.T) {
 			}
 
 			var body struct {
-				DeviceID     string `json:"deviceId"`
+				DeviceID         string `json:"deviceId"`
 				Ed25519PublicKey string `json:"ed25519PublicKey"`
-				X25519PubKey string `json:"x25519PublicKey"`
-				Timestamp    string `json:"timestamp"`
-				Signature    string `json:"signature"`
+				X25519PubKey     string `json:"x25519PublicKey"`
+				Nonce            string `json:"nonce"`
+				Signature        string `json:"signature"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode request body: %v", err)
@@ -50,14 +64,14 @@ func TestInitiatePairing(t *testing.T) {
 			if body.X25519PubKey == "" {
 				t.Error("x25519PublicKey is empty")
 			}
-			if body.Timestamp == "" {
-				t.Error("timestamp is empty")
+			if body.Nonce != testNonce {
+				t.Errorf("nonce = %q, want %q", body.Nonce, testNonce)
 			}
 			if body.Signature == "" {
 				t.Error("signature is empty")
 			}
 
-			// Verify the signature is correct
+			// Verify the signature is over deviceID + "|" + nonce
 			pubKeyBytes, err := base64.StdEncoding.DecodeString(body.Ed25519PublicKey)
 			if err != nil {
 				t.Fatalf("decode publicKey: %v", err)
@@ -66,7 +80,7 @@ func TestInitiatePairing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode signature: %v", err)
 			}
-			message := []byte(body.DeviceID + body.Timestamp)
+			message := []byte(body.DeviceID + "|" + body.Nonce)
 			if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), message, sigBytes) {
 				t.Error("signature verification failed")
 			}
@@ -85,8 +99,29 @@ func TestInitiatePairing(t *testing.T) {
 		}
 	})
 
-	t.Run("server returns error", func(t *testing.T) {
+	t.Run("challenge fetch error propagates", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth/challenge" {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"internal error"}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"pairingCode":"ABC123"}`))
+		}))
+		defer server.Close()
+
+		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "server error (500)") {
+			t.Errorf("error = %q, want substring %q", err.Error(), "server error (500)")
+		}
+	})
+
+	t.Run("server returns error on pair initiate", func(t *testing.T) {
+		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(`{"error":"Missing required fields"}`))
 		}))
@@ -102,7 +137,7 @@ func TestInitiatePairing(t *testing.T) {
 	})
 
 	t.Run("server returns empty pairing code", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"pairingCode":""}`))
 		}))
@@ -118,7 +153,7 @@ func TestInitiatePairing(t *testing.T) {
 	})
 
 	t.Run("oversized response body is truncated", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			// Send a response body larger than 64KB — the LimitReader should truncate it,
 			// causing JSON unmarshal to fail (incomplete JSON).

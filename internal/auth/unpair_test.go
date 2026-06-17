@@ -17,6 +17,9 @@ func TestDeletePairing_Success(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/auth/challenge" && r.Method == "POST":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
@@ -48,6 +51,9 @@ func TestDeletePairing_ServerError(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/auth/challenge":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/auth/token":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
@@ -102,6 +108,9 @@ func TestDeleteDevice_Success(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/auth/challenge" && r.Method == "POST":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
@@ -133,6 +142,9 @@ func TestDeleteDevice_ServerError(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/auth/challenge":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/auth/token":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))

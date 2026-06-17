@@ -36,6 +36,11 @@ func testSetup(t *testing.T) (*auth.Identity, *slog.Logger) {
 func mockTokenServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt-token"}`))
@@ -51,6 +56,11 @@ func mockWSServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Se
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt-token"}`))
@@ -597,6 +607,11 @@ func TestTokenRefreshLoop_RefreshesToken(t *testing.T) {
 	// Build a custom server that counts /auth/token calls and keeps WS alive.
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			tokenCallCount.Add(1)
 			w.WriteHeader(http.StatusOK)
@@ -664,6 +679,11 @@ func TestTokenRefreshLoop_ServerError(t *testing.T) {
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			count := tokenCallCount.Add(1)
 			// First call succeeds so the client can connect; subsequent calls fail.
@@ -740,6 +760,11 @@ func TestReconnect_IncreasesBackoff(t *testing.T) {
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt-token"}`))

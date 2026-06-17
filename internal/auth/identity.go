@@ -131,10 +131,10 @@ func HasIdentity(keysDir string, store SecretStore) bool {
 	return !errors.Is(err, ErrSecretNotFound) && err == nil
 }
 
-// SignChallenge signs the token exchange challenge: deviceId + timestamp.
+// SignChallenge signs the token exchange challenge: deviceId + "|" + nonce.
 // Returns the base64-encoded signature.
-func (id *Identity) SignChallenge(deviceID string, timestamp string) string {
-	message := []byte(deviceID + timestamp)
+func (id *Identity) SignChallenge(deviceID string, nonce string) string {
+	message := []byte(deviceID + "|" + nonce)
 	sig := ed25519.Sign(id.PrivateKey, message)
 	return base64.StdEncoding.EncodeToString(sig)
 }

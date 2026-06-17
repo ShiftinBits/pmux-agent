@@ -49,6 +49,11 @@ func mockWSServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Se
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/challenge" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`)) //nolint:errcheck
+			return
+		}
 		if r.URL.Path == "/auth/token" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt-token"}`)) //nolint:errcheck
