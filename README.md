@@ -32,7 +32,7 @@ Pre-built binaries and DEB/RPM/Snap packages are available on [GitHub Releases](
 ## Getting Started
 
 ```bash
-pmux init     # generate identity, install service
+pmux init     # generate identity and configure the agent
 pmux pair     # scan the QR code with the Pocketmux app
 pmux          # start a session — it's now on your phone
 ```
