@@ -160,6 +160,9 @@ func TestRunUnpair_NotifiesServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Paths are /v1/... because APIVersion defaults to "v1".
 		switch {
+		case r.URL.Path == "/v1/auth/challenge" && r.Method == "POST":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))
@@ -218,6 +221,9 @@ func TestRunUnpair_ServerFailureContinues(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Paths are /v1/... because APIVersion defaults to "v1".
 		switch {
+		case r.URL.Path == "/v1/auth/challenge" && r.Method == "POST":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"nonce":"test-nonce"}`))
 		case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"token":"test-jwt"}`))

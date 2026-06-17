@@ -208,8 +208,8 @@ func TestSignChallenge(t *testing.T) {
 	}
 
 	deviceID := id.DeviceID
-	timestamp := "1700000000"
-	sig := id.SignChallenge(deviceID, timestamp)
+	nonce := "abc123nonce"
+	sig := id.SignChallenge(deviceID, nonce)
 
 	t.Run("returns base64-encoded signature", func(t *testing.T) {
 		sigBytes, err := base64.StdEncoding.DecodeString(sig)
@@ -221,9 +221,9 @@ func TestSignChallenge(t *testing.T) {
 		}
 	})
 
-	t.Run("signature verifies with public key", func(t *testing.T) {
+	t.Run("signature verifies with public key over deviceID|nonce", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
-		message := []byte(deviceID + timestamp)
+		message := []byte(deviceID + "|" + nonce)
 		if !ed25519.Verify(id.Ed25519PublicKey, message, sigBytes) {
 			t.Error("signature verification failed")
 		}
@@ -231,16 +231,16 @@ func TestSignChallenge(t *testing.T) {
 
 	t.Run("signature fails with wrong message", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
-		wrongMessage := []byte("wrong-device-id" + timestamp)
+		wrongMessage := []byte("wrong-device-id" + "|" + nonce)
 		if ed25519.Verify(id.Ed25519PublicKey, wrongMessage, sigBytes) {
 			t.Error("signature should not verify with wrong message")
 		}
 	})
 
-	t.Run("different timestamps produce different signatures", func(t *testing.T) {
-		sig2 := id.SignChallenge(deviceID, "1700000001")
+	t.Run("different nonces produce different signatures", func(t *testing.T) {
+		sig2 := id.SignChallenge(deviceID, "differentnonce")
 		if sig == sig2 {
-			t.Error("different timestamps should produce different signatures")
+			t.Error("different nonces should produce different signatures")
 		}
 	})
 }
