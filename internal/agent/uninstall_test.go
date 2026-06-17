@@ -24,10 +24,9 @@ func TestRunUninstall_UserCancels(t *testing.T) {
 	dir := t.TempDir()
 	paths := testUninstallPaths(dir)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("n\n"), &buf)
+	err := RunUninstall(paths, store, false, "", false, strings.NewReader("n\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -47,10 +46,9 @@ func TestRunUninstall_EOF(t *testing.T) {
 	dir := t.TempDir()
 	paths := testUninstallPaths(dir)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader(""), &buf)
+	err := RunUninstall(paths, store, false, "", false, strings.NewReader(""), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -79,10 +77,8 @@ func TestRunUninstall_FullUninstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := &mockServiceManager{installed: true}
-
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, false, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -91,9 +87,6 @@ func TestRunUninstall_FullUninstall(t *testing.T) {
 
 	if !strings.Contains(output, "Agent process stopped.") {
 		t.Errorf("expected agent stop message, got: %s", output)
-	}
-	if !strings.Contains(output, "Agent service uninstalled.") {
-		t.Errorf("expected service uninstall message, got: %s", output)
 	}
 	if !strings.Contains(output, "Config directory removed") {
 		t.Errorf("expected config removal message, got: %s", output)
@@ -128,10 +121,8 @@ func TestRunUninstall_KeepConfig(t *testing.T) {
 	store := auth.NewMemorySecretStore()
 	_ = store.Set(auth.SecretKeyEd25519Private, []byte("fake-key-data"))
 
-	mgr := &mockServiceManager{installed: true}
-
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, true, "", false, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, true, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -165,10 +156,9 @@ func TestRunUninstall_NoIdentity(t *testing.T) {
 
 	// No keys dir or identity — should skip server call gracefully
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, false, "", false, strings.NewReader("y\n"), &buf)
+	err := RunUninstall(paths, store, false, "", false, strings.NewReader("y\n"), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -186,11 +176,10 @@ func TestRunUninstall_YesFlag_SkipsPrompt(t *testing.T) {
 	dir := t.TempDir()
 	paths := testUninstallPaths(dir)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	var buf bytes.Buffer
 	// Empty reader — would block if it tried to read
-	err := RunUninstall(paths, store, mgr, false, "", true, strings.NewReader(""), &buf)
+	err := RunUninstall(paths, store, false, "", true, strings.NewReader(""), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}
@@ -220,10 +209,9 @@ func TestRunUninstall_YesFlag_WithKeepConfig(t *testing.T) {
 
 	store := auth.NewMemorySecretStore()
 	_ = store.Set(auth.SecretKeyEd25519Private, []byte("fake-key-data"))
-	mgr := &mockServiceManager{installed: true}
 
 	var buf bytes.Buffer
-	err := RunUninstall(paths, store, mgr, true, "", true, strings.NewReader(""), &buf)
+	err := RunUninstall(paths, store, true, "", true, strings.NewReader(""), &buf)
 	if err != nil {
 		t.Fatalf("RunUninstall: %v", err)
 	}

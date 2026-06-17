@@ -17,7 +17,6 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"github.com/shiftinbits/pmux-agent/internal/firewall"
 	"github.com/shiftinbits/pmux-agent/internal/proxy"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 	"github.com/shiftinbits/pmux-agent/internal/update"
 )
@@ -126,10 +125,7 @@ func ensureAgent(cfg config.Config) {
 		return
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.EnsureRunning(paths, store, mgr); err != nil {
+	if err := agent.EnsureRunning(paths, store); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to start agent: %v\n", err)
 	}
 }
@@ -196,8 +192,8 @@ func runAgent(cpuProfile, memProfile string) {
 	}
 
 	if agentErr != nil && !errors.Is(agentErr, context.Canceled) {
-		// Fatal initialization errors should not trigger service restart.
-		// These won't self-resolve, so exit 0 to prevent restart loops.
+		// Fatal initialization errors won't self-resolve on a fresh spawn,
+		// so exit 0 to avoid being treated as a retryable failure.
 		if agent.IsFatalInitError(agentErr) {
 			fmt.Fprintf(os.Stderr, "fatal: %v\n", agentErr)
 			agent.RemovePIDFile(agent.PIDFilePath(paths))
@@ -211,7 +207,7 @@ func runAgent(cpuProfile, memProfile string) {
 			agent.RemovePIDFile(agent.PIDFilePath(paths))
 			os.Exit(0)
 		}
-		// Runtime errors: exit 1 so service manager restarts us.
+		// Runtime errors: exit 1 to signal abnormal termination.
 		os.Exit(1)
 	}
 }
@@ -249,10 +245,7 @@ func handleInit() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunInit(paths, cfg, store, mgr, tmuxPath, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunInit(paths, cfg, store, tmuxPath, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -289,10 +282,7 @@ func handlePair() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunPair(paths, cfg, store, mgr, hmacSecret, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunPair(paths, cfg, store, hmacSecret, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -347,10 +337,7 @@ func handleUninstall(args []string) {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunUninstall(paths, store, mgr, keepConfig, hmacSecret, skipConfirm, os.Stdin, os.Stdout); err != nil {
+	if err := agent.RunUninstall(paths, store, keepConfig, hmacSecret, skipConfirm, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -370,8 +357,6 @@ func handleStatus() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
 	tmuxClient := tmux.NewClient(cfg.Tmux.SocketName)
 	if cfg.Tmux.TmuxPath != "" {
 		tmuxClient.TmuxBin = cfg.Tmux.TmuxPath
@@ -388,7 +373,6 @@ func handleStatus() {
 		PairedDevicesPath: paths.PairedDevices,
 		Store:             store,
 		PIDFilePath:       agent.PIDFilePath(paths),
-		ServiceManager:    mgr,
 		Sessions:          tmuxClient,
 		FirewallStatus:    fwStatus,
 	}
@@ -409,8 +393,6 @@ func handleAgent(args []string) {
 		fmt.Fprintln(os.Stderr, "  start          Start the agent")
 		fmt.Fprintln(os.Stderr, "  stop           Stop the agent")
 		fmt.Fprintln(os.Stderr, "  status         Show agent status")
-		fmt.Fprintln(os.Stderr, "  install        Install as OS service (launchd/systemd)")
-		fmt.Fprintln(os.Stderr, "  uninstall      Remove OS service registration")
 		os.Exit(1)
 	}
 
@@ -440,10 +422,6 @@ func handleAgent(args []string) {
 		handleAgentStop()
 	case "status":
 		handleAgentStatus()
-	case "install":
-		handleAgentInstall()
-	case "uninstall":
-		handleAgentUninstall()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown agent command: %s\n", args[0])
 		os.Exit(1)
@@ -457,10 +435,7 @@ func handleAgentStatus() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunAgentDetail(version, paths, mgr, os.Stdout); err != nil {
+	if err := agent.RunAgentDetail(version, paths, os.Stdout); err != nil {
 		if errors.Is(err, agent.ErrAgentNotRunning) {
 			os.Exit(1)
 		}
@@ -476,10 +451,7 @@ func handleAgentStop() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunAgentStop(paths, mgr, os.Stdout); err != nil {
+	if err := agent.RunAgentStop(paths, os.Stdout); err != nil {
 		if errors.Is(err, agent.ErrAgentNotRunning) {
 			fmt.Println("Agent is not running")
 			os.Exit(1)
@@ -503,54 +475,10 @@ func handleAgentStart() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-
-	if err := agent.RunAgentStart(paths, store, mgr, os.Stdout); err != nil {
+	if err := agent.RunAgentStart(paths, store, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func handleAgentInstall() {
-	paths, err := config.DefaultPaths()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
-		os.Exit(1)
-	}
-
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ could not resolve binary path: %v\n", err)
-		os.Exit(1)
-	}
-
-	mgr := service.NewManager(exe, paths.ConfigDir)
-	if err := mgr.Install(); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to install service: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("Service installed. Agent is running.")
-	// PrintFirewallNotice resolves the symlink internally (firewall keys on the
-	// real binary path); intentionally different from the symlink path used for
-	// the service manager above.
-	agent.PrintFirewallNotice(os.Stdout)
-}
-
-func handleAgentUninstall() {
-	paths, err := config.DefaultPaths()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
-		os.Exit(1)
-	}
-
-	exe, _ := os.Executable()
-	mgr := service.NewManager(exe, paths.ConfigDir)
-	if err := mgr.Uninstall(); err != nil {
-		fmt.Fprintf(os.Stderr, "⚠ failed to uninstall service: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("Service uninstalled.")
 }
 
 // isPocketmuxCommand returns true for intercepted Pocketmux commands
@@ -594,9 +522,7 @@ func handleUpdate() {
 
 	// For self-update methods, stop the agent first so the binary can be replaced.
 	if method == update.MethodGitHub || method == update.MethodHomebrew {
-		exe, _ := os.Executable()
-		mgr := service.NewManager(exe, paths.ConfigDir)
-		_ = agent.RunAgentStop(paths, mgr, os.Stdout)
+		_ = agent.RunAgentStop(paths, os.Stdout)
 	}
 
 	// Fetch full release info for asset URLs.
@@ -629,7 +555,7 @@ Pocketmux commands:
   init                 Generate identity and configure agent
   pair                 Pair with a mobile device (displays QR code)
   config               Show effective configuration with sources
-  status               Show agent, service, and pairing status
+  status               Show agent and pairing status
   unpair               Remove the paired mobile device
   update               Check for and apply updates
   uninstall [-y]       Remove Pocketmux completely (reverses 'init')
@@ -637,8 +563,6 @@ Pocketmux commands:
   agent start          Start the agent
   agent stop           Stop the agent
   agent status         Show agent status and recent logs
-  agent install        Install as OS service (auto-start on login)
-  agent uninstall      Remove OS service registration
   --version            Show version
   --help               Show this help
 

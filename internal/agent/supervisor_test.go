@@ -35,7 +35,7 @@ func TestEnsureRunning_NoIdentity(t *testing.T) {
 	store := auth.NewMemorySecretStore()
 
 	// No identity exists — EnsureRunning should be a no-op
-	err := EnsureRunning(paths, store, nil)
+	err := EnsureRunning(paths, store)
 	if err != nil {
 		t.Errorf("EnsureRunning should not error without identity: %v", err)
 	}
@@ -86,34 +86,6 @@ func TestSignalUnpair_DeliversSIGUSR2(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for SIGUSR2")
-	}
-}
-
-func TestWaitForPID_Found(t *testing.T) {
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, pidFileName)
-
-	// Write the PID file after a short delay
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		if err := WritePIDFile(pidFile); err != nil {
-			// Can't call t.Fatal from a goroutine; the timeout will catch this
-			return
-		}
-	}()
-
-	if !waitForPID(pidFile, 500*time.Millisecond) {
-		t.Error("waitForPID should return true when PID file is written with a running process")
-	}
-}
-
-func TestWaitForPID_Timeout(t *testing.T) {
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "nonexistent.pid")
-
-	// No PID file will ever appear — expect timeout
-	if waitForPID(pidFile, 200*time.Millisecond) {
-		t.Error("waitForPID should return false when PID file never appears")
 	}
 }
 
@@ -216,8 +188,8 @@ func TestStopRunning_RunningProcess(t *testing.T) {
 	}
 	pid := cmd.Process.Pid
 	t.Cleanup(func() {
-		cmd.Process.Kill()   //nolint:errcheck
-		cmd.Process.Wait()   //nolint:errcheck
+		cmd.Process.Kill() //nolint:errcheck
+		cmd.Process.Wait() //nolint:errcheck
 	})
 
 	// Write its PID to the PID file
@@ -291,7 +263,7 @@ func TestEnsureRunning_AlreadyRunning(t *testing.T) {
 	defer signal.Stop(ch)
 
 	// EnsureRunning should detect the running process and signal it
-	err := EnsureRunning(paths, store, nil)
+	err := EnsureRunning(paths, store)
 	if err != nil {
 		t.Errorf("EnsureRunning with running agent should not error: %v", err)
 	}

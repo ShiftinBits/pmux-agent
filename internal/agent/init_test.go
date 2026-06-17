@@ -11,14 +11,6 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
-// mockInitServiceManager provides configurable Install behavior for init tests.
-type mockInitServiceManager struct {
-	mockServiceManager
-	installErr error
-}
-
-func (m *mockInitServiceManager) Install() error { return m.installErr }
-
 func TestRunInit_IdentityAlreadyExists(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
@@ -31,12 +23,8 @@ func TestRunInit_IdentityAlreadyExists(t *testing.T) {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
 
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
-
 	var out bytes.Buffer
-	err = RunInit(paths, cfg, store, mgr, "/usr/bin/tmux", strings.NewReader(""), &out)
+	err = RunInit(paths, cfg, store, "/usr/bin/tmux", strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
@@ -68,12 +56,8 @@ func TestRunInit_IdentityAlreadyExists_NoName(t *testing.T) {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
 
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
-
 	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "/usr/bin/tmux", strings.NewReader(""), &out)
+	err := RunInit(paths, cfg, store, "/usr/bin/tmux", strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
@@ -92,12 +76,8 @@ func TestRunInit_FreshInit_CustomHostname(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
-
 	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "/usr/local/bin/tmux", strings.NewReader("myhost\n"), &out)
+	err := RunInit(paths, cfg, store, "/usr/local/bin/tmux", strings.NewReader("myhost\n"), &out)
 	if err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
@@ -136,13 +116,10 @@ func TestRunInit_FreshInit_DefaultHostname(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
 
 	// Empty input → uses default hostname
 	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "/usr/bin/tmux", strings.NewReader("\n"), &out)
+	err := RunInit(paths, cfg, store, "/usr/bin/tmux", strings.NewReader("\n"), &out)
 	if err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}
@@ -166,69 +143,12 @@ func TestRunInit_FreshInit_DefaultHostname(t *testing.T) {
 	}
 }
 
-func TestRunInit_ServiceInstallFailure_NonFatal(t *testing.T) {
-	paths := testPaths(t)
-	store := auth.NewMemorySecretStore()
-	cfg := config.Defaults()
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-		installErr:         fmt.Errorf("launchctl bootstrap failed"),
-	}
-
-	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "/usr/bin/tmux", strings.NewReader("testhost\n"), &out)
-	if err != nil {
-		t.Fatalf("RunInit should succeed even if service install fails: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Could not install service: launchctl bootstrap failed") {
-		t.Errorf("expected service install warning, got: %s", output)
-	}
-	if !strings.Contains(output, "Run 'pmux agent install' later") {
-		t.Errorf("expected agent install hint, got: %s", output)
-	}
-	// Should still report successful identity generation
-	if !strings.Contains(output, "Identity generated.") {
-		t.Errorf("expected 'Identity generated.' message, got: %s", output)
-	}
-}
-
-func TestRunInit_ServiceInstallSuccess(t *testing.T) {
-	paths := testPaths(t)
-	store := auth.NewMemorySecretStore()
-	cfg := config.Defaults()
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-		installErr:         nil,
-	}
-
-	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "/usr/bin/tmux", strings.NewReader("testhost\n"), &out)
-	if err != nil {
-		t.Fatalf("RunInit: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Service installed. Agent is running.") {
-		t.Errorf("expected service install success message, got: %s", output)
-	}
-	// Should NOT contain the failure warning
-	if strings.Contains(output, "Could not install service") {
-		t.Errorf("should not contain install failure warning, got: %s", output)
-	}
-}
-
 func TestRunInit_EmptyTmuxPath(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockInitServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
-
 	var out bytes.Buffer
-	err := RunInit(paths, cfg, store, mgr, "", strings.NewReader("testhost\n"), &out)
+	err := RunInit(paths, cfg, store, "", strings.NewReader("testhost\n"), &out)
 	if err != nil {
 		t.Fatalf("RunInit: %v", err)
 	}

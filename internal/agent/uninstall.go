@@ -11,19 +11,17 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 // RunUninstall removes Pocketmux completely — the reverse of init.
-// It stops the agent, uninstalls the OS service, un-registers from the
-// signaling server, and removes local config/keys.
+// It stops the agent, un-registers from the signaling server, and removes
+// local config/keys.
 // If keepConfig is true, the server un-registration and local config/keys
 // removal are skipped, preserving the existing pairing for a future reinstall.
-func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manager, keepConfig bool, hmacSecret string, skipConfirm bool, r io.Reader, w io.Writer) error {
+func RunUninstall(paths config.Paths, store auth.SecretStore, keepConfig bool, hmacSecret string, skipConfirm bool, r io.Reader, w io.Writer) error {
 	if skipConfirm {
 		fmt.Fprintln(w, "Uninstalling Pocketmux from this host:")
 		fmt.Fprintln(w, "  • Stop the agent process")
-		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
 		if !keepConfig {
 			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
@@ -33,7 +31,6 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 		// Step 1: Interactive confirmation
 		fmt.Fprintln(w, "This will remove Pocketmux from this host:")
 		fmt.Fprintln(w, "  • Stop the agent process")
-		fmt.Fprintln(w, "  • Uninstall the agent service (launchd/systemd)")
 		if !keepConfig {
 			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
 			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
@@ -61,14 +58,7 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 		fmt.Fprintln(w, "Agent process stopped.")
 	}
 
-	// Step 3: Uninstall OS service (best-effort)
-	if err := mgr.Uninstall(); err != nil {
-		fmt.Fprintf(w, "Warning: could not uninstall service: %v\n", err)
-	} else {
-		fmt.Fprintln(w, "Agent service uninstalled.")
-	}
-
-	// Step 4: Un-register from signaling server (skipped when --keep-config, so the
+	// Step 3: Un-register from signaling server (skipped when --keep-config, so the
 	// existing registration can be reused after reinstall or upgrade).
 	var identErr error
 	var identity *auth.Identity
@@ -88,7 +78,7 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, mgr service.Manage
 		}
 	}
 
-	// Step 5: Clean up config and secrets (if not --keep-config)
+	// Step 4: Clean up config and secrets (if not --keep-config)
 	if !keepConfig {
 		// Delete secrets from store before removing config dir
 		// (encrypted-file backend stores inside config dir, but keyring is external)

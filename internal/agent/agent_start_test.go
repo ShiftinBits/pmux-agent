@@ -11,14 +11,6 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 )
 
-// mockStartServiceManager provides configurable IsInstalled and Start behavior.
-type mockStartServiceManager struct {
-	mockServiceManager
-	startErr error
-}
-
-func (m *mockStartServiceManager) Start() error { return m.startErr }
-
 func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 	paths := testPaths(t)
 
@@ -28,12 +20,8 @@ func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	mgr := &mockStartServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
-
 	var buf bytes.Buffer
-	err := RunAgentStart(paths, nil, mgr, &buf)
+	err := RunAgentStart(paths, nil, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -47,66 +35,14 @@ func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 	}
 }
 
-func TestRunAgentStart_ServiceInstalled_StartSucceeds(t *testing.T) {
+func TestRunAgentStart_DirectSpawn(t *testing.T) {
 	paths := testPaths(t)
-
-	mgr := &mockStartServiceManager{
-		mockServiceManager: mockServiceManager{installed: true},
-		startErr:           nil,
-	}
-
-	var buf bytes.Buffer
-	err := RunAgentStart(paths, nil, mgr, &buf)
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-
-	output := buf.String()
-	if !strings.Contains(output, "Agent started (via service manager)") {
-		t.Errorf("expected service manager start message, got: %q", output)
-	}
-}
-
-func TestRunAgentStart_ServiceStartFails_FallsThrough(t *testing.T) {
-	paths := testPaths(t)
-
-	mgr := &mockStartServiceManager{
-		mockServiceManager: mockServiceManager{installed: true},
-		startErr:           fmt.Errorf("launchctl failed"),
-	}
-
-	// No identity → EnsureRunning returns nil (nothing to start)
-	store := auth.NewMemorySecretStore()
-
-	var buf bytes.Buffer
-	err := RunAgentStart(paths, store, mgr, &buf)
-	if err != nil {
-		t.Fatalf("expected nil error (EnsureRunning no-op without identity), got: %v", err)
-	}
-
-	output := buf.String()
-	// Should NOT contain "via service manager" — that path failed
-	if strings.Contains(output, "via service manager") {
-		t.Errorf("should not report service manager success, got: %q", output)
-	}
-	// Should contain "Agent started" from the direct spawn path
-	if !strings.Contains(output, "Agent started") {
-		t.Errorf("expected 'Agent started' message, got: %q", output)
-	}
-}
-
-func TestRunAgentStart_NoServiceInstalled_DirectSpawn(t *testing.T) {
-	paths := testPaths(t)
-
-	mgr := &mockStartServiceManager{
-		mockServiceManager: mockServiceManager{installed: false},
-	}
 
 	// No identity → EnsureRunning returns nil (no-op)
 	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
-	err := RunAgentStart(paths, store, mgr, &buf)
+	err := RunAgentStart(paths, store, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -114,8 +50,5 @@ func TestRunAgentStart_NoServiceInstalled_DirectSpawn(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Agent started") {
 		t.Errorf("expected 'Agent started' message, got: %q", output)
-	}
-	if strings.Contains(output, "via service manager") {
-		t.Errorf("should not mention service manager, got: %q", output)
 	}
 }

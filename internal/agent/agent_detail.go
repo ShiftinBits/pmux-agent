@@ -10,14 +10,13 @@ import (
 	"strings"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
-// RunAgentDetail prints detailed agent status: version, PID, service state,
-// uptime (best-effort via ps), and recent log lines. This backs "pmux agent status".
+// RunAgentDetail prints detailed agent status: version, PID, uptime
+// (best-effort via ps), and recent log lines. This backs "pmux agent status".
 //
 // Returns ErrAgentNotRunning when the agent PID is missing or stale.
-func RunAgentDetail(version string, paths config.Paths, mgr service.Manager, w io.Writer) error {
+func RunAgentDetail(version string, paths config.Paths, w io.Writer) error {
 	fmt.Fprintf(w, "pmux %s\n", version)
 
 	pidFile := PIDFilePath(paths)
@@ -35,13 +34,6 @@ func RunAgentDetail(version string, paths config.Paths, mgr service.Manager, w i
 	}
 
 	fmt.Fprintf(w, "Agent is running (PID %d)\n", pid)
-
-	// Service installation status
-	if mgr.IsInstalled() {
-		fmt.Fprintln(w, "Service: installed")
-	} else {
-		fmt.Fprintln(w, "Service: not installed")
-	}
 
 	// Try to get process uptime via ps (best-effort, errors silently ignored)
 	out, err := exec.Command("ps", "-o", "etime=", "-p", fmt.Sprintf("%d", pid)).Output()

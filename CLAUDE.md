@@ -24,7 +24,6 @@ Go agent binary for Pocketmux. `pmux` is a transparent tmux wrapper that proxies
 | `internal/config/` | TOML config parsing (`~/.config/pmux/config.toml`), env overrides, path resolution |
 | `internal/protocol/` | MessagePack codec, message types (mirrors `@pocketmux/shared`) |
 | `internal/proxy/` | tmux passthrough via `syscall.Exec` |
-| `internal/service/` | OS service management — `launchd` (macOS), `systemd` (Linux) |
 | `internal/tmux/` | tmux CLI wrapper (`Client`), `PaneBridge` (FIFO-based PTY streaming), `PaneSizeTracker`, `TitleFilter` |
 | `internal/webrtc/` | Pion WebRTC `PeerManager`, `SignalingClient`, dormancy handling |
 
@@ -32,7 +31,7 @@ Go agent binary for Pocketmux. `pmux` is a transparent tmux wrapper that proxies
 
 - **Command routing**: `init`, `pair`, `config`, `status`, `unpair`, `agent`, `--version` are intercepted; everything else passes through to `tmux -L pmux`
 - **PTY streaming**: Uses FIFO + non-blocking relay pipe (not `creack/pty`). macOS FIFO `Read()` doesn't unblock on `Close()` — the relay goroutine polls with short timeouts and checks a done channel
-- **Agent lifecycle**: Persistent background process, spawned by `EnsureRunning()` on any `pmux` command. Fatal init errors exit 0 (prevent service restart loops); runtime errors exit 1 (allow restart)
+- **Agent lifecycle**: Persistent background process, spawned by `EnsureRunning()` on any `pmux` command (idempotent via flock + PID file). No OS service layer — on macOS a launchd-spawned agent is a faceless process the Application Firewall never auto-allows, forcing TURN relay; foreground spawn by `pmux` in the GUI session gets direct P2P. Fatal init errors exit 0; runtime errors exit 1
 - **Secret storage**: Auto-detects backend — OS keyring (`go-keyring`) preferred, falls back to encrypted file. Configurable via `identity.secret_backend` or `PMUX_SECRET_BACKEND`
 - **Single-pairing model**: One mobile per host. Re-pairing replaces old device with confirmation prompt
 
