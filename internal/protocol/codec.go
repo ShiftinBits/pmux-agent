@@ -63,6 +63,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &PingRequest{}
 	case "create_session":
 		msg = &CreateSessionRequest{}
+	case "auth_response":
+		msg = &AuthResponseRequest{}
 
 	// Events (Host → Mobile)
 	case "sessions":
@@ -79,6 +81,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &PaneClosedEvent{}
 	case "session_created":
 		msg = &SessionCreatedEvent{}
+	case "auth_challenge":
+		msg = &AuthChallengeEvent{}
 	case "error":
 		msg = &ErrorEvent{}
 	case "pong":

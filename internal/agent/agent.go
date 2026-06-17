@@ -199,6 +199,12 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	peerManager.MaxPeers = cfg.Connection.MaxMobileConnections
 	peerManager.ForceRelay = cfg.Connection.ForceRelay
 	peerManager.OnPeerDisconnect = handler.PeerDisconnected
+	// Verify connect-time key possession (SB-992): resolve the paired device's
+	// X25519 shared secret from the secure store so the agent can authenticate
+	// the peer independently of the (untrusted) signaling server.
+	peerManager.SharedSecretFn = func(deviceID string) ([]byte, error) {
+		return store.Get(auth.SharedSecretKey(deviceID))
+	}
 
 	// Load paired device for connection validation.
 	// On error (corrupt file, decryption failure), reject all connections
