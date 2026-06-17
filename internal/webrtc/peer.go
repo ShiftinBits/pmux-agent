@@ -133,6 +133,7 @@ type Peer struct {
 	remoteDescSet bool                      // true after SetRemoteDescription succeeds
 	iceCandidates []webrtc.ICECandidateInit // buffered candidates received before remote desc
 	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
+	silenced      bool                      // when true, OnICECandidate stops sending; set synchronously on reconnect
 
 	// Key-possession proof (SB-992). The peer must prove it holds the pairing
 	// shared secret before any request is processed. Set at creation; auth
@@ -323,20 +324,30 @@ func (pm *PeerManager) CloseAll() {
 }
 
 // scheduleCleanup spawns a tracked goroutine that notifies the disconnect
-// handler and closes the peer. Safe to call while pm.mu is held because
-// ClosePeer runs asynchronously in the spawned goroutine.
+// handler and closes the given peer. Safe to call while pm.mu is held because
+// the teardown runs asynchronously in the spawned goroutine.
 // Caller must hold pm.mu.
-func (pm *PeerManager) scheduleCleanup(deviceID string) {
+//
+// A reconnect may replace this peer under the same device ID between the call
+// site and the goroutine running. If so, only the stale peer is closed:
+// firing OnPeerDisconnect or evicting the map slot would tear down the *new*
+// peer's session (the disconnect handler keys on device ID). ClosePeerIfCurrent
+// re-checks identity under the lock, so the close never evicts the replacement.
+func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 	if pm.closed {
 		return
 	}
+	deviceID := peer.DeviceID
 	pm.cleanupWg.Add(1)
 	go func() {
 		defer pm.cleanupWg.Done()
-		if pm.OnPeerDisconnect != nil {
+		pm.mu.Lock()
+		current := pm.peers[deviceID] == peer
+		pm.mu.Unlock()
+		if current && pm.OnPeerDisconnect != nil {
 			pm.OnPeerDisconnect(deviceID)
 		}
-		pm.ClosePeer(deviceID)
+		pm.ClosePeerIfCurrent(deviceID, peer)
 	}()
 }
 
@@ -441,9 +452,17 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	// can block for seconds waiting for DTLS/ICE shutdown with an unreachable
 	// peer, which would freeze the signaling readLoop and prevent processing
 	// subsequent messages (including the mobile's reconnection attempts).
+	//
+	// Lock ordering: pm.mu is always acquired before a Peer's p.mu (e.g.
+	// oldPeer.silence() below). Never take pm.mu while holding a p.mu.
 	pm.mu.Lock()
 	oldPeer, hadOld := pm.peers[mobileDeviceID]
 	if hadOld {
+		// Silence synchronously before releasing the map slot: the old peer's
+		// connection keeps gathering ICE until conn.Close() finishes (async
+		// below), and any candidate it emits would be applied against the new
+		// peer's negotiation. Silencing here closes that window (SB-1007).
+		oldPeer.silence()
 		delete(pm.peers, mobileDeviceID)
 	}
 	if timer, hasTimer := pm.disconnectTimers[mobileDeviceID]; hasTimer {
@@ -746,6 +765,12 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 
 	switch state {
 	case webrtc.PeerConnectionStateConnected:
+		// Ignore stale callbacks from an old peer during reconnect: cancelling
+		// the disconnect timer here would drop the *new* peer's timer. Mirrors
+		// the pointer-identity guard in the Disconnected/Failed/Closed cases.
+		if tracked, ok := pm.peers[deviceID]; !ok || tracked != peer {
+			return
+		}
 		// Connection recovered — cancel any pending disconnect timer.
 		if timer, ok := pm.disconnectTimers[deviceID]; ok {
 			timer.Stop()
@@ -755,6 +780,14 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		}
 
 	case webrtc.PeerConnectionStateDisconnected:
+		// Ignore stale callbacks from an old peer during reconnect: a timer
+		// registered under this device ID would later resolve to the *new*
+		// peer in onDisconnectTimerFired and could trigger a spurious ICE
+		// restart on it, corrupting the new connection (SB-1007). Mirrors the
+		// pointer-identity guard in the Failed/Closed cases below.
+		if tracked, ok := pm.peers[deviceID]; !ok || tracked != peer {
+			return
+		}
 		// Start a grace timer. If the connection doesn't recover within
 		// pcDisconnectedTimeout, attempt an ICE restart.
 		if _, ok := pm.disconnectTimers[deviceID]; ok {
@@ -780,7 +813,7 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		// a new peer is stored under the same device ID.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
 			pm.logger.Info("peer connection failed, closing peer", "mobile", deviceID)
-			pm.scheduleCleanup(deviceID)
+			pm.scheduleCleanup(peer)
 		}
 
 	case webrtc.PeerConnectionStateClosed:
@@ -794,7 +827,7 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		// During reconnect, a stale callback from the old peer may fire after
 		// a new peer is stored under the same device ID.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
-			pm.scheduleCleanup(deviceID)
+			pm.scheduleCleanup(peer)
 		}
 	}
 }
@@ -863,7 +896,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	if err != nil {
 		pm.logger.Error("ICE restart: failed to create offer", "error", err, "mobile", deviceID)
 		pm.mu.Lock()
-		pm.scheduleCleanup(deviceID)
+		pm.scheduleCleanup(peer)
 		pm.mu.Unlock()
 		return
 	}
@@ -871,7 +904,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	if err := peer.conn.SetLocalDescription(offer); err != nil {
 		pm.logger.Error("ICE restart: failed to set local description", "error", err, "mobile", deviceID)
 		pm.mu.Lock()
-		pm.scheduleCleanup(deviceID)
+		pm.scheduleCleanup(peer)
 		pm.mu.Unlock()
 		return
 	}
@@ -888,7 +921,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	}); err != nil {
 		pm.logger.Error("ICE restart: failed to send SDP offer", "error", err, "mobile", deviceID)
 		pm.mu.Lock()
-		pm.scheduleCleanup(deviceID)
+		pm.scheduleCleanup(peer)
 		pm.mu.Unlock()
 		return
 	}
@@ -910,7 +943,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 		}
 		if peer.conn.ConnectionState() != webrtc.PeerConnectionStateConnected {
 			pm.logger.Warn("ICE restart answer timeout, closing peer", "mobile", deviceID)
-			pm.scheduleCleanup(deviceID)
+			pm.scheduleCleanup(peer)
 		}
 		pm.mu.Unlock()
 	})
@@ -927,35 +960,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 
 // setupHandlers configures ICE and connection state handlers on the peer connection.
 func (p *Peer) setupHandlers() {
-	p.conn.OnICECandidate(func(c *webrtc.ICECandidate) {
-		if c == nil {
-			p.logger.Debug("ICE gathering complete")
-			return
-		}
-		p.logger.Debug("ICE candidate gathered", "type", c.Typ.String(), "address", c.Address, "port", c.Port, "protocol", c.Protocol.String())
-		init := c.ToJSON()
-
-		var mLineIndex *int
-		if init.SDPMLineIndex != nil {
-			v := int(*init.SDPMLineIndex)
-			mLineIndex = &v
-		}
-
-		var sdpMid string
-		if init.SDPMid != nil {
-			sdpMid = *init.SDPMid
-		}
-
-		if err := p.signaling.Send(SignalingMessage{
-			Type:           "ice_candidate",
-			TargetDeviceID: p.DeviceID,
-			Candidate:      init.Candidate,
-			SDPMid:         sdpMid,
-			SDPMLineIndex:  mLineIndex,
-		}); err != nil {
-			p.logger.Warn("failed to send ICE candidate", "error", err)
-		}
-	})
+	p.conn.OnICECandidate(p.sendICECandidate)
 
 	p.conn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		p.logger.Info("peer connection state", "state", state.String())
@@ -982,6 +987,60 @@ func (p *Peer) setupHandlers() {
 			p.stateHandler(p, state)
 		}
 	})
+}
+
+// sendICECandidate relays a locally-gathered ICE candidate to the mobile via
+// signaling. It drops candidates once the peer is silenced (SB-1007): on
+// reconnect the old peer is silenced synchronously before the new peer is
+// registered, so its still-gathering connection can no longer emit candidates
+// that would be applied against the new peer's negotiation.
+func (p *Peer) sendICECandidate(c *webrtc.ICECandidate) {
+	if c == nil {
+		p.logger.Debug("ICE gathering complete")
+		return
+	}
+
+	p.mu.Lock()
+	silenced := p.silenced
+	p.mu.Unlock()
+	if silenced {
+		p.logger.Debug("dropping ICE candidate from silenced peer", "mobile", p.DeviceID)
+		return
+	}
+
+	p.logger.Debug("ICE candidate gathered", "type", c.Typ.String(), "address", c.Address, "port", c.Port, "protocol", c.Protocol.String())
+	init := c.ToJSON()
+
+	var mLineIndex *int
+	if init.SDPMLineIndex != nil {
+		v := int(*init.SDPMLineIndex)
+		mLineIndex = &v
+	}
+
+	var sdpMid string
+	if init.SDPMid != nil {
+		sdpMid = *init.SDPMid
+	}
+
+	if err := p.signaling.Send(SignalingMessage{
+		Type:           "ice_candidate",
+		TargetDeviceID: p.DeviceID,
+		Candidate:      init.Candidate,
+		SDPMid:         sdpMid,
+		SDPMLineIndex:  mLineIndex,
+	}); err != nil {
+		p.logger.Warn("failed to send ICE candidate", "error", err)
+	}
+}
+
+// silence stops the peer's OnICECandidate callback from sending further
+// candidates. Distinct from Close()/closed: it is set synchronously during a
+// reconnect so a still-open old peer cannot corrupt the new connection, while
+// the (potentially slow) resource teardown still runs in the background.
+func (p *Peer) silence() {
+	p.mu.Lock()
+	p.silenced = true
+	p.mu.Unlock()
 }
 
 // setupDataChannelHandlers sets up handlers on a DataChannel.
