@@ -843,6 +843,13 @@ func (pm *PeerManager) onDisconnectTimerFired(deviceID string) {
 // attemptICERestart creates a new SDP offer with the ICE restart flag and sends
 // it to the mobile via signaling. If any step fails, the peer is closed and the
 // mobile will need to perform a full reconnect.
+//
+// Note (SB-992): an ICE restart reuses the existing Peer, DTLS session, and
+// DataChannel — dc.OnOpen does NOT re-fire — so the key-possession handshake is
+// intentionally NOT re-run and p.authenticated is left true. The DTLS session
+// (already bound to the authenticated peer) is preserved across the restart. Do
+// not reset the auth flag here; a brand-new connection arrives as a separate
+// connect_request that builds a fresh Peer and runs the full handshake.
 func (pm *PeerManager) attemptICERestart(deviceID string) {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
@@ -1123,6 +1130,7 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	}
 	p.authResolved = true
 	p.authenticated = true
+	p.authNonce = nil // no longer needed; drop it to shrink the memory-forensics surface
 	if p.authTimer != nil {
 		p.authTimer.Stop()
 		p.authTimer = nil
