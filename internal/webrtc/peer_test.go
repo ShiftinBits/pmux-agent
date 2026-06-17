@@ -2043,6 +2043,7 @@ func TestPeer_SilencedDropsICECandidate(t *testing.T) {
 		done:      make(chan struct{}),
 	}
 
+	// Only the send-vs-drop count matters here, not the candidate's contents.
 	cand := &webrtc.ICECandidate{Foundation: "1", Protocol: webrtc.ICEProtocolUDP, Address: "127.0.0.1", Port: 5000, Typ: webrtc.ICECandidateTypeHost}
 
 	p.sendICECandidate(cand)
