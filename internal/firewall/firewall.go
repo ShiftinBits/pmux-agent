@@ -1,8 +1,7 @@
 // Package firewall detects whether the host firewall is likely blocking
-// inbound connections to the pmux agent binary. It is detection-only: it
-// mirrors the internal/service package's structure (build-tag-selected
-// NewManager() plus an injectable execCommand for tests) and never mutates the
-// firewall.
+// inbound connections to the pmux agent binary. It is detection-only: it uses
+// a build-tag-selected NewManager() plus an injectable execCommand for tests
+// and never mutates the firewall.
 //
 // When a probe suggests the firewall may be blocking, callers surface the
 // Warning message. There is deliberately no automatic fix: modern macOS can't

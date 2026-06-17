@@ -14,13 +14,12 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 // RunPair pairs this host with a mobile device via the signaling server.
 // It displays a QR code for scanning, waits for the mobile to complete
 // the pairing handshake, and stores the resulting shared secret locally.
-func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr service.Manager, hmacSecret string, r io.Reader, w io.Writer) error {
+func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmacSecret string, r io.Reader, w io.Writer) error {
 	// Must have identity first
 	if !auth.HasIdentity(paths.KeysDir, store) {
 		return fmt.Errorf("no identity found. Run 'pmux init' first")
@@ -125,23 +124,8 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	// WebSocket for the same device ID can intercept the message after DO
 	// hibernation, causing the pair CLI to hang. Stopping the agent ensures
 	// only one WebSocket exists for this device during pairing.
-	//
-	// When the agent is installed as an OS service (launchd/systemd), we must
-	// use the service manager to stop it — a plain SIGTERM causes the service
-	// supervisor to auto-restart the agent before pairing completes, leaving
-	// the restarted agent with a stale cached device ID.
-	if mgr != nil && mgr.IsInstalled() {
-		if err := mgr.Stop(); err != nil {
-			fmt.Fprintf(w, "warning: failed to stop agent service for pairing: %v\n", err)
-			// Fall back to process-level stop
-			if err := StopRunning(paths); err != nil {
-				fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
-			}
-		}
-	} else {
-		if err := StopRunning(paths); err != nil {
-			fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
-		}
+	if err := StopRunning(paths); err != nil {
+		fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
 	}
 
 	// Get JWT for WebSocket auth
@@ -187,15 +171,15 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	}
 	fmt.Fprintf(w, "Paired successfully with device '%s'\n", displayName)
 
-	// If the agent is still running (e.g., service manager stop failed and
-	// the supervisor restarted it), signal it to reload the new pairing state.
+	// If the agent is still running (e.g., a racing pmux command restarted it),
+	// signal it to reload the new pairing state.
 	pidFile := PIDFilePath(paths)
 	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
 		signalReloadPairing(pid)
 	}
 
 	// Restart the background agent (stopped earlier to avoid WebSocket race).
-	if err := EnsureRunning(paths, store, mgr); err != nil {
+	if err := EnsureRunning(paths, store); err != nil {
 		fmt.Fprintf(w, "warning: failed to restart agent: %v\n", err)
 	}
 

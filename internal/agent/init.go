@@ -11,13 +11,12 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"github.com/shiftinbits/pmux-agent/internal/firewall"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 // RunInit generates a new Pocketmux identity and writes the initial config file.
 // If an identity already exists, it displays the existing device ID and returns.
-// The service manager install is best-effort — failures are reported but non-fatal.
-func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr service.Manager, tmuxPath string, r io.Reader, w io.Writer) error {
+// The agent starts automatically on any pmux command via EnsureRunning.
+func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, tmuxPath string, r io.Reader, w io.Writer) error {
 	// Check if identity already exists
 	if auth.HasIdentity(paths.KeysDir, store) {
 		id, err := auth.LoadIdentity(paths.KeysDir, store, slog.Default())
@@ -63,15 +62,6 @@ func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, mgr 
 	fmt.Fprintf(w, "Device ID: %s\n", id.DeviceID)
 	fmt.Fprintf(w, "Host name: %s\n", input)
 	fmt.Fprintf(w, "Keys saved to: %s (backend: %s)\n", paths.KeysDir, store.Backend())
-
-	// Install agent as OS service (best-effort)
-	if err := mgr.Install(); err != nil {
-		fmt.Fprintf(w, "\n⚠ Could not install service: %v\n", err)
-		fmt.Fprintln(w, "  The agent will still start automatically when you run pmux commands.")
-		fmt.Fprintln(w, "  Run 'pmux agent install' later to enable always-on mode.")
-	} else {
-		fmt.Fprintln(w, "\nService installed. Agent is running.")
-	}
 
 	PrintFirewallNotice(w)
 	return nil

@@ -10,7 +10,6 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/firewall"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 )
 
@@ -25,19 +24,6 @@ func (m *mockSessionLister) ListSessions() ([]tmux.Session, error) {
 	return m.sessions, m.err
 }
 
-type mockServiceManager struct {
-	installed bool
-}
-
-func (m *mockServiceManager) IsInstalled() bool { return m.installed }
-func (m *mockServiceManager) Status() (service.Status, error) {
-	return service.Status{Installed: m.installed}, nil
-}
-func (m *mockServiceManager) Install() error   { return nil }
-func (m *mockServiceManager) Uninstall() error { return nil }
-func (m *mockServiceManager) Start() error     { return nil }
-func (m *mockServiceManager) Stop() error      { return nil }
-
 // --- Helper ---
 
 func testStatusParams(dir string, store auth.SecretStore) StatusParams {
@@ -46,7 +32,6 @@ func testStatusParams(dir string, store auth.SecretStore) StatusParams {
 		PairedDevicesPath: filepath.Join(dir, "paired_devices.json"),
 		Store:             store,
 		PIDFilePath:       filepath.Join(dir, "nonexistent.pid"),
-		ServiceManager:    &mockServiceManager{installed: false},
 		Sessions:          &mockSessionLister{},
 	}
 }
@@ -69,9 +54,6 @@ func TestRunStatus_NoDevice(t *testing.T) {
 	}
 	if !strings.Contains(output, "Agent:    not running") {
 		t.Errorf("expected 'Agent:    not running', got: %s", output)
-	}
-	if !strings.Contains(output, "Service:  not installed") {
-		t.Errorf("expected 'Service:  not installed', got: %s", output)
 	}
 	if !strings.Contains(output, "Sessions: 0") {
 		t.Errorf("expected 'Sessions: 0', got: %s", output)
@@ -101,7 +83,6 @@ func TestRunStatus_WithDevice(t *testing.T) {
 
 	params := testStatusParams(dir, store)
 	params.PairedDevicesPath = path
-	params.ServiceManager = &mockServiceManager{installed: true}
 	params.Sessions = &mockSessionLister{
 		sessions: []tmux.Session{
 			{ID: "$0", Name: "main"},
@@ -124,9 +105,6 @@ func TestRunStatus_WithDevice(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Agent:    running (PID") {
 		t.Errorf("expected agent running line, got: %s", output)
-	}
-	if !strings.Contains(output, "Service:  installed") {
-		t.Errorf("expected 'Service:  installed', got: %s", output)
 	}
 	if !strings.Contains(output, "Sessions: 2") {
 		t.Errorf("expected 'Sessions: 2', got: %s", output)

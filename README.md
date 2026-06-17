@@ -17,7 +17,7 @@ pmux ls
 - **Zero-knowledge architecture** — the server only relays connection metadata, never terminal data or session information
 - **Ed25519 identity** — no passwords, no accounts; cryptographic keypair generated locally at setup
 - **QR code pairing** — scan once from the mobile app to establish a secure link
-- **OS service integration** — runs as a launchd (macOS) or systemd (Linux) service with automatic restart
+- **Auto-starting agent** — the background agent starts automatically on any `pmux` command; nothing to install or manage
 - **Cross-platform** — macOS (universal binary) and Linux (amd64, arm64)
 
 ## Install

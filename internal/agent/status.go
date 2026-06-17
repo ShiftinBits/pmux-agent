@@ -6,7 +6,6 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/firewall"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 )
 
@@ -22,14 +21,13 @@ type StatusParams struct {
 	PairedDevicesPath string
 	Store             auth.SecretStore
 	PIDFilePath       string
-	ServiceManager    service.Manager // nil-safe: treated as "not installed"
-	Sessions          SessionLister   // nil-safe: treated as 0 sessions
+	Sessions          SessionLister // nil-safe: treated as 0 sessions
 	// FirewallStatus is the probed host-firewall status; nil omits the line.
 	FirewallStatus *firewall.Status
 }
 
-// RunStatus shows a comprehensive status overview: agent process, service
-// registration, tmux session count, and paired mobile device info.
+// RunStatus shows a comprehensive status overview: agent process,
+// tmux session count, and paired mobile device info.
 func RunStatus(params StatusParams, w io.Writer) error {
 	// --- Version ---
 	if params.Version != "" {
@@ -48,13 +46,6 @@ func RunStatus(params StatusParams, w io.Writer) error {
 		}
 	}
 	fmt.Fprintf(w, "Agent:    %s\n", agentLine)
-
-	// --- Service status ---
-	serviceLine := "not installed"
-	if params.ServiceManager != nil && params.ServiceManager.IsInstalled() {
-		serviceLine = "installed"
-	}
-	fmt.Fprintf(w, "Service:  %s\n", serviceLine)
 
 	// --- tmux sessions ---
 	sessionLine := "0"

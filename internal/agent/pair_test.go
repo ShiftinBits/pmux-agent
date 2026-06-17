@@ -14,12 +14,11 @@ func TestRunPair_NoIdentity(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockServiceManager{}
 
 	var out bytes.Buffer
 	in := strings.NewReader("")
 
-	err := RunPair(paths, cfg, store, mgr, "", in, &out)
+	err := RunPair(paths, cfg, store, "", in, &out)
 	if err == nil {
 		t.Fatal("expected error when no identity exists")
 	}
@@ -32,7 +31,6 @@ func TestRunPair_ExistingPairing_UserDeclines(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockServiceManager{}
 
 	// Generate identity so HasIdentity passes
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
@@ -52,7 +50,7 @@ func TestRunPair_ExistingPairing_UserDeclines(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("n\n")
 
-	if err := RunPair(paths, cfg, store, mgr, "", in, &out); err != nil {
+	if err := RunPair(paths, cfg, store, "", in, &out); err != nil {
 		t.Fatalf("RunPair should return nil on decline, got: %v", err)
 	}
 
@@ -81,7 +79,6 @@ func TestRunPair_ExistingPairing_EOFDeclines(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
 	cfg := config.Defaults()
-	mgr := &mockServiceManager{}
 
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -99,7 +96,7 @@ func TestRunPair_ExistingPairing_EOFDeclines(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("") // EOF
 
-	if err := RunPair(paths, cfg, store, mgr, "", in, &out); err != nil {
+	if err := RunPair(paths, cfg, store, "", in, &out); err != nil {
 		t.Fatalf("RunPair should return nil on EOF, got: %v", err)
 	}
 
@@ -111,7 +108,6 @@ func TestRunPair_ExistingPairing_EOFDeclines(t *testing.T) {
 func TestRunPair_HTTPWarning_NonLocalServer(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -126,7 +122,7 @@ func TestRunPair_HTTPWarning_NonLocalServer(t *testing.T) {
 
 	// This will error at InitiatePairing (connection refused), but the
 	// HTTP warning should appear in output before that.
-	_ = RunPair(paths, cfg, store, mgr, "", in, &out)
+	_ = RunPair(paths, cfg, store, "", in, &out)
 
 	output := out.String()
 	if !strings.Contains(output, "WARNING: Server URL") {
@@ -140,7 +136,6 @@ func TestRunPair_HTTPWarning_NonLocalServer(t *testing.T) {
 func TestRunPair_NoHTTPWarning_Localhost(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -153,7 +148,7 @@ func TestRunPair_NoHTTPWarning_Localhost(t *testing.T) {
 	in := strings.NewReader("")
 
 	// Will error at InitiatePairing, but no warning should appear
-	_ = RunPair(paths, cfg, store, mgr, "", in, &out)
+	_ = RunPair(paths, cfg, store, "", in, &out)
 
 	output := out.String()
 	if strings.Contains(output, "WARNING") {
@@ -164,7 +159,6 @@ func TestRunPair_NoHTTPWarning_Localhost(t *testing.T) {
 func TestRunPair_NoHTTPWarning_HTTPS(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -177,7 +171,7 @@ func TestRunPair_NoHTTPWarning_HTTPS(t *testing.T) {
 	in := strings.NewReader("")
 
 	// Will error at InitiatePairing, but no warning should appear
-	_ = RunPair(paths, cfg, store, mgr, "", in, &out)
+	_ = RunPair(paths, cfg, store, "", in, &out)
 
 	output := out.String()
 	if strings.Contains(output, "WARNING") {
@@ -188,7 +182,6 @@ func TestRunPair_NoHTTPWarning_HTTPS(t *testing.T) {
 func TestRunPair_ExistingPairing_AcceptButServerDown(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
-	mgr := &mockServiceManager{}
 
 	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -210,7 +203,7 @@ func TestRunPair_ExistingPairing_AcceptButServerDown(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("y\n")
 
-	err = RunPair(paths, cfg, store, mgr, "", in, &out)
+	err = RunPair(paths, cfg, store, "", in, &out)
 	if err == nil {
 		t.Fatal("expected error when server is unreachable")
 	}

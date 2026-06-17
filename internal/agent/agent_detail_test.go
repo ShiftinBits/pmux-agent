@@ -12,10 +12,9 @@ import (
 
 func TestRunAgentDetail_NotRunning_NoPIDFile(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
 
 	var buf bytes.Buffer
-	err := RunAgentDetail("1.2.3", paths, mgr, &buf)
+	err := RunAgentDetail("1.2.3", paths, &buf)
 	if !errors.Is(err, ErrAgentNotRunning) {
 		t.Fatalf("expected ErrAgentNotRunning, got: %v", err)
 	}
@@ -31,7 +30,6 @@ func TestRunAgentDetail_NotRunning_NoPIDFile(t *testing.T) {
 
 func TestRunAgentDetail_StalePID(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
 
 	// Write a PID file with a bogus PID that won't be running
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
@@ -40,7 +38,7 @@ func TestRunAgentDetail_StalePID(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := RunAgentDetail("1.2.3", paths, mgr, &buf)
+	err := RunAgentDetail("1.2.3", paths, &buf)
 	if !errors.Is(err, ErrAgentNotRunning) {
 		t.Fatalf("expected ErrAgentNotRunning, got: %v", err)
 	}
@@ -59,9 +57,8 @@ func TestRunAgentDetail_StalePID(t *testing.T) {
 	}
 }
 
-func TestRunAgentDetail_Running_ServiceInstalled(t *testing.T) {
+func TestRunAgentDetail_Running(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: true}
 
 	// Use our own PID as a known-running process
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
@@ -70,7 +67,7 @@ func TestRunAgentDetail_Running_ServiceInstalled(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := RunAgentDetail("2.0.0", paths, mgr, &buf)
+	err := RunAgentDetail("2.0.0", paths, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -82,35 +79,10 @@ func TestRunAgentDetail_Running_ServiceInstalled(t *testing.T) {
 	if !strings.Contains(output, fmt.Sprintf("Agent is running (PID %d)", os.Getpid())) {
 		t.Errorf("expected running PID line, got: %s", output)
 	}
-	if !strings.Contains(output, "Service: installed") {
-		t.Errorf("expected 'Service: installed', got: %s", output)
-	}
-}
-
-func TestRunAgentDetail_Running_ServiceNotInstalled(t *testing.T) {
-	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
-
-	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
-		t.Fatalf("write PID file: %v", err)
-	}
-
-	var buf bytes.Buffer
-	err := RunAgentDetail("2.0.0", paths, mgr, &buf)
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-
-	output := buf.String()
-	if !strings.Contains(output, "Service: not installed") {
-		t.Errorf("expected 'Service: not installed', got: %s", output)
-	}
 }
 
 func TestRunAgentDetail_Running_WithLogFile(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
 
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
@@ -125,7 +97,7 @@ func TestRunAgentDetail_Running_WithLogFile(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := RunAgentDetail("2.0.0", paths, mgr, &buf)
+	err := RunAgentDetail("2.0.0", paths, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -149,7 +121,6 @@ func TestRunAgentDetail_Running_WithLogFile(t *testing.T) {
 
 func TestRunAgentDetail_Running_NoLogFile(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
 
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
@@ -158,7 +129,7 @@ func TestRunAgentDetail_Running_NoLogFile(t *testing.T) {
 
 	// No log file written — should not error or show "Recent log:"
 	var buf bytes.Buffer
-	err := RunAgentDetail("2.0.0", paths, mgr, &buf)
+	err := RunAgentDetail("2.0.0", paths, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -171,7 +142,6 @@ func TestRunAgentDetail_Running_NoLogFile(t *testing.T) {
 
 func TestRunAgentDetail_Running_EmptyLogFile(t *testing.T) {
 	paths := testPaths(t)
-	mgr := &mockServiceManager{installed: false}
 
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
@@ -185,7 +155,7 @@ func TestRunAgentDetail_Running_EmptyLogFile(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := RunAgentDetail("2.0.0", paths, mgr, &buf)
+	err := RunAgentDetail("2.0.0", paths, &buf)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}

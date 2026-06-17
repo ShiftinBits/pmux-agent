@@ -21,9 +21,9 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/webrtc"
 )
 
-// FatalInitError wraps errors that won't self-resolve on restart,
+// FatalInitError wraps errors that won't self-resolve on a fresh spawn,
 // such as missing identity, corrupt config, or secret store failures.
-// These should cause the agent to exit without triggering a service restart.
+// These should cause the agent to exit without being treated as retryable.
 type FatalInitError struct {
 	Err error
 }
@@ -132,7 +132,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 
 	// Create tmux client targeting the configured socket.
 	// Use the configured tmux path (resolved at init time) so the agent works
-	// in service environments where PATH is minimal (e.g., launchd, systemd).
+	// when PATH is minimal (e.g., when spawned non-interactively).
 	tmuxClient := tmux.NewClient(cfg.Tmux.SocketName)
 	if cfg.Tmux.TmuxPath != "" {
 		tmuxClient.TmuxBin = cfg.Tmux.TmuxPath

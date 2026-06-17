@@ -6,13 +6,11 @@ import (
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 // RunAgentStart starts the Pocketmux agent. It checks whether the agent is
-// already running, tries the OS service manager if installed, and falls back
-// to a direct spawn via EnsureRunning.
-func RunAgentStart(paths config.Paths, store auth.SecretStore, mgr service.Manager, w io.Writer) error {
+// already running and otherwise spawns it directly via EnsureRunning.
+func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) error {
 	// Check if already running
 	pidFile := PIDFilePath(paths)
 	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
@@ -20,17 +18,7 @@ func RunAgentStart(paths config.Paths, store auth.SecretStore, mgr service.Manag
 		return nil
 	}
 
-	// Try service manager first
-	if mgr.IsInstalled() {
-		if err := mgr.Start(); err == nil {
-			fmt.Fprintln(w, "Agent started (via service manager)")
-			return nil
-		}
-		// Fall through to direct spawn
-	}
-
-	// Direct spawn — pass nil for mgr to force direct spawn (skip service)
-	if err := EnsureRunning(paths, store, nil); err != nil {
+	if err := EnsureRunning(paths, store); err != nil {
 		return fmt.Errorf("failed to start agent: %w", err)
 	}
 	fmt.Fprintln(w, "Agent started")

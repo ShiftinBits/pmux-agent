@@ -72,13 +72,13 @@ type PaneSize struct {
 
 // Client wraps the tmux CLI, targeting the dedicated pmux socket.
 type Client struct {
-	Socket string // Socket name (default: "pmux")
+	Socket  string // Socket name (default: "pmux")
 	TmuxBin string // Path to tmux binary (default: "tmux")
 }
 
 // NewClient creates a tmux client targeting the given socket.
 // It resolves the tmux binary to an absolute path so the client works
-// correctly inside launchd/systemd services where PATH is minimal.
+// correctly when PATH is minimal (e.g., when the agent is spawned non-interactively).
 func NewClient(socket string) *Client {
 	if socket == "" {
 		socket = DefaultSocket

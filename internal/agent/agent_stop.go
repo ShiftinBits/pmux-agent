@@ -9,31 +9,18 @@ import (
 	"time"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
-	"github.com/shiftinbits/pmux-agent/internal/service"
 )
 
 // ErrAgentNotRunning is returned when the agent is not running and the caller
 // requested a stop. main.go maps this to exit code 1.
 var ErrAgentNotRunning = errors.New("agent is not running")
 
-// RunAgentStop stops the Pocketmux agent. It tries the OS service manager
-// first (if installed), then falls back to direct PID-based stop via SIGTERM
+// RunAgentStop stops the Pocketmux agent via a direct PID-based stop: SIGTERM
 // with a SIGKILL fallback after 5 seconds.
 //
 // Returns ErrAgentNotRunning if no agent process is found.
 // Returns nil on successful stop (including stale PID cleanup).
-func RunAgentStop(paths config.Paths, mgr service.Manager, w io.Writer) error {
-	// Try service manager first (prevents auto-restart)
-	if mgr.IsInstalled() {
-		if err := mgr.Stop(); err != nil {
-			fmt.Fprintf(w, "⚠ service stop failed: %v\n", err)
-			// Fall through to direct stop
-		} else {
-			fmt.Fprintln(w, "Agent stopped")
-			return nil
-		}
-	}
-
+func RunAgentStop(paths config.Paths, w io.Writer) error {
 	// Direct stop via PID file
 	pidFile := PIDFilePath(paths)
 
