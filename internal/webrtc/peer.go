@@ -761,6 +761,14 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		}
 
 	case webrtc.PeerConnectionStateDisconnected:
+		// Ignore stale callbacks from an old peer during reconnect: a timer
+		// registered under this device ID would later resolve to the *new*
+		// peer in onDisconnectTimerFired and could trigger a spurious ICE
+		// restart on it, corrupting the new connection (SB-1007). Mirrors the
+		// pointer-identity guard in the Failed/Closed cases below.
+		if tracked, ok := pm.peers[deviceID]; !ok || tracked != peer {
+			return
+		}
 		// Start a grace timer. If the connection doesn't recover within
 		// pcDisconnectedTimeout, attempt an ICE restart.
 		if _, ok := pm.disconnectTimers[deviceID]; ok {
