@@ -255,6 +255,29 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 	}
 }
 
+// ClosePeerIfCurrent closes a peer only if it is still the peer tracked under
+// deviceID, removing it from the map. If the peer has already been replaced
+// (e.g. a reconnect installed a new peer under the same device ID), it is closed
+// directly without touching the map — so a stale peer's auth-failure teardown
+// can never evict the peer that replaced it. The identity check and map removal
+// happen under a single lock hold to avoid a check-then-act race.
+func (pm *PeerManager) ClosePeerIfCurrent(deviceID string, peer *Peer) {
+	pm.mu.Lock()
+	if pm.peers[deviceID] != peer {
+		pm.mu.Unlock()
+		peer.Close()
+		return
+	}
+	delete(pm.peers, deviceID)
+	if timer, ok := pm.disconnectTimers[deviceID]; ok {
+		timer.Stop()
+		delete(pm.disconnectTimers, deviceID)
+	}
+	delete(pm.disconnectTimes, deviceID)
+	pm.mu.Unlock()
+	peer.Close()
+}
+
 // CloseAll closes all peer connections and waits for background cleanup
 // goroutines (from state change handlers) to finish.
 func (pm *PeerManager) CloseAll() {
@@ -1075,6 +1098,14 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	secret := p.sharedSecret
 	p.mu.Unlock()
 
+	// Defensive: a response must never arrive before the challenge nonce is set
+	// (Pion delivers OnOpen before OnMessage). Reject rather than hash a nil
+	// nonce, which would otherwise produce a misleading "MAC mismatch" log.
+	if len(nonce) == 0 {
+		p.failAuth("auth response received before challenge nonce was set")
+		return
+	}
+
 	mac := hmac.New(sha256.New, secret)
 	mac.Write(nonce)
 	if !hmac.Equal(mac.Sum(nil), gotMAC) {
@@ -1120,7 +1151,9 @@ func (p *Peer) failAuth(reason string) {
 
 	p.logger.Warn("closing peer: authentication failed", "reason", reason, "mobile", p.DeviceID)
 	if p.pm != nil {
-		go p.pm.ClosePeer(p.DeviceID)
+		// ClosePeerIfCurrent (not ClosePeer): if a reconnect has already replaced
+		// us under this device ID, we must not evict the new peer.
+		go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
 	} else {
 		go p.Close()
 	}

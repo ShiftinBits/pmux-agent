@@ -100,8 +100,17 @@ func (m *InputRequest) Validate() error {
 	return validateByteSize("input", "data", len(m.Data), MaxInputSize)
 }
 
-// Validate enforces bounds on an auth-response request.
+// Validate enforces bounds on an auth-response request. An empty mac is
+// unambiguously malformed (it would also fail the HMAC compare, but reject it
+// here so the contract is complete and the failure is diagnostic).
+//
+// AuthChallengeEvent intentionally has no Validate: it is host→mobile, so the
+// agent only ever *sends* it and never decodes a peer-supplied one. The TS
+// codec validates the nonce on the mobile's decode side.
 func (m *AuthResponseRequest) Validate() error {
+	if len(m.Mac) == 0 {
+		return fmt.Errorf("auth_response: %q must not be empty", "mac")
+	}
 	return validateStringLen("auth_response", "mac", m.Mac, MaxAuthBlobLength)
 }
 

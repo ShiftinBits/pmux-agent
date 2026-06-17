@@ -109,6 +109,10 @@ func Decode(data []byte) (Message, error) {
 }
 
 // IsRequest returns true if the message is a Mobile → Host request.
+//
+// AuthResponseRequest is intentionally EXCLUDED: it is consumed by the
+// pre-auth handshake gate (see peer.go) and must never be treated as an
+// operational request, so a post-auth replay is dropped. Do not add it here.
 func IsRequest(msg Message) bool {
 	switch msg.(type) {
 	case *ListSessionsRequest, *AttachRequest, *DetachRequest,

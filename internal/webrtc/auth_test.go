@@ -137,6 +137,41 @@ func TestPeer_VerifySuccessIgnoredAfterFailAuth(t *testing.T) {
 	}
 }
 
+// TestPeer_FailAuthDoesNotEvictReplacementPeer guards the reconnect-replace race:
+// a stale peer's auth-failure teardown must not close the new peer that already
+// replaced it under the same device ID.
+func TestPeer_FailAuthDoesNotEvictReplacementPeer(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+
+	// The new peer currently tracked under the device ID.
+	peerB := &Peer{DeviceID: "m", logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+	pm.mu.Lock()
+	pm.peers["m"] = peerB
+	pm.mu.Unlock()
+
+	// A stale peer A (same device ID, never inserted) fails auth.
+	peerA := &Peer{DeviceID: "m", pm: pm, logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+	peerA.failAuth("authentication timeout")
+
+	// failAuth closes on a goroutine; wait for it to settle.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pm.mu.Lock()
+		settled := pm.peers["m"] == peerB
+		pm.mu.Unlock()
+		if settled {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.peers["m"] != peerB {
+		t.Fatal("failAuth on a stale peer must not evict the replacement peer")
+	}
+}
+
 // TestPeerManager_RejectsWhenSharedSecretUnavailable verifies the connect-time
 // fail-closed behaviour: if the shared secret cannot be loaded, the agent cannot
 // authenticate the peer, so the connection is rejected before any offer (SB-992).
