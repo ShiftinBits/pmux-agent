@@ -250,7 +250,7 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 				return
 			}
 			if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
-				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authMAC(testSharedSecret, ch.Nonce)}
+				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
 				data, _ := protocol.Encode(resp)
 				dc.Send(data)
 			}
@@ -1471,7 +1471,7 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 			// so they fall through to the channel.
 			if decoded, err := protocol.Decode(msg.Data); err == nil {
 				if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
-					resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authMAC(testSharedSecret, ch.Nonce)}
+					resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
 					out, _ := protocol.Encode(resp)
 					dc.Send(out)
 					return

@@ -83,7 +83,7 @@ func (m *CreateSessionRequest) MessageType() string { return "create_session" }
 // authenticates the peer independently of the (untrusted) signaling server.
 type AuthResponseRequest struct {
 	Type string `msgpack:"type"`
-	Mac  []byte `msgpack:"mac"`
+	Mac  string `msgpack:"mac"` // base64-encoded HMAC-SHA256(sharedSecret, nonce)
 }
 
 func (m *AuthResponseRequest) MessageType() string { return "auth_response" }
@@ -173,7 +173,7 @@ func (m *SessionCreatedEvent) MessageType() string { return "session_created" }
 // this connection, preventing replay of a captured response across sessions.
 type AuthChallengeEvent struct {
 	Type  string `msgpack:"type"`
-	Nonce []byte `msgpack:"nonce"`
+	Nonce string `msgpack:"nonce"` // base64-encoded per-connection random nonce
 }
 
 func (m *AuthChallengeEvent) MessageType() string { return "auth_challenge" }

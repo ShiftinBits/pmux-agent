@@ -31,10 +31,10 @@ const (
 	MinDimension = 1
 	// MaxDimension is the largest allowed terminal dimension.
 	MaxDimension = 500
-	// MaxAuthBlobSize bounds the auth nonce/mac blobs. Both are 32 bytes
-	// (HMAC-SHA256); 64 gives headroom. Matches MAX_AUTH_BLOB_SIZE in
-	// @pocketmux/shared (src/codec.ts).
-	MaxAuthBlobSize = 64
+	// MaxAuthBlobLength bounds the base64-encoded auth nonce/mac strings. Both
+	// are 32 bytes (HMAC-SHA256) → ~44 base64 chars; 128 gives headroom.
+	// Matches MAX_AUTH_BLOB_LENGTH in @pocketmux/shared (src/codec.ts).
+	MaxAuthBlobLength = 128
 )
 
 // Validatable is implemented by message types that carry fields requiring
@@ -102,7 +102,7 @@ func (m *InputRequest) Validate() error {
 
 // Validate enforces bounds on an auth-response request.
 func (m *AuthResponseRequest) Validate() error {
-	return validateByteSize("auth_response", "mac", len(m.Mac), MaxAuthBlobSize)
+	return validateStringLen("auth_response", "mac", m.Mac, MaxAuthBlobLength)
 }
 
 // Validate enforces bounds on a resize request.

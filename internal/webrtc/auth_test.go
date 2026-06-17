@@ -3,6 +3,7 @@ package webrtc
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"testing"
 	"time"
@@ -10,12 +11,19 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 )
 
-// authMAC computes the expected key-possession proof for a nonce, mirroring the
-// agent's verifyAuthResponse and the mobile client.
-func authMAC(secret, nonce []byte) []byte {
+// authMAC computes the base64 key-possession proof for a raw nonce, mirroring
+// the agent's verifyAuthResponse and the mobile client.
+func authMAC(secret, nonce []byte) string {
 	m := hmac.New(sha256.New, secret)
 	m.Write(nonce)
-	return m.Sum(nil)
+	return base64.StdEncoding.EncodeToString(m.Sum(nil))
+}
+
+// authResponseForChallenge builds the base64 MAC response for a base64-encoded
+// challenge nonce (the wire form). Used by the end-to-end handshake tests.
+func authResponseForChallenge(secret []byte, nonceB64 string) string {
+	nonce, _ := base64.StdEncoding.DecodeString(nonceB64)
+	return authMAC(secret, nonce)
 }
 
 // newAuthTestPeer builds a minimal Peer suitable for exercising the auth gate

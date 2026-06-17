@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1042,7 +1043,8 @@ func (p *Peer) sendAuthChallenge() {
 	})
 	p.mu.Unlock()
 
-	if err := p.SendMessage(&protocol.AuthChallengeEvent{Type: "auth_challenge", Nonce: nonce}); err != nil {
+	challenge := &protocol.AuthChallengeEvent{Type: "auth_challenge", Nonce: base64.StdEncoding.EncodeToString(nonce)}
+	if err := p.SendMessage(challenge); err != nil {
 		p.logger.Warn("failed to send auth challenge", "error", err)
 		p.failAuth("challenge send failed")
 	}
@@ -1058,6 +1060,12 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		return
 	}
 
+	gotMAC, err := base64.StdEncoding.DecodeString(resp.Mac)
+	if err != nil {
+		p.failAuth("auth response MAC not valid base64")
+		return
+	}
+
 	p.mu.Lock()
 	nonce := p.authNonce
 	p.mu.Unlock()
@@ -1065,7 +1073,7 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	mac := hmac.New(sha256.New, p.sharedSecret)
 	mac.Write(nonce)
 	expected := mac.Sum(nil)
-	if !hmac.Equal(expected, resp.Mac) {
+	if !hmac.Equal(expected, gotMAC) {
 		p.failAuth("auth response MAC mismatch")
 		return
 	}
