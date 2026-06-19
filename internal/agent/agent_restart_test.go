@@ -2,7 +2,9 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/shiftinbits/pmux-agent/internal/auth"
+	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
 // Restart when nothing is running must NOT error (unlike a bare stop) — it just
@@ -24,11 +27,37 @@ func TestRunAgentRestart_NotRunning_StartsAnyway(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "Agent is not running") {
+	if !strings.Contains(output, "Agent was not running") {
 		t.Errorf("expected 'not running' note, got: %q", output)
 	}
 	if !strings.Contains(output, "Agent started") {
 		t.Errorf("expected 'Agent started', got: %q", output)
+	}
+}
+
+// A hard (non-sentinel) stop failure must short-circuit: start is not attempted,
+// and the error propagates — otherwise a failed stop could leave two agents.
+func TestRunAgentRestart_StopHardError_DoesNotStart(t *testing.T) {
+	paths := testPaths(t)
+
+	stopErr := errors.New("stop failed hard")
+	origStop, origStart := runAgentStop, runAgentStart
+	t.Cleanup(func() { runAgentStop, runAgentStart = origStop, origStart })
+
+	startCalled := false
+	runAgentStop = func(config.Paths, io.Writer) error { return stopErr }
+	runAgentStart = func(config.Paths, auth.SecretStore, io.Writer) error {
+		startCalled = true
+		return nil
+	}
+
+	var buf bytes.Buffer
+	err := RunAgentRestart(paths, auth.NewMemorySecretStore(), &buf)
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("expected the stop error to propagate, got: %v", err)
+	}
+	if startCalled {
+		t.Error("RunAgentStart must not be called when stop fails")
 	}
 }
 
