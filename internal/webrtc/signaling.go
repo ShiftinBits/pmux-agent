@@ -309,6 +309,10 @@ func (sc *SignalingClient) Suspend() {
 	sc.suspended = true
 
 	if sc.conn != nil {
+		// Bound the write: this runs inside logind's pre-suspend "delay" window
+		// (InhibitDelayMaxSec, default 5s), so a hung socket must not consume the
+		// whole budget before the suspend proceeds.
+		sc.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		sc.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		sc.conn.Close()
@@ -525,6 +529,10 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 			}
 
 			sc.mu.Lock()
+			// Bound the write: without a deadline a hung socket blocks this
+			// goroutine while it holds sc.mu, which would also stall Suspend()
+			// and Close() (they need the same lock) past the logind delay window.
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			err = conn.WriteMessage(websocket.TextMessage, data)
 			// Send a WebSocket-level PING so the server's automatic PONG
 			// response resets our read deadline via the PongHandler. This
@@ -535,6 +543,7 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 					websocket.PingMessage, nil, time.Now().Add(5*time.Second),
 				)
 			}
+			conn.SetWriteDeadline(time.Time{}) // clear for the next iteration
 			sc.mu.Unlock()
 
 			if err != nil {

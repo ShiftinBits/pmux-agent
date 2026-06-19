@@ -407,23 +407,26 @@ func TestReconnectInterval(t *testing.T) {
 
 func TestKeepaliveInterval(t *testing.T) {
 	tests := []struct {
-		name   string
-		value  string
-		expect time.Duration
+		name        string
+		value       string
+		expect      time.Duration
+		wantClamped bool
 	}{
-		{"30s", "30s", 30 * time.Second},
-		{"1m", "1m", 1 * time.Minute},
-		{"10s", "10s", 10 * time.Second},
-		{"invalid_fallback", "bad", 30 * time.Second},
+		{"30s", "30s", 30 * time.Second, false},
+		{"over_cap_clamped", "1m", MaxKeepaliveInterval, true},
+		{"10s", "10s", 10 * time.Second, false},
+		{"invalid_fallback", "bad", 30 * time.Second, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
 			cfg.Connection.KeepaliveInterval = tt.value
-			got := cfg.KeepaliveInterval()
-			if got != tt.expect {
+			if got := cfg.KeepaliveInterval(); got != tt.expect {
 				t.Errorf("KeepaliveInterval() = %v, want %v", got, tt.expect)
+			}
+			if got := cfg.KeepaliveClamped(); got != tt.wantClamped {
+				t.Errorf("KeepaliveClamped() = %v, want %v", got, tt.wantClamped)
 			}
 		})
 	}
@@ -805,27 +808,33 @@ func TestLoadConfig_KeepAwakeFromEnv(t *testing.T) {
 	}
 }
 
+// An over-cap keepalive_interval must NOT fail validation (that would hard-fail
+// the agent on startup after an upgrade); it is clamped to MaxKeepaliveInterval
+// instead, and KeepaliveClamped reports the clamp.
 func TestValidate_KeepaliveIntervalMax(t *testing.T) {
 	tests := []struct {
-		name     string
-		interval string
-		wantErr  bool
+		name        string
+		interval    string
+		wantClamped bool
+		wantEffect  time.Duration
 	}{
-		{"default 30s", "30s", false},
-		{"at the 45s cap", "45s", false},
-		{"just over the cap", "46s", true},
-		{"well over the cap", "120s", true},
+		{"default 30s", "30s", false, 30 * time.Second},
+		{"at the 45s cap", "45s", false, 45 * time.Second},
+		{"just over the cap", "46s", true, MaxKeepaliveInterval},
+		{"well over the cap", "120s", true, MaxKeepaliveInterval},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
 			cfg.Connection.KeepaliveInterval = tt.interval
-			err := cfg.Validate()
-			if tt.wantErr && err == nil {
-				t.Errorf("Validate() with keepalive_interval=%q: expected error, got nil", tt.interval)
-			}
-			if !tt.wantErr && err != nil {
+			if err := cfg.Validate(); err != nil {
 				t.Errorf("Validate() with keepalive_interval=%q: unexpected error: %v", tt.interval, err)
+			}
+			if got := cfg.KeepaliveClamped(); got != tt.wantClamped {
+				t.Errorf("KeepaliveClamped() = %v, want %v", got, tt.wantClamped)
+			}
+			if got := cfg.KeepaliveInterval(); got != tt.wantEffect {
+				t.Errorf("KeepaliveInterval() = %v, want %v", got, tt.wantEffect)
 			}
 		})
 	}

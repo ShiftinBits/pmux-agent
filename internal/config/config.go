@@ -504,16 +504,12 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.Connection.ReconnectInterval); err != nil {
 		return fmt.Errorf("connection.reconnect_interval: %w", err)
 	}
-	keepalive, err := time.ParseDuration(c.Connection.KeepaliveInterval)
-	if err != nil {
+	if _, err := time.ParseDuration(c.Connection.KeepaliveInterval); err != nil {
 		return fmt.Errorf("connection.keepalive_interval: %w", err)
 	}
-	// The signaling server reaps a host as offline after 90s of heartbeat
-	// silence, so keepalive must stay <= half that — otherwise a single dropped
-	// heartbeat would flap a live host offline. (Server: WS_IDLE_TIMEOUT_MS.)
-	if keepalive > 45*time.Second {
-		return fmt.Errorf("connection.keepalive_interval must not exceed 45s (signaling server marks a host offline after 90s of silence)")
-	}
+	// Note: an over-cap keepalive_interval is NOT a validation error — it would
+	// hard-fail the agent on startup after an upgrade for anyone who tuned it up.
+	// KeepaliveInterval() clamps it to MaxKeepaliveInterval instead.
 
 	// max_mobile_connections must be exactly 1 (single-pairing mode)
 	if c.Connection.MaxMobileConnections != 1 {
@@ -554,14 +550,40 @@ func (c *Config) ReconnectInterval() time.Duration {
 	return d
 }
 
-// KeepaliveInterval returns the parsed keepalive interval duration.
-// Falls back to 30s if parsing fails.
-func (c *Config) KeepaliveInterval() time.Duration {
+// MaxKeepaliveInterval caps the presence-heartbeat interval. The signaling
+// server reaps a host as offline after 90s of silence (WS_IDLE_TIMEOUT_MS), so
+// keepalive must stay <= half that — otherwise a single dropped heartbeat would
+// flap a live host offline.
+const MaxKeepaliveInterval = 45 * time.Second
+
+// parsedKeepalive returns the configured keepalive duration and whether it
+// parsed. Centralizing the parse keeps KeepaliveInterval and KeepaliveClamped
+// from drifting.
+func (c *Config) parsedKeepalive() (time.Duration, bool) {
 	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
-	if err != nil {
+	return d, err == nil
+}
+
+// KeepaliveInterval returns the configured keepalive interval duration, clamped
+// to MaxKeepaliveInterval. Falls back to 30s if parsing fails. Call
+// KeepaliveClamped to detect whether the configured value was capped.
+func (c *Config) KeepaliveInterval() time.Duration {
+	d, ok := c.parsedKeepalive()
+	if !ok {
 		return 30 * time.Second
 	}
+	if d > MaxKeepaliveInterval {
+		return MaxKeepaliveInterval
+	}
 	return d
+}
+
+// KeepaliveClamped reports whether the configured keepalive_interval exceeds
+// MaxKeepaliveInterval and was therefore clamped by KeepaliveInterval. An
+// unparseable value falls back to 30s and is not considered clamped.
+func (c *Config) KeepaliveClamped() bool {
+	d, ok := c.parsedKeepalive()
+	return ok && d > MaxKeepaliveInterval
 }
 
 // UpdateCheckInterval returns the parsed update check interval duration.
@@ -626,7 +648,11 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "identity.key_path = %q  (%s)\n", cfg.Identity.KeyPath, sources.KeyPath)
 	fmt.Fprintf(&b, "identity.secret_backend = %q  (%s)\n", cfg.Identity.SecretBackend, sources.SecretBackend)
 	fmt.Fprintf(&b, "connection.reconnect_interval = %q  (%s)\n", cfg.Connection.ReconnectInterval, sources.ReconnectInterval)
-	fmt.Fprintf(&b, "connection.keepalive_interval = %q  (%s)\n", cfg.Connection.KeepaliveInterval, sources.KeepaliveInterval)
+	keepaliveNote := ""
+	if cfg.KeepaliveClamped() {
+		keepaliveNote = fmt.Sprintf(" [clamped to %s]", MaxKeepaliveInterval)
+	}
+	fmt.Fprintf(&b, "connection.keepalive_interval = %q%s  (%s)\n", cfg.Connection.KeepaliveInterval, keepaliveNote, sources.KeepaliveInterval)
 	fmt.Fprintf(&b, "connection.max_mobile_connections = %d  (%s)\n", cfg.Connection.MaxMobileConnections, sources.MaxMobileConnections)
 	fmt.Fprintf(&b, "connection.force_relay = %v  (%s)\n", cfg.Connection.ForceRelay, sources.ForceRelay)
 	fmt.Fprintf(&b, "tmux.socket_name = %q  (%s)\n", cfg.Tmux.SocketName, sources.SocketName)
@@ -666,8 +692,8 @@ func CommentedDefaultConfig() string {
 
 [connection]
 # reconnect_interval = "5s"
-# How often the agent sends a presence heartbeat. Max 45s — the signaling
-# server marks a host offline after 90s of silence.
+# How often the agent sends a presence heartbeat. Values above 45s are clamped
+# to 45s — the signaling server marks a host offline after 90s of silence.
 # keepalive_interval = "30s"
 # max_mobile_connections = 1
 # Force ICE into relay-only (TURN) mode for testing/debugging (env: PMUX_FORCE_RELAY).

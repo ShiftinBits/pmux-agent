@@ -185,6 +185,10 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		}
 		peerManager.HandleSignalingMessage(msg)
 	}, logger, hmacSecret)
+	if cfg.KeepaliveClamped() {
+		logger.Warn("connection.keepalive_interval exceeds the maximum; clamping",
+			"configured", cfg.Connection.KeepaliveInterval, "max", config.MaxKeepaliveInterval)
+	}
 	signalingClient.PresenceInterval = cfg.KeepaliveInterval()
 	signalingClient.InitialBackoff = cfg.ReconnectInterval()
 
@@ -238,11 +242,15 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 
 	// Proactively mark the host offline the instant it is about to sleep, so
 	// presence is accurate immediately instead of after the server's idle
-	// timeout. This runs independently of keep_awake: when keep_awake is
-	// successfully blocking sleep this never fires; when sleep happens anyway
-	// (keep_awake off, lid close, low battery) it kicks in as the safety net.
+	// timeout. It complements keep_awake: when keep_awake is off (or unable to
+	// block sleep — lid close, etc.) this is the safety net. When keep_awake IS
+	// blocking sleep, the watcher is skipped — the sleeps that can still slip past
+	// a block inhibitor (firmware/kernel suspends, e.g. a direct ACPI or
+	// critical-battery suspend) bypass logind and never fire PrepareForSleep, so
+	// the watcher would hold an idle inhibitor for nothing; the server's freshness
+	// gate is the backstop for that rare case.
 	// Linux-only today; a no-op on other platforms.
-	startSleepWatcher(ctx, logger, signalingClient.Suspend, signalingClient.Resume)
+	startSleepWatcher(ctx, logger, cfg.Power.KeepAwake, signalingClient.Suspend, signalingClient.Resume)
 
 	// Handle SIGUSR1 to wake signaling client from dormancy.
 	// The supervisor sends SIGUSR1 on every pmux CLI invocation so that a

@@ -1031,10 +1031,23 @@ func TestSuspendResume_ToggleStateAndSignal(t *testing.T) {
 func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 	id, logger := testSetup(t)
 
+	// Signaled each time a connection reaches the server, so the test can wait
+	// on the actual connect event instead of guessing with fixed sleeps.
+	connected := make(chan struct{}, 1)
 	server := mockWSServer(t, func(conn *websocket.Conn) {
 		conn.ReadMessage() // auth
 		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
-		time.Sleep(3 * time.Second) // stay alive
+		// Signal only after auth completes, so the test's wait means "connected
+		// AND authed", not merely "TCP/WS handshake accepted".
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		for { // stay alive until the client disconnects (drains presence pings)
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
 	})
 	defer server.Close()
 
@@ -1046,7 +1059,7 @@ func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 	sc.suspended = true
 	sc.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan struct{})
@@ -1055,16 +1068,21 @@ func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let Run() enter the suspend wait
+	// While suspended, the loop must not connect. The 200ms is a reasonable
+	// dwell, not a hard bound — a spurious connect is a real bug, whereas a
+	// starved scheduler can only make this pass vacuously (never false-fail).
+	select {
+	case <-connected:
+		t.Fatal("client connected while suspended; the run loop should be paused")
+	case <-time.After(200 * time.Millisecond):
+	}
 
+	// Resume must wake the loop so it connects.
 	sc.Resume()
-
-	time.Sleep(300 * time.Millisecond) // let Run() process the resume
-	sc.mu.Lock()
-	suspendedAfter := sc.suspended
-	sc.mu.Unlock()
-	if suspendedAfter {
-		t.Error("expected suspended=false after Resume(), still suspended")
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not connect after Resume(); run loop was not woken")
 	}
 
 	cancel()

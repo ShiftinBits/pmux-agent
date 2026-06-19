@@ -28,7 +28,20 @@ const prepareForSleepSignal = "org.freedesktop.login1.Manager.PrepareForSleep"
 //
 // Best-effort: if logind is unavailable (no systemd) it logs and returns, and
 // the server's idle sweep remains the backstop.
-func startSleepWatcher(ctx context.Context, logger *slog.Logger, onSleep, onResume func()) {
+//
+// When keepAwake is set the watcher is a no-op: keep_awake holds a "block"
+// inhibitor, so logind-mediated sleeps don't happen and PrepareForSleep won't
+// fire. The sleeps that can still defeat a block inhibitor are firmware/kernel
+// suspends that bypass logind (e.g. a direct ACPI/critical-battery suspend),
+// which also don't fire PrepareForSleep — so arming a delay inhibitor here would
+// just hold an idle lock and a second bus connection for nothing. The server's
+// freshness gate is the backstop for those.
+func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool, onSleep, onResume func()) {
+	if keepAwake {
+		logger.Debug("sleep watcher skipped: keep_awake is blocking sleep")
+		return
+	}
+
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		logger.Warn("sleep watcher: cannot connect to system bus (no systemd-logind?); "+
