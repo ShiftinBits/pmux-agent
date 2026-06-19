@@ -392,6 +392,7 @@ func handleAgent(args []string) {
 		fmt.Fprintln(os.Stderr, "  run            Run the agent in the foreground")
 		fmt.Fprintln(os.Stderr, "  start          Start the agent")
 		fmt.Fprintln(os.Stderr, "  stop           Stop the agent")
+		fmt.Fprintln(os.Stderr, "  restart        Restart the agent")
 		fmt.Fprintln(os.Stderr, "  status         Show agent status")
 		os.Exit(1)
 	}
@@ -420,6 +421,8 @@ func handleAgent(args []string) {
 		handleAgentStart()
 	case "stop":
 		handleAgentStop()
+	case "restart":
+		handleAgentRestart()
 	case "status":
 		handleAgentStatus()
 	default:
@@ -476,6 +479,26 @@ func handleAgentStart() {
 	}
 
 	if err := agent.RunAgentStart(paths, store, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func handleAgentRestart() {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg := loadEffectiveConfig()
+	store, err := initSecretStore(paths, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := agent.RunAgentRestart(paths, store, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
 	}
@@ -562,6 +585,7 @@ Pocketmux commands:
   agent run            Run the agent in the foreground
   agent start          Start the agent
   agent stop           Stop the agent
+  agent restart        Restart the agent
   agent status         Show agent status and recent logs
   --version            Show version
   --help               Show this help
