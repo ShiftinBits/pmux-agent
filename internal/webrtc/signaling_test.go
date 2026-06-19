@@ -999,3 +999,78 @@ func TestParseJWTExpiry(t *testing.T) {
 		t.Error("expected zero time for invalid base64")
 	}
 }
+
+func TestSuspendResume_ToggleStateAndSignal(t *testing.T) {
+	id, logger := testSetup(t)
+	// No live connection needed; Suspend with a nil conn just sets the flag.
+	sc := NewSignalingClient(id, "http://localhost:1", "", nil, logger, "")
+
+	sc.Suspend()
+	sc.mu.Lock()
+	suspended := sc.suspended
+	sc.mu.Unlock()
+	if !suspended {
+		t.Fatal("expected suspended=true after Suspend()")
+	}
+
+	sc.Resume()
+	sc.mu.Lock()
+	suspended = sc.suspended
+	sc.mu.Unlock()
+	if suspended {
+		t.Error("expected suspended=false after Resume()")
+	}
+	// Resume must wake a waiting run loop via the activity signal.
+	select {
+	case <-sc.activitySignal:
+	default:
+		t.Error("expected Resume() to send an activity signal")
+	}
+}
+
+func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
+	id, logger := testSetup(t)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		time.Sleep(3 * time.Second) // stay alive
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	// Start the loop in the suspended state — it must pause, not connect.
+	sc.mu.Lock()
+	sc.suspended = true
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let Run() enter the suspend wait
+
+	sc.Resume()
+
+	time.Sleep(300 * time.Millisecond) // let Run() process the resume
+	sc.mu.Lock()
+	suspendedAfter := sc.suspended
+	sc.mu.Unlock()
+	if suspendedAfter {
+		t.Error("expected suspended=false after Resume(), still suspended")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}

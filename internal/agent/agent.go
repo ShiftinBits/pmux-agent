@@ -236,6 +236,14 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 		startKeepAwake(ctx, logger)
 	}
 
+	// Proactively mark the host offline the instant it is about to sleep, so
+	// presence is accurate immediately instead of after the server's idle
+	// timeout. This runs independently of keep_awake: when keep_awake is
+	// successfully blocking sleep this never fires; when sleep happens anyway
+	// (keep_awake off, lid close, low battery) it kicks in as the safety net.
+	// Linux-only today; a no-op on other platforms.
+	startSleepWatcher(ctx, logger, signalingClient.Suspend, signalingClient.Resume)
+
 	// Handle SIGUSR1 to wake signaling client from dormancy.
 	// The supervisor sends SIGUSR1 on every pmux CLI invocation so that a
 	// dormant agent resumes reconnection without requiring a manual restart.
