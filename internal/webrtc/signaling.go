@@ -101,6 +101,11 @@ type SignalingClient struct {
 	failureStart time.Time // when continuous failures began (zero if not failing)
 	dormant      bool      // true when in dormancy mode
 
+	// suspended is set while the host is sleeping. The run loop pauses
+	// reconnection (so the host does not re-register as online during the brief
+	// pre-suspend window) until Resume clears it. See Suspend/Resume.
+	suspended bool
+
 	// activitySignal wakes the client from dormancy. External callers (e.g.,
 	// the supervisor detecting new tmux commands) send on this channel to
 	// resume reconnection attempts.
@@ -113,16 +118,16 @@ type SignalingClient struct {
 // NewSignalingClient creates a signaling client for the given identity and server.
 func NewSignalingClient(identity *auth.Identity, serverURL string, hostName string, handler MessageHandler, logger *slog.Logger, hmacSecret string) *SignalingClient {
 	return &SignalingClient{
-		identity:         identity,
-		serverURL:        strings.TrimRight(serverURL, "/"),
-		handler:          handler,
-		logger:           logger,
-		hmacSecret:       hmacSecret,
-		hostName:         hostName,
+		identity:          identity,
+		serverURL:         strings.TrimRight(serverURL, "/"),
+		handler:           handler,
+		logger:            logger,
+		hmacSecret:        hmacSecret,
+		hostName:          hostName,
 		PresenceInterval:  DefaultPresenceInterval,
 		ReadDeadlineGrace: DefaultReadDeadlineGrace,
 		activitySignal:    make(chan struct{}, 1),
-		HTTPClient:       &http.Client{Timeout: 10 * time.Second},
+		HTTPClient:        &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -181,6 +186,22 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 				backoff = startBackoff
 				sc.logger.Info("activity signal received, resuming reconnection")
 			}
+		}
+
+		// Suspend check: while the host is sleeping, pause reconnection entirely
+		// so the agent does not re-register as online before the OS freezes it.
+		// Resume sends an activity signal to wake this wait.
+		sc.mu.Lock()
+		isSuspended := sc.suspended
+		sc.mu.Unlock()
+		if isSuspended {
+			sc.logger.Info("signaling suspended (host sleeping), waiting for resume")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-sc.activitySignal:
+			}
+			continue
 		}
 
 		connected, err := sc.connectAndServe(ctx)
@@ -268,6 +289,44 @@ func (sc *SignalingClient) JWT() string {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	return sc.jwt
+}
+
+// Suspend marks the host as going to sleep: it gracefully closes the current
+// signaling connection (sending a WebSocket close frame, which the server turns
+// into an immediate host_offline) and pauses reconnection until Resume is
+// called. This makes the host's offline status accurate the instant it sleeps,
+// rather than waiting for the server's idle timeout. No-op if already shut down.
+//
+// Unlike Close, this does not permanently shut the client down — the run loop
+// stays alive, paused, ready to reconnect when Resume fires.
+func (sc *SignalingClient) Suspend() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if sc.closed {
+		return
+	}
+	sc.suspended = true
+
+	if sc.conn != nil {
+		// Bound the write: this runs inside logind's pre-suspend "delay" window
+		// (InhibitDelayMaxSec, default 5s), so a hung socket must not consume the
+		// whole budget before the suspend proceeds.
+		sc.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		sc.conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		sc.conn.Close()
+	}
+}
+
+// Resume clears the suspended state and wakes the run loop so the agent
+// reconnects and re-registers presence after the host wakes from sleep.
+// Safe to call from any goroutine; a no-op if not currently suspended.
+func (sc *SignalingClient) Resume() {
+	sc.mu.Lock()
+	sc.suspended = false
+	sc.mu.Unlock()
+	sc.SignalActivity()
 }
 
 // Close shuts down the signaling client.
@@ -470,6 +529,10 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 			}
 
 			sc.mu.Lock()
+			// Bound the write: without a deadline a hung socket blocks this
+			// goroutine while it holds sc.mu, which would also stall Suspend()
+			// and Close() (they need the same lock) past the logind delay window.
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			err = conn.WriteMessage(websocket.TextMessage, data)
 			// Send a WebSocket-level PING so the server's automatic PONG
 			// response resets our read deadline via the PongHandler. This
@@ -480,6 +543,7 @@ func (sc *SignalingClient) presenceLoop(ctx context.Context, conn *websocket.Con
 					websocket.PingMessage, nil, time.Now().Add(5*time.Second),
 				)
 			}
+			conn.SetWriteDeadline(time.Time{}) // clear for the next iteration
 			sc.mu.Unlock()
 
 			if err != nil {

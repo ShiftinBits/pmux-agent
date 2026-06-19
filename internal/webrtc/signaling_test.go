@@ -999,3 +999,96 @@ func TestParseJWTExpiry(t *testing.T) {
 		t.Error("expected zero time for invalid base64")
 	}
 }
+
+func TestSuspendResume_ToggleStateAndSignal(t *testing.T) {
+	id, logger := testSetup(t)
+	// No live connection needed; Suspend with a nil conn just sets the flag.
+	sc := NewSignalingClient(id, "http://localhost:1", "", nil, logger, "")
+
+	sc.Suspend()
+	sc.mu.Lock()
+	suspended := sc.suspended
+	sc.mu.Unlock()
+	if !suspended {
+		t.Fatal("expected suspended=true after Suspend()")
+	}
+
+	sc.Resume()
+	sc.mu.Lock()
+	suspended = sc.suspended
+	sc.mu.Unlock()
+	if suspended {
+		t.Error("expected suspended=false after Resume()")
+	}
+	// Resume must wake a waiting run loop via the activity signal.
+	select {
+	case <-sc.activitySignal:
+	default:
+		t.Error("expected Resume() to send an activity signal")
+	}
+}
+
+func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
+	id, logger := testSetup(t)
+
+	// Signaled each time a connection reaches the server, so the test can wait
+	// on the actual connect event instead of guessing with fixed sleeps.
+	connected := make(chan struct{}, 1)
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		// Signal only after auth completes, so the test's wait means "connected
+		// AND authed", not merely "TCP/WS handshake accepted".
+		select {
+		case connected <- struct{}{}:
+		default:
+		}
+		for { // stay alive until the client disconnects (drains presence pings)
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	// Start the loop in the suspended state — it must pause, not connect.
+	sc.mu.Lock()
+	sc.suspended = true
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// While suspended, the loop must not connect. The 200ms is a reasonable
+	// dwell, not a hard bound — a spurious connect is a real bug, whereas a
+	// starved scheduler can only make this pass vacuously (never false-fail).
+	select {
+	case <-connected:
+		t.Fatal("client connected while suspended; the run loop should be paused")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Resume must wake the loop so it connects.
+	sc.Resume()
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not connect after Resume(); run loop was not woken")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}

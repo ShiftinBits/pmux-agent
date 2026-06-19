@@ -40,6 +40,7 @@ const (
 	EnvUpdateEnabled  = "PMUX_UPDATE_ENABLED"
 	EnvUpdateInterval = "PMUX_UPDATE_INTERVAL"
 	EnvForceRelay     = "PMUX_FORCE_RELAY"
+	EnvKeepAwake      = "PMUX_KEEP_AWAKE"
 )
 
 // Config holds user-editable Pocketmux configuration from config.toml.
@@ -51,6 +52,22 @@ type Config struct {
 	Connection ConnectionConfig `toml:"connection"`
 	Tmux       TmuxConfig       `toml:"tmux"`
 	Update     UpdateConfig     `toml:"update"`
+	Power      PowerConfig      `toml:"power"`
+}
+
+// PowerConfig holds power-management configuration.
+type PowerConfig struct {
+	// KeepAwake, when true, prevents the host from sleeping/idle-suspending
+	// while the agent runs, so the mobile can reach it on demand. Best-effort:
+	// macOS clamshell (lid-closed) sleep and forced low-battery sleep are not
+	// inhibited, and non-systemd Linux has no inhibitor. Default false.
+	KeepAwake bool `toml:"keep_awake"`
+}
+
+// filePowerConfig is used for TOML unmarshaling so we can distinguish
+// "keep_awake absent" (nil) from "keep_awake = false" (pointer to false).
+type filePowerConfig struct {
+	KeepAwake *bool `toml:"keep_awake"`
 }
 
 // UpdateConfig holds auto-update configuration.
@@ -85,6 +102,7 @@ type fileConfig struct {
 	Connection fileConnectionConfig `toml:"connection"`
 	Tmux       TmuxConfig           `toml:"tmux"`
 	Update     fileUpdateConfig     `toml:"update"`
+	Power      filePowerConfig      `toml:"power"`
 }
 
 // ServerConfig holds signaling server configuration.
@@ -158,6 +176,7 @@ type ConfigSources struct {
 	LogLevel             configSource
 	UpdateEnabled        configSource
 	UpdateCheckInterval  configSource
+	KeepAwake            configSource
 }
 
 // Defaults returns the default configuration.
@@ -275,6 +294,9 @@ func overlayFile(cfg *Config, fileCfg *fileConfig) {
 	if fileCfg.Update.Enabled != nil {
 		cfg.Update.Enabled = *fileCfg.Update.Enabled
 	}
+	if fileCfg.Power.KeepAwake != nil {
+		cfg.Power.KeepAwake = *fileCfg.Power.KeepAwake
+	}
 }
 
 // overlayFileTracked is like overlayFile but also records source annotations.
@@ -335,6 +357,10 @@ func overlayFileTracked(cfg *Config, fileCfg *fileConfig, sources *ConfigSources
 		cfg.Update.Enabled = *fileCfg.Update.Enabled
 		sources.UpdateEnabled = sourceFile
 	}
+	if fileCfg.Power.KeepAwake != nil {
+		cfg.Power.KeepAwake = *fileCfg.Power.KeepAwake
+		sources.KeepAwake = sourceFile
+	}
 }
 
 // applyEnvOverrides overlays environment variable values onto the config.
@@ -379,6 +405,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv(EnvForceRelay); v != "" {
 		cfg.Connection.ForceRelay = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv(EnvKeepAwake); v != "" {
+		cfg.Power.KeepAwake = v == "true" || v == "1" || v == "yes"
 	}
 }
 
@@ -433,6 +462,10 @@ func applyEnvOverridesTracked(cfg *Config, sources *ConfigSources) {
 		cfg.Connection.ForceRelay = v == "true" || v == "1" || v == "yes"
 		sources.ForceRelay = sourceEnv
 	}
+	if v := os.Getenv(EnvKeepAwake); v != "" {
+		cfg.Power.KeepAwake = v == "true" || v == "1" || v == "yes"
+		sources.KeepAwake = sourceEnv
+	}
 }
 
 // Validate checks that the config values are well-formed.
@@ -474,6 +507,9 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.Connection.KeepaliveInterval); err != nil {
 		return fmt.Errorf("connection.keepalive_interval: %w", err)
 	}
+	// Note: an over-cap keepalive_interval is NOT a validation error — it would
+	// hard-fail the agent on startup after an upgrade for anyone who tuned it up.
+	// KeepaliveInterval() clamps it to MaxKeepaliveInterval instead.
 
 	// max_mobile_connections must be exactly 1 (single-pairing mode)
 	if c.Connection.MaxMobileConnections != 1 {
@@ -514,14 +550,40 @@ func (c *Config) ReconnectInterval() time.Duration {
 	return d
 }
 
-// KeepaliveInterval returns the parsed keepalive interval duration.
-// Falls back to 30s if parsing fails.
-func (c *Config) KeepaliveInterval() time.Duration {
+// MaxKeepaliveInterval caps the presence-heartbeat interval. The signaling
+// server reaps a host as offline after 90s of silence (WS_IDLE_TIMEOUT_MS), so
+// keepalive must stay <= half that — otherwise a single dropped heartbeat would
+// flap a live host offline.
+const MaxKeepaliveInterval = 45 * time.Second
+
+// parsedKeepalive returns the configured keepalive duration and whether it
+// parsed. Centralizing the parse keeps KeepaliveInterval and KeepaliveClamped
+// from drifting.
+func (c *Config) parsedKeepalive() (time.Duration, bool) {
 	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
-	if err != nil {
+	return d, err == nil
+}
+
+// KeepaliveInterval returns the configured keepalive interval duration, clamped
+// to MaxKeepaliveInterval. Falls back to 30s if parsing fails. Call
+// KeepaliveClamped to detect whether the configured value was capped.
+func (c *Config) KeepaliveInterval() time.Duration {
+	d, ok := c.parsedKeepalive()
+	if !ok {
 		return 30 * time.Second
 	}
+	if d > MaxKeepaliveInterval {
+		return MaxKeepaliveInterval
+	}
 	return d
+}
+
+// KeepaliveClamped reports whether the configured keepalive_interval exceeds
+// MaxKeepaliveInterval and was therefore clamped by KeepaliveInterval. An
+// unparseable value falls back to 30s and is not considered clamped.
+func (c *Config) KeepaliveClamped() bool {
+	d, ok := c.parsedKeepalive()
+	return ok && d > MaxKeepaliveInterval
 }
 
 // UpdateCheckInterval returns the parsed update check interval duration.
@@ -586,13 +648,18 @@ func FormatEffective(cfg Config, sources ConfigSources) string {
 	fmt.Fprintf(&b, "identity.key_path = %q  (%s)\n", cfg.Identity.KeyPath, sources.KeyPath)
 	fmt.Fprintf(&b, "identity.secret_backend = %q  (%s)\n", cfg.Identity.SecretBackend, sources.SecretBackend)
 	fmt.Fprintf(&b, "connection.reconnect_interval = %q  (%s)\n", cfg.Connection.ReconnectInterval, sources.ReconnectInterval)
-	fmt.Fprintf(&b, "connection.keepalive_interval = %q  (%s)\n", cfg.Connection.KeepaliveInterval, sources.KeepaliveInterval)
+	keepaliveNote := ""
+	if cfg.KeepaliveClamped() {
+		keepaliveNote = fmt.Sprintf(" [clamped to %s]", MaxKeepaliveInterval)
+	}
+	fmt.Fprintf(&b, "connection.keepalive_interval = %q%s  (%s)\n", cfg.Connection.KeepaliveInterval, keepaliveNote, sources.KeepaliveInterval)
 	fmt.Fprintf(&b, "connection.max_mobile_connections = %d  (%s)\n", cfg.Connection.MaxMobileConnections, sources.MaxMobileConnections)
 	fmt.Fprintf(&b, "connection.force_relay = %v  (%s)\n", cfg.Connection.ForceRelay, sources.ForceRelay)
 	fmt.Fprintf(&b, "tmux.socket_name = %q  (%s)\n", cfg.Tmux.SocketName, sources.SocketName)
 	fmt.Fprintf(&b, "tmux.tmux_path = %q  (%s)\n", cfg.Tmux.TmuxPath, sources.TmuxPath)
 	fmt.Fprintf(&b, "update.enabled = %v  (%s)\n", cfg.Update.Enabled, sources.UpdateEnabled)
 	fmt.Fprintf(&b, "update.check_interval = %q  (%s)\n", cfg.Update.CheckInterval, sources.UpdateCheckInterval)
+	fmt.Fprintf(&b, "power.keep_awake = %v  (%s)\n", cfg.Power.KeepAwake, sources.KeepAwake)
 	return b.String()
 }
 
@@ -625,6 +692,8 @@ func CommentedDefaultConfig() string {
 
 [connection]
 # reconnect_interval = "5s"
+# How often the agent sends a presence heartbeat. Values above 45s are clamped
+# to 45s — the signaling server marks a host offline after 90s of silence.
 # keepalive_interval = "30s"
 # max_mobile_connections = 1
 # Force ICE into relay-only (TURN) mode for testing/debugging (env: PMUX_FORCE_RELAY).
@@ -645,6 +714,15 @@ func CommentedDefaultConfig() string {
 # enabled = true
 # How often the agent checks for updates (env: PMUX_UPDATE_INTERVAL)
 # check_interval = "24h"
+
+[power]
+# Keep the host awake while the agent is running (env: PMUX_KEEP_AWAKE).
+# Prevents idle sleep so the mobile app can reach this host on demand — a
+# sleeping machine drops off the network and shows offline shortly after.
+# Best-effort: on macOS this does NOT override closing the laptop lid
+# (clamshell sleep) or forced low-battery sleep; on Linux it requires systemd.
+# Defaults to false.
+# keep_awake = false
 `
 }
 

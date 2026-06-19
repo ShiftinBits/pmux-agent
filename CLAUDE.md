@@ -48,6 +48,7 @@ Config file: `~/.config/pmux/config.toml`
 | `PMUX_SECRET_BACKEND` | `keyring` or `file` |
 | `PMUX_MAX_CONNECTIONS` | Max concurrent WebRTC connections |
 | `PMUX_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `PMUX_KEEP_AWAKE` | Inhibit host sleep while the agent runs (default: `false`) |
 
 ## Dependencies
 

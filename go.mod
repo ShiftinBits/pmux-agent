@@ -3,6 +3,7 @@ module github.com/shiftinbits/pmux-agent
 go 1.25.11
 
 require (
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/minio/selfupdate v0.6.0
 	github.com/pelletier/go-toml/v2 v2.2.4
@@ -18,7 +19,6 @@ require (
 	aead.dev/minisign v0.2.0 // indirect
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect

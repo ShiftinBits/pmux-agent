@@ -407,23 +407,26 @@ func TestReconnectInterval(t *testing.T) {
 
 func TestKeepaliveInterval(t *testing.T) {
 	tests := []struct {
-		name   string
-		value  string
-		expect time.Duration
+		name        string
+		value       string
+		expect      time.Duration
+		wantClamped bool
 	}{
-		{"30s", "30s", 30 * time.Second},
-		{"1m", "1m", 1 * time.Minute},
-		{"10s", "10s", 10 * time.Second},
-		{"invalid_fallback", "bad", 30 * time.Second},
+		{"30s", "30s", 30 * time.Second, false},
+		{"over_cap_clamped", "1m", MaxKeepaliveInterval, true},
+		{"10s", "10s", 10 * time.Second, false},
+		{"invalid_fallback", "bad", 30 * time.Second, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
 			cfg.Connection.KeepaliveInterval = tt.value
-			got := cfg.KeepaliveInterval()
-			if got != tt.expect {
+			if got := cfg.KeepaliveInterval(); got != tt.expect {
 				t.Errorf("KeepaliveInterval() = %v, want %v", got, tt.expect)
+			}
+			if got := cfg.KeepaliveClamped(); got != tt.wantClamped {
+				t.Errorf("KeepaliveClamped() = %v, want %v", got, tt.wantClamped)
 			}
 		})
 	}
@@ -479,7 +482,7 @@ func TestValidate_UpdateCheckInterval(t *testing.T) {
 }
 
 func TestLoadConfigWithSources_AllFieldsFromFile(t *testing.T) {
-	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvSecretBackend, EnvUpdateEnabled, EnvUpdateInterval} {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvSecretBackend, EnvUpdateEnabled, EnvUpdateInterval, EnvKeepAwake} {
 		t.Setenv(env, "")
 	}
 
@@ -509,6 +512,9 @@ tmux_path = "/usr/local/bin/tmux"
 [update]
 enabled = false
 check_interval = "12h"
+
+[power]
+keep_awake = true
 `
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatalf("WriteFile() error: %v", err)
@@ -556,6 +562,9 @@ check_interval = "12h"
 	if sources.UpdateEnabled != sourceFile {
 		t.Errorf("UpdateEnabled source = %v, want file", sources.UpdateEnabled)
 	}
+	if sources.KeepAwake != sourceFile {
+		t.Errorf("KeepAwake source = %v, want file", sources.KeepAwake)
+	}
 }
 
 func TestLoadConfigWithSources_AllFieldsFromEnv(t *testing.T) {
@@ -568,6 +577,7 @@ func TestLoadConfigWithSources_AllFieldsFromEnv(t *testing.T) {
 	t.Setenv(EnvLogLevel, "error")
 	t.Setenv(EnvUpdateEnabled, "false")
 	t.Setenv(EnvUpdateInterval, "6h")
+	t.Setenv(EnvKeepAwake, "true")
 
 	_, sources, err := LoadConfigWithSources("/nonexistent/config.toml")
 	if err != nil {
@@ -600,6 +610,9 @@ func TestLoadConfigWithSources_AllFieldsFromEnv(t *testing.T) {
 	}
 	if sources.UpdateCheckInterval != sourceEnv {
 		t.Errorf("UpdateCheckInterval source = %v, want env", sources.UpdateCheckInterval)
+	}
+	if sources.KeepAwake != sourceEnv {
+		t.Errorf("KeepAwake source = %v, want env", sources.KeepAwake)
 	}
 }
 
@@ -722,6 +735,108 @@ func TestLoadConfig_ForceRelayFromEnv(t *testing.T) {
 	}
 	if sources.ForceRelay != sourceEnv {
 		t.Errorf("ForceRelay source = %v, want env", sources.ForceRelay)
+	}
+}
+
+func TestLoadConfig_KeepAwakeFromFile(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval, EnvKeepAwake} {
+		t.Setenv(env, "")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[power]
+keep_awake = true
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, sources, err := LoadConfigWithSources(path)
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if !cfg.Power.KeepAwake {
+		t.Error("Power.KeepAwake should be true from file")
+	}
+	if sources.KeepAwake != sourceFile {
+		t.Errorf("KeepAwake source = %v, want file", sources.KeepAwake)
+	}
+}
+
+func TestLoadConfig_KeepAwakeDefaultsFalse(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval, EnvKeepAwake} {
+		t.Setenv(env, "")
+	}
+
+	// Config file with a [power] section but no keep_awake key — must stay false.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[power]
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Power.KeepAwake {
+		t.Error("Power.KeepAwake should default to false when absent")
+	}
+}
+
+func TestLoadConfig_KeepAwakeFromEnv(t *testing.T) {
+	for _, env := range []string{EnvNewServerURL, EnvServerURL, EnvKeyPath, EnvSocketName, EnvMaxConnections, EnvTmuxPath, EnvLogLevel, EnvUpdateEnabled, EnvUpdateInterval} {
+		t.Setenv(env, "")
+	}
+
+	t.Setenv(EnvKeepAwake, "1")
+
+	cfg, sources, err := LoadConfigWithSources("/nonexistent/config.toml")
+	if err != nil {
+		t.Fatalf("LoadConfigWithSources() error: %v", err)
+	}
+	if !cfg.Power.KeepAwake {
+		t.Error("Power.KeepAwake should be true from env (PMUX_KEEP_AWAKE=1)")
+	}
+	if sources.KeepAwake != sourceEnv {
+		t.Errorf("KeepAwake source = %v, want env", sources.KeepAwake)
+	}
+}
+
+// An over-cap keepalive_interval must NOT fail validation (that would hard-fail
+// the agent on startup after an upgrade); it is clamped to MaxKeepaliveInterval
+// instead, and KeepaliveClamped reports the clamp.
+func TestValidate_KeepaliveIntervalMax(t *testing.T) {
+	tests := []struct {
+		name        string
+		interval    string
+		wantClamped bool
+		wantEffect  time.Duration
+	}{
+		{"default 30s", "30s", false, 30 * time.Second},
+		{"at the 45s cap", "45s", false, 45 * time.Second},
+		{"just over the cap", "46s", true, MaxKeepaliveInterval},
+		{"well over the cap", "120s", true, MaxKeepaliveInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Connection.KeepaliveInterval = tt.interval
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() with keepalive_interval=%q: unexpected error: %v", tt.interval, err)
+			}
+			if got := cfg.KeepaliveClamped(); got != tt.wantClamped {
+				t.Errorf("KeepaliveClamped() = %v, want %v", got, tt.wantClamped)
+			}
+			if got := cfg.KeepaliveInterval(); got != tt.wantEffect {
+				t.Errorf("KeepaliveInterval() = %v, want %v", got, tt.wantEffect)
+			}
+		})
 	}
 }
 
@@ -1133,6 +1248,7 @@ func TestFormatEffective(t *testing.T) {
 		`tmux.tmux_path = ""  (default)`,
 		`connection.max_mobile_connections = 1  (default)`,
 		`log_level = "info"  (default)`,
+		`power.keep_awake = false  (default)`,
 	}) {
 		t.Errorf("FormatEffective() output missing expected content:\n%s", output)
 	}
@@ -1146,6 +1262,9 @@ func TestCommentedDefaultConfig(t *testing.T) {
 		"[identity]",
 		"[connection]",
 		"[tmux]",
+		"[power]",
+		"PMUX_KEEP_AWAKE",
+		"# keep_awake = false",
 		"PMUX_SERVER_URL",
 		"PMUX_API_VERSION",
 		"PMUX_KEY_PATH",
