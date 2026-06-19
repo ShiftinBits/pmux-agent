@@ -229,6 +229,13 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	// Propagate agent context to handler so per-peer contexts are canceled on shutdown.
 	handler.SetContext(ctx)
 
+	// Optionally inhibit host sleep so the mobile can reach this host on demand.
+	// A sleeping machine drops its signaling connection and the host shows
+	// offline. Tied to ctx — the inhibitor is released on agent shutdown.
+	if cfg.Power.KeepAwake {
+		startKeepAwake(ctx, logger)
+	}
+
 	// Handle SIGUSR1 to wake signaling client from dormancy.
 	// The supervisor sends SIGUSR1 on every pmux CLI invocation so that a
 	// dormant agent resumes reconnection without requiring a manual restart.
