@@ -1,6 +1,6 @@
 module github.com/shiftinbits/pmux-agent
 
-go 1.25.11
+go 1.25.13
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0
