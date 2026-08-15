@@ -9,7 +9,7 @@ jobs:
   index:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ShiftinBits/constellation-github@v1
         with:
           access-key: ${{ secrets.CONSTELLATION_ACCESS_KEY }}
