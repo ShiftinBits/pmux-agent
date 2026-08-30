@@ -12,7 +12,7 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/zalando/go-keyring v0.2.6
-	golang.org/x/crypto v0.53.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -36,7 +36,7 @@ require (
 	github.com/pion/turn/v4 v4.1.4 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
