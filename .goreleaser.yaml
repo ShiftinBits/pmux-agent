@@ -184,7 +184,24 @@ homebrew_casks:
       trash:
         - "~/.config/pmux"
 
-    hooks:
-      pre:
-        uninstall: |
-          system_command "#{staged_path}/pmux", args: ["uninstall", "--keep-config", "--yes"]
+    # Stop the running agent before the binary is removed.
+    #
+    # Homebrew 6 deprecated the raw-Ruby `uninstall_preflight` stanza that
+    # GoReleaser's `hooks.pre.uninstall` emits, so every brew command printed
+    # a deprecation warning for this cask. The replacement stanza
+    # (`uninstall_preflight_steps`) only accepts Homebrew's declarative
+    # install-steps DSL, and released GoReleaser has no option for it yet
+    # (see goreleaser/goreleaser#6873), so it goes through `custom_block`.
+    # Move it to `hooks.pre.uninstall_steps` once that PR ships.
+    #
+    # Why not `run "pmux uninstall"`: steps execute in Homebrew's sandbox with
+    # $HOME pointed at a throwaway directory, so pmux would look for its PID
+    # file there and silently stop nothing. Instead, mirror StopRunning
+    # (internal/agent/supervisor.go) in shell: SIGTERM the agent by argv,
+    # wait up to 3s for it to exit, then SIGKILL. The `[r]un` bracket keeps
+    # pgrep/pkill from matching the shell's own argv. The agent removes its
+    # PID file on shutdown, so nothing else to clean up here.
+    custom_block: |
+      uninstall_preflight_steps do
+        run "/bin/sh", args: ["-c", "pkill -f 'pmux agent [r]un' || exit 0; for _ in $(seq 30); do pgrep -f 'pmux agent [r]un' >/dev/null || exit 0; sleep 0.1; done; pkill -9 -f 'pmux agent [r]un'"], must_succeed: false
+      end
