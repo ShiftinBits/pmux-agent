@@ -18,7 +18,7 @@ pmux ls
 - **Ed25519 identity** — no passwords, no accounts; cryptographic keypair generated locally at setup
 - **QR code pairing** — scan once from the mobile app to establish a secure link
 - **Auto-starting agent** — the background agent starts automatically on any `pmux` command; nothing to install or manage
-- **Cross-platform** — macOS (universal binary) and Linux (amd64, arm64)
+- **Cross-platform** — macOS (universal binary), Linux (amd64, arm64), and Windows via WSL
 
 ## Install
 
@@ -28,6 +28,8 @@ brew install shiftinbits/tap/pmux
 ```
 
 Pre-built binaries and DEB/RPM/Snap packages are available on [GitHub Releases](https://github.com/ShiftinBits/pmux-agent/releases).
+
+On Windows, install inside [WSL](https://learn.microsoft.com/windows/wsl/install) using Homebrew or the Linux packages above.
 
 ## Getting Started
 
