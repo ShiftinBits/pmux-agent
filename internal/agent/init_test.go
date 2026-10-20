@@ -139,6 +139,64 @@ func TestRunInit_PreservesExistingConfig(t *testing.T) {
 	}
 }
 
+func TestRunInit_ExistingConfigWithName(t *testing.T) {
+	paths := testPaths(t)
+	original := "name = \"preset\"\n\n[identity]\nkey_path = \"/custom/keys\"\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunInit(paths, cfg, auth.NewMemorySecretStore(), "/usr/local/bin/tmux", strings.NewReader("ignored\n"), &out); err != nil {
+		t.Fatalf("RunInit: %v", err)
+	}
+
+	if strings.Contains(out.String(), "Host name [") {
+		t.Errorf("should not prompt when config already has a name, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Host name: preset") {
+		t.Errorf("expected configured name in output, got: %s", out.String())
+	}
+	data, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Errorf("config should be untouched, got: %s", data)
+	}
+}
+
+func TestRunInit_ConfigWriteErrors(t *testing.T) {
+	t.Run("fresh config", func(t *testing.T) {
+		paths := testPaths(t)
+		// A directory at the config path: unreadable as a file, and unwritable.
+		if err := os.Mkdir(paths.ConfigFile, 0700); err != nil {
+			t.Fatal(err)
+		}
+		err := RunInit(paths, config.Defaults(), auth.NewMemorySecretStore(), "", strings.NewReader("h\n"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "failed to save config") {
+			t.Errorf("RunInit error = %v, want save failure", err)
+		}
+	})
+	t.Run("existing config without name", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores file permissions")
+		}
+		paths := testPaths(t)
+		if err := os.WriteFile(paths.ConfigFile, []byte("[tmux]\n"), 0400); err != nil {
+			t.Fatal(err)
+		}
+		err := RunInit(paths, config.Defaults(), auth.NewMemorySecretStore(), "", strings.NewReader("h\n"), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "failed to save config") {
+			t.Errorf("RunInit error = %v, want save failure", err)
+		}
+	})
+}
+
 func TestRunInit_FreshInit_DefaultHostname(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()

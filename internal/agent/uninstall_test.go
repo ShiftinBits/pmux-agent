@@ -205,6 +205,21 @@ func TestRunUninstall_ExternalKeysDir(t *testing.T) {
 	}
 }
 
+func TestRunUninstall_ExternalKeysDir_RemoveError(t *testing.T) {
+	paths := testUninstallPaths(t.TempDir())
+	paths.KeysDir = filepath.Join(t.TempDir(), "external-keys")
+
+	// A non-empty directory where a key file should be makes os.Remove fail.
+	if err := os.MkdirAll(filepath.Join(paths.KeysDir, "secrets.enc", "child"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunUninstall(paths, auth.NewMemorySecretStore(), false, "", true, strings.NewReader(""), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "remove key files") {
+		t.Errorf("RunUninstall error = %v, want key file removal failure", err)
+	}
+}
+
 func TestRunUninstall_YesFlag_SkipsPrompt(t *testing.T) {
 	dir := t.TempDir()
 	paths := testUninstallPaths(dir)
