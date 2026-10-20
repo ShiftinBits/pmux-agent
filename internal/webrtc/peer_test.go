@@ -2486,3 +2486,45 @@ func TestPeerManager_CloseAll_Empty(t *testing.T) {
 	// Should not panic
 	pm.CloseAll()
 }
+
+func TestPeerManager_ICECandidateBufferCapped(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	api := fastAPI(t)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "test-jwt" }, nil, "")
+	pm.API = api
+
+	const deviceID = "mobile-icecap"
+
+	pm.SetAllowedDeviceID(deviceID)
+	pm.SharedSecretFn = testSharedSecretFn
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: deviceID,
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	peer := getPeer(pm, deviceID)
+	if peer == nil {
+		t.Fatal("peer should exist after connect_request")
+	}
+
+	mLineIdx := 0
+	for i := 0; i < 100; i++ {
+		pm.HandleSignalingMessage(SignalingMessage{
+			Type:           "ice_candidate",
+			TargetDeviceID: deviceID,
+			Candidate:      fmt.Sprintf("candidate:%d 1 UDP 2130706431 192.168.1.1 %d typ host", i, 10000+i),
+			SDPMid:         "0",
+			SDPMLineIndex:  &mLineIdx,
+		})
+	}
+
+	peer.mu.Lock()
+	n := len(peer.iceCandidates)
+	peer.mu.Unlock()
+	if n != maxBufferedICECandidates {
+		t.Errorf("buffered %d candidates, want %d", n, maxBufferedICECandidates)
+	}
+}

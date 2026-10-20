@@ -23,6 +23,10 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/protocol"
 )
 
+// maxBufferedICECandidates caps candidates buffered before the remote
+// description is set, bounding memory from a flooding signaling peer.
+const maxBufferedICECandidates = 64
+
 // DataChannelLabel is the name of the WebRTC DataChannel used for terminal protocol.
 const DataChannelLabel = "terminal"
 
@@ -721,6 +725,11 @@ func (pm *PeerManager) handleICECandidate(mobileDeviceID string, candidate strin
 
 	peer.mu.Lock()
 	if !peer.remoteDescSet {
+		if len(peer.iceCandidates) >= maxBufferedICECandidates {
+			peer.mu.Unlock()
+			pm.logger.Warn("ICE candidate buffer full, dropping candidate", "mobile", mobileDeviceID, "limit", maxBufferedICECandidates)
+			return
+		}
 		peer.iceCandidates = append(peer.iceCandidates, ice)
 		peer.mu.Unlock()
 		pm.logger.Debug("ICE candidate buffered (remote desc not set)", "mobile", mobileDeviceID)
