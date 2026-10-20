@@ -270,7 +270,8 @@ func TestSdpSHA256Fingerprint(t *testing.T) {
 		},
 		{
 			// This parser rule alone is not the security boundary: Pion's DTLS
-			// accepts a certificate matching any fingerprint line, so a genuine
+			// validates the certificate against a single fingerprint line of
+			// any algorithm (here the first media-level one), so a genuine
 			// sha-1 line can precede an arbitrary sha-256 one. The cross-check
 			// against the negotiated certificates in sendAuthChallenge
 			// (verifyDTLSFingerprints) is what rejects that.
@@ -306,6 +307,16 @@ func TestSdpSHA256Fingerprint(t *testing.T) {
 		{
 			name:    "bad hex",
 			sdp:     session + media + "a=fingerprint:sha-256 ZZ" + colonHex(fpA)[2:] + "\r\n",
+			wantErr: true,
+		},
+		{
+			name:    "misplaced colon separators",
+			sdp:     session + media + "a=fingerprint:sha-256 0" + colonHex(fpA)[:94] + "\r\n",
+			wantErr: true,
+		},
+		{
+			name:    "colon in an octet position",
+			sdp:     session + media + "a=fingerprint:sha-256 :" + colonHex(fpA)[1:] + "\r\n",
 			wantErr: true,
 		},
 		{
@@ -393,8 +404,9 @@ func TestHostProofMAC_KnownAnswer(t *testing.T) {
 
 // TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer covers the peer
 // without a DataChannel: its response verifies, but because the proof can't be
-// sent the mobile would never treat the connection as usable, so authentication
-// is revoked and the peer is closed.
+// sent the mobile would never treat the connection as usable, so auth resolves
+// as a failure and the peer is closed. The peer is never authenticated, not even
+// transiently, because the proof is sent before the outcome is committed.
 func TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer(t *testing.T) {
 	nonce := []byte("0123456789abcdef0123456789abcdef")
 	p := newAuthTestPeer(nonce)
@@ -404,13 +416,17 @@ func TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer(t *testing.T) {
 		Mac:  authMAC(testSharedSecret, nonce),
 	})
 
-	// Revoked synchronously, before the asynchronous close, so inbound
-	// messages in that window are never dispatched.
+	// Resolved synchronously, before the asynchronous close, so no inbound
+	// message in that window is dispatched or answered.
 	p.mu.Lock()
-	authed := p.authenticated
+	resolved, authed := p.authResolved, p.authenticated
+	cleared := p.authOfferFP == nil && p.authAnswerFP == nil && p.authNonce == nil
 	p.mu.Unlock()
-	if authed {
-		t.Fatal("authentication must be revoked as soon as the auth proof send fails")
+	if !resolved || authed {
+		t.Fatalf("authResolved=%v authenticated=%v, want resolved and not authenticated", resolved, authed)
+	}
+	if !cleared {
+		t.Fatal("nonce and fingerprints must be cleared once auth fails")
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -428,9 +444,6 @@ func TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer(t *testing.T) {
 	defer p.mu.Unlock()
 	if !p.closed {
 		t.Fatal("peer must be closed when the auth proof cannot be sent")
-	}
-	if p.authOfferFP != nil || p.authAnswerFP != nil || p.authNonce != nil {
-		t.Fatal("nonce and fingerprints must be cleared after a successful verify")
 	}
 }
 
@@ -724,7 +737,7 @@ func TestPeer_SendAuthChallenge_RejectsFingerprintNotVerifiedByDTLS(t *testing.T
 		t.Fatal("no CERTIFICATE block in the generated certificate PEM")
 	}
 	realSHA1 := sha1.Sum(der)
-	bogusSHA256 := bytes.Repeat([]byte{0xEE}, sdpFingerprintSize)
+	bogusSHA256 := bytes.Repeat([]byte{0xEE}, sha256.Size)
 
 	rewrite := func(sdp string) string {
 		var out []string
@@ -792,7 +805,7 @@ func TestPeer_VerifyDTLSFingerprints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read SDP fingerprints: %v", err)
 	}
-	bogus := bytes.Repeat([]byte{0xEE}, sdpFingerprintSize)
+	bogus := bytes.Repeat([]byte{0xEE}, sha256.Size)
 
 	tests := []struct {
 		name     string

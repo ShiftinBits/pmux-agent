@@ -166,9 +166,6 @@ const authNonceSize = 32
 // can never be replayed as the other. Must match the mobile bit-for-bit.
 const hostProofLabel = "pmux-host-proof-v1"
 
-// sdpFingerprintSize is the length in bytes of a sha-256 DTLS fingerprint.
-const sdpFingerprintSize = sha256.Size
-
 // SetAllowedDeviceID updates the allowed device ID under the mutex.
 // Safe to call from any goroutine (e.g., SIGUSR2 handler).
 func (pm *PeerManager) SetAllowedDeviceID(id string) {
@@ -1246,38 +1243,64 @@ func sdpSHA256Fingerprint(sdp string) ([]byte, error) {
 	return nil, fmt.Errorf("no sha-256 fingerprint in SDP")
 }
 
+// sha256ColonHexLen is the length of a sha-256 fingerprint in the SDP
+// a=fingerprint syntax: 32 two-digit hex octets joined by 31 colons.
+const sha256ColonHexLen = 3*sha256.Size - 1
+
 // decodeSHA256ColonHex decodes a colon-separated hex sha-256 fingerprint value
 // (the SDP a=fingerprint syntax; hex is case-insensitive) into its raw 32-byte
-// digest.
+// digest. The format is strict: exactly sha256ColonHexLen characters with a
+// colon at every third position.
 func decodeSHA256ColonHex(value string) ([]byte, error) {
-	parts := strings.Split(value, ":")
-	if len(parts) != sdpFingerprintSize {
-		return nil, fmt.Errorf("sha-256 fingerprint has %d bytes, want %d", len(parts), sdpFingerprintSize)
+	if len(value) != sha256ColonHexLen {
+		return nil, fmt.Errorf("sha-256 fingerprint is %d characters, want %d", len(value), sha256ColonHexLen)
 	}
-	fp := make([]byte, 0, sdpFingerprintSize)
-	for _, part := range parts {
-		if len(part) != 2 {
-			return nil, fmt.Errorf("malformed sha-256 fingerprint byte %q", part)
+	for i := 2; i < len(value); i += 3 {
+		if value[i] != ':' {
+			return nil, fmt.Errorf("malformed sha-256 fingerprint: missing separator at offset %d", i)
 		}
-		b, err := hex.DecodeString(part)
-		if err != nil {
-			return nil, fmt.Errorf("decode sha-256 fingerprint: %w", err)
-		}
-		fp = append(fp, b[0])
+	}
+	fp, err := hex.DecodeString(strings.ReplaceAll(value, ":", ""))
+	if err != nil {
+		return nil, fmt.Errorf("decode sha-256 fingerprint: %w", err)
+	}
+	// A colon in an octet position is stripped above too, leaving a short or
+	// odd-length string, so the decoded length must still be checked.
+	if len(fp) != sha256.Size {
+		return nil, fmt.Errorf("sha-256 fingerprint has %d bytes, want %d", len(fp), sha256.Size)
 	}
 	return fp, nil
 }
 
+// encodeSHA256ColonHex formats a raw sha-256 digest in the SDP a=fingerprint
+// syntax (lowercase colon-separated hex octets).
+func encodeSHA256ColonHex(fp []byte) string {
+	h := hex.EncodeToString(fp)
+	var b strings.Builder
+	b.Grow(len(h) + len(h)/2)
+	for i := 0; i < len(h); i += 2 {
+		if i > 0 {
+			b.WriteByte(':')
+		}
+		b.WriteString(h[i : i+2])
+	}
+	return b.String()
+}
+
 // verifyDTLSFingerprints checks that the sha-256 fingerprints parsed from the
 // SDP describe the certificates the DTLS transport actually negotiated. Pion
-// accepts the remote certificate if it matches any one of the answer's
-// fingerprint lines, of any hash algorithm, while sdpSHA256Fingerprint binds
-// the first sha-256 line. Without this check, an answer carrying a genuine
-// non-sha-256 line ahead of an arbitrary sha-256 line would complete DTLS while
-// the host proof bound a fingerprint DTLS never verified. The answer check is
-// the security boundary; the offer check guards against parser drift, since
-// the local description never crossed the wire. Fails closed: an unavailable
-// transport, certificate or local fingerprint is an error.
+// (v4.2.9, extractFingerprint and DTLSTransport.validateFingerPrint) validates
+// the remote certificate against exactly one a=fingerprint line of the answer,
+// whatever its hash algorithm: the first session-level line if there is one,
+// otherwise the first line of the BUNDLE-tagged media section, otherwise the
+// first line of the first media section that has one. sdpSHA256Fingerprint
+// instead binds the first sha-256 line. Without this check, an answer whose
+// Pion-selected line is a genuine non-sha-256 fingerprint, followed by an
+// arbitrary sha-256 line, would complete DTLS while the host proof bound a
+// fingerprint DTLS never verified. The answer check is the security boundary;
+// the offer check guards against parser drift, since the local description
+// never crossed the wire. Fails closed: an unavailable transport, certificate
+// or local fingerprint is an error.
 func (p *Peer) verifyDTLSFingerprints(offerFP, answerFP []byte) error {
 	sctp := p.conn.SCTP()
 	if sctp == nil {
@@ -1301,15 +1324,14 @@ func (p *Peer) verifyDTLSFingerprints(offerFP, answerFP []byte) error {
 	if err != nil {
 		return fmt.Errorf("local DTLS parameters: %w", err)
 	}
+	// Compare in Pion's own text form rather than decoding it: both values are
+	// public, and Pion's hex is uppercase while ours is lowercase.
+	wantLocal := encodeSHA256ColonHex(offerFP)
 	for _, fp := range params.Fingerprints {
 		if !strings.EqualFold(fp.Algorithm, "sha-256") {
 			continue
 		}
-		localFP, err := decodeSHA256ColonHex(fp.Value)
-		if err != nil {
-			return fmt.Errorf("local DTLS fingerprint: %w", err)
-		}
-		if !hmac.Equal(offerFP, localFP) {
+		if !strings.EqualFold(fp.Value, wantLocal) {
 			return fmt.Errorf("offer fingerprint does not match the local DTLS certificate")
 		}
 		return nil
@@ -1337,13 +1359,47 @@ func hostProofMAC(secret, nonce, responseMAC, offerFP, answerFP []byte) []byte {
 
 // verifyAuthResponse checks the peer's first DataChannel message proves
 // possession of the pairing shared secret (mac == HMAC-SHA256(secret, nonce)).
-// On success the peer is marked authenticated and the agent replies with an
-// auth_proof (see hostProofMAC) so the mobile can authenticate the host in turn,
-// with the proof bound to the DTLS fingerprints the mobile negotiated. On any
-// verification failure the peer is closed and no proof is sent; if the proof
-// itself cannot be sent, authentication is revoked and the peer is closed too,
-// since the mobile will never treat the connection as usable without it.
+// On success the agent replies with an auth_proof (see hostProofMAC) so the
+// mobile can authenticate the host in turn, with the proof bound to the DTLS
+// fingerprints the mobile negotiated, and only then marks the peer
+// authenticated. On any verification failure, or if the proof cannot be sent,
+// the peer is closed via failAuth and never authenticated: the mobile will not
+// treat the connection as usable without the proof.
+//
+// The proof is sent while the peer is still unauthenticated, and the outcome is
+// committed afterwards. This is race-free because:
+//   - Pion delivers a DataChannel's messages from a single read loop that calls
+//     OnMessage synchronously, so this method never runs concurrently with
+//     itself and no other inbound message is dispatched until it returns. A
+//     mobile that sends a request as soon as it sees the proof is therefore
+//     only served after authenticated has been set below.
+//   - The timeout (failAuth) and this method both test and set authResolved
+//     under mu, so exactly one of them resolves auth. If the timeout fires while
+//     the proof is in flight, the commit below sees authResolved and leaves the
+//     peer unauthenticated while failAuth tears it down.
+//   - A nonce is answered at most once. A second auth_response cannot arrive
+//     while the first is being handled (serial OnMessage). After a successful
+//     commit authenticated is true, so OnMessage no longer routes messages here
+//     (and IsRequest drops auth_response). After any failure, authResolved is
+//     set and the nonce cleared, so the check on entry drops the message.
 func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
+	// Capture the nonce, secret and fingerprints under the lock. sharedSecret is
+	// set once at creation, but reading it here under mu keeps the race detector
+	// satisfied (the write happened on a different goroutine).
+	p.mu.Lock()
+	resolved := p.authResolved
+	nonce := p.authNonce
+	secret := p.sharedSecret
+	offerFP := p.authOfferFP
+	answerFP := p.authAnswerFP
+	p.mu.Unlock()
+
+	// Auth already failed (timeout, bad response, send failure) and the peer is
+	// being torn down: drop the message, never answer the challenge again.
+	if resolved {
+		return
+	}
+
 	resp, ok := decoded.(*protocol.AuthResponseRequest)
 	if !ok {
 		p.failAuth(fmt.Sprintf("expected auth_response, got %s", decoded.MessageType()))
@@ -1355,16 +1411,6 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		p.failAuth("auth response MAC not valid base64")
 		return
 	}
-
-	// Capture the nonce, secret and fingerprints under the lock. sharedSecret is
-	// set once at creation, but reading it here under mu keeps the race detector
-	// satisfied (the write happened on a different goroutine).
-	p.mu.Lock()
-	nonce := p.authNonce
-	secret := p.sharedSecret
-	offerFP := p.authOfferFP
-	answerFP := p.authAnswerFP
-	p.mu.Unlock()
 
 	// Defensive: a response must never arrive before the challenge nonce is set
 	// (Pion delivers OnOpen before OnMessage). Reject rather than hash a nil
@@ -1381,9 +1427,21 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		return
 	}
 
-	// Commit the successful handshake, unless auth already resolved (e.g. the
-	// timeout fired first and is tearing the peer down). authResolved makes
-	// verify-success and the timeout mutually exclusive.
+	// Prove the host's own key possession, bound to this connection. Sent
+	// outside mu because SendMessage may block on backpressure.
+	//
+	// This runs inside Pion's DataChannel read loop. If bufferedAmount already
+	// exceeds maxBufferedAmount (for example, output queued for a reconnecting
+	// peer), SendMessage blocks in waitForSendReady for up to sendReadyTimeout,
+	// and no inbound message on this channel is delivered until it returns.
+	proof := hostProofMAC(secret, nonce, gotMAC, offerFP, answerFP)
+	if err := p.SendMessage(&protocol.AuthProofEvent{Type: "auth_proof", Mac: base64.StdEncoding.EncodeToString(proof)}); err != nil {
+		p.failAuth(fmt.Sprintf("auth proof send failed: %v", err))
+		return
+	}
+
+	// Commit the successful handshake, unless auth resolved while the proof was
+	// in flight (the timeout fired and is tearing the peer down).
 	p.mu.Lock()
 	if p.authResolved {
 		p.mu.Unlock()
@@ -1391,8 +1449,7 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	}
 	p.authResolved = true
 	p.authenticated = true
-	// No longer needed; drop them to shrink the memory-forensics surface. The
-	// local copies above still feed the host proof.
+	// No longer needed; drop them to shrink the memory-forensics surface.
 	p.authNonce = nil
 	p.authOfferFP = nil
 	p.authAnswerFP = nil
@@ -1402,28 +1459,6 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	}
 	p.mu.Unlock()
 	p.logger.Info("peer authenticated: key possession proven", "mobile", p.DeviceID)
-
-	// Prove the host's own key possession, bound to this connection. Sent
-	// outside mu because SendMessage may block on backpressure.
-	proof := hostProofMAC(secret, nonce, gotMAC, offerFP, answerFP)
-	if err := p.SendMessage(&protocol.AuthProofEvent{Type: "auth_proof", Mac: base64.StdEncoding.EncodeToString(proof)}); err != nil {
-		// failAuth is a no-op now that auth has resolved, so close directly. As
-		// in failAuth, the close runs on its own goroutine because we may be
-		// inside a Pion DataChannel callback, and ClosePeerIfCurrent keeps a
-		// stale peer from evicting a replacement. Revoke authentication first
-		// so no inbound message is dispatched before the close lands: one that
-		// arrives in the window goes back through verifyAuthResponse, which
-		// drops it (the nonce is cleared and failAuth is a no-op).
-		p.logger.Warn("closing peer: failed to send auth proof", "error", err, "mobile", p.DeviceID)
-		p.mu.Lock()
-		p.authenticated = false
-		p.mu.Unlock()
-		if p.pm != nil {
-			go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
-		} else {
-			go p.Close()
-		}
-	}
 }
 
 // failAuth tears down a peer that failed the key-possession proof. It is a
@@ -1438,6 +1473,10 @@ func (p *Peer) failAuth(reason string) {
 		return
 	}
 	p.authResolved = true
+	// The challenge can never be answered now; drop its state.
+	p.authNonce = nil
+	p.authOfferFP = nil
+	p.authAnswerFP = nil
 	if p.authTimer != nil {
 		p.authTimer.Stop()
 		p.authTimer = nil

@@ -233,12 +233,14 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	var received []protocol.Message
-	var receivedMu sync.Mutex
+	pingReceived := make(chan struct{}, 1)
 	handler := func(peerID string, msg protocol.Message) {
-		receivedMu.Lock()
-		received = append(received, msg)
-		receivedMu.Unlock()
+		if msg.MessageType() == "ping" {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+		}
 	}
 
 	api := fastAPI(t)
@@ -266,10 +268,13 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	defer answerPC.Close()
 
 	// Host proof bookkeeping: every auth_proof received and whether it verified.
+	// proofReceived is signalled per proof without blocking the DataChannel
+	// read loop.
 	var proofMu sync.Mutex
 	var proofCount int
 	var proofErr error
 	var authNonce, authRespMAC []byte
+	proofReceived := make(chan struct{}, 2)
 
 	dcOpened := make(chan *webrtc.DataChannel, 1)
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -296,6 +301,10 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 				defer proofMu.Unlock()
 				proofCount++
 				proofErr = verifyHostProof(answerPC, authNonce, authRespMAC, m.Mac)
+				select {
+				case proofReceived <- struct{}{}:
+				default:
+				}
 			}
 		})
 		dc.OnOpen(func() {
@@ -384,27 +393,32 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 			t.Errorf("DataChannel label = %q, want %q", dc.Label(), DataChannelLabel)
 		}
 
-		// Allow the challenge/response handshake to complete before sending a
-		// request — pre-auth requests are dropped by the agent.
-		time.Sleep(300 * time.Millisecond)
+		// Wait for the host proof before sending a request, as the mobile does.
+		// The agent marks the peer authenticated before it handles the next
+		// inbound message, so the ping below is never dropped as pre-auth.
+		select {
+		case <-proofReceived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no auth_proof received after answering the challenge")
+		}
 
 		// Send a ping message over the DataChannel
 		pingMsg := &protocol.PingRequest{Type: "ping"}
 		data, _ := protocol.Encode(pingMsg)
 		dc.Send(data)
 
-		time.Sleep(500 * time.Millisecond)
-
-		receivedMu.Lock()
-		found := false
-		for _, msg := range received {
-			if msg.MessageType() == "ping" {
-				found = true
-			}
+		select {
+		case <-pingReceived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handler did not receive ping message")
 		}
-		receivedMu.Unlock()
-		if !found {
-			t.Error("handler did not receive ping message")
+
+		// Exactly one proof: the agent only sends one while handling the
+		// auth_response, before it handles the ping. A short grace period
+		// catches a stray second proof still in flight on the wire.
+		select {
+		case <-proofReceived:
+		case <-time.After(200 * time.Millisecond):
 		}
 
 		proofMu.Lock()
