@@ -3,6 +3,8 @@ package auth
 import (
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -97,6 +99,38 @@ func TestNewSecretStore_KeyringBackend_Available(t *testing.T) {
 	}
 	if got := store.Backend(); got != "keyring" {
 		t.Errorf("Backend() = %q, want %q", got, "keyring")
+	}
+}
+
+func TestCheckKeychainDir(t *testing.T) {
+	withKeychains := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(withKeychains, "Library", "Keychains"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		home    string
+		wantErr string
+	}{
+		{"keychain dir present", withKeychains, ""},
+		{"fake home without keychains", t.TempDir(), "no keychain directory"},
+		{"no HOME", "", "keyring probe"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", tt.home)
+			err := checkKeychainDir()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("checkKeychainDir() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("checkKeychainDir() error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

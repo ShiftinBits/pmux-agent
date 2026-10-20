@@ -113,14 +113,9 @@ func ProbeKeyring() (err error) {
 	// keychain via $HOME. With a fake/empty HOME it fails with
 	// errSecNoDefaultKeychain AND pops a blocking "Keychain Not Found" GUI
 	// dialog, so bail out before touching it.
-	// ponytail: checks the directory only, not the configured default keychain.
 	if runtime.GOOS == "darwin" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("keyring probe: %w", err)
-		}
-		if _, err := os.Stat(filepath.Join(home, "Library", "Keychains")); err != nil {
-			return fmt.Errorf("keyring probe: no keychain directory for HOME %q: %w", home, err)
+		if err := checkKeychainDir(); err != nil {
+			return err
 		}
 	}
 
@@ -129,5 +124,20 @@ func ProbeKeyring() (err error) {
 	}
 	// Clean up the probe entry
 	_ = keyring.Delete(ServiceName, probeKey)
+	return nil
+}
+
+// checkKeychainDir fails when $HOME has no macOS keychain directory. It is
+// OS-independent so it can be tested on any platform; ProbeKeyring only
+// calls it on darwin.
+// ponytail: checks the directory only, not the configured default keychain.
+func checkKeychainDir() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("keyring probe: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "Library", "Keychains")); err != nil {
+		return fmt.Errorf("keyring probe: no keychain directory for HOME %q: %w", home, err)
+	}
 	return nil
 }
