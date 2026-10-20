@@ -36,7 +36,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		deviceIDShort = deviceIDShort[:12] + "..."
 	}
 
-	fmt.Fprintf(w, "Unpair device '%s' (%s)?\nThis device will need to scan a new QR code to reconnect. [y/N] ", name, deviceIDShort)
+	fmt.Fprintf(w, "Unpair device '%s' (%s)?\nThis device will need to scan a new QR code to reconnect. [y/N] ", auth.SanitizeDisplayString(name), auth.SanitizeDisplayString(deviceIDShort))
 	var response string
 	if _, err := fmt.Fscanln(r, &response); err != nil {
 		// EOF or read error — treat as cancel
@@ -55,7 +55,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
 		if err := auth.DeletePairing(identity, cfg.APIBaseURL(), httpClient, hmacSecret); err != nil {
-			fmt.Fprintf(w, "Warning: could not notify server: %v\n", err)
+			fmt.Fprintf(w, "Warning: could not notify server: %v\n", auth.SanitizeDisplayString(err.Error()))
 		}
 	}
 
@@ -69,6 +69,6 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		signalReloadPairing(pid)
 	}
 
-	fmt.Fprintf(w, "Device '%s' unpaired successfully.\n", name)
+	fmt.Fprintf(w, "Device '%s' unpaired successfully.\n", auth.SanitizeDisplayString(name))
 	return nil
 }

@@ -271,3 +271,43 @@ func writeFile(t *testing.T, path, content string) error {
 	t.Helper()
 	return os.WriteFile(path, []byte(content), 0600)
 }
+
+const maliciousDeviceName = "Evil\x1b[2K\r\x1b]52;c;ZXZpbA==\x07\x7f\u009b phone"
+
+// assertNoControlBytes fails if output contains any control byte other than
+// newline, DEL, or a C1 control rune.
+func assertNoControlBytes(t *testing.T, output string) {
+	t.Helper()
+	for i := 0; i < len(output); i++ {
+		if b := output[i]; (b < 0x20 && b != '\n') || b == 0x7f {
+			t.Fatalf("output contains control byte 0x%02x at %d: %q", b, i, output)
+		}
+	}
+	for _, r := range output {
+		if r >= 0x80 && r <= 0x9f {
+			t.Fatalf("output contains C1 control rune %U: %q", r, output)
+		}
+	}
+}
+
+func TestRunUnpair_SanitizesStoredName(t *testing.T) {
+	paths := testPaths(t)
+	store := auth.NewMemorySecretStore()
+	devices := []auth.PairedDevice{{
+		DeviceID: "abc123def456abc123def456abc123de",
+		Name:     maliciousDeviceName,
+		PairedAt: time.Now(),
+	}}
+	if err := auth.SavePairedDevices(paths.PairedDevices, devices); err != nil {
+		t.Fatalf("SavePairedDevices: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := RunUnpair(paths, store, "", strings.NewReader("y\n"), &out); err != nil {
+		t.Fatalf("RunUnpair: %v", err)
+	}
+	assertNoControlBytes(t, out.String())
+	if !strings.Contains(out.String(), "Evil[2K]52;c;ZXZpbA== phone") {
+		t.Errorf("expected sanitized name, got: %q", out.String())
+	}
+}

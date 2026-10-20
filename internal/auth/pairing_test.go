@@ -23,7 +23,7 @@ func TestTruncateMobileName(t *testing.T) {
 		{"short name", "My iPhone", "My iPhone"},
 		{"exactly 64 chars", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{"65 chars truncated to 64", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-		{"very long name", string(make([]byte, 1000)), string(make([]byte, 64))},
+		{"very long name", strings.Repeat("a", 1000), strings.Repeat("a", 64)},
 		{"multi-byte emoji truncation", strings.Repeat("\U0001F4F1", 65), strings.Repeat("\U0001F4F1", 64)},
 		{"mixed ASCII and emoji", "Phone " + strings.Repeat("\U0001F600", 60), "Phone " + strings.Repeat("\U0001F600", 58)},
 	}
@@ -629,5 +629,36 @@ func TestRemovePairedDevice_DeletesSecret(t *testing.T) {
 	devices, _ := LoadPairedDevices(path, store)
 	if len(devices) != 0 {
 		t.Errorf("expected 0 devices after removal, got %d", len(devices))
+	}
+}
+
+func TestSanitizeDisplayString(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"csi", "a\x1b[2K\rb", "a[2Kb"},
+		{"osc52", "a\x1b]52;c;ZXZpbA==\x07b", "a]52;c;ZXZpbA==b"},
+		{"bel", "a\x07b", "ab"},
+		{"del", "a\x7fb", "ab"},
+		{"c1 csi", "a\u009bb", "ab"},
+		{"newline and tab", "a\nb\tc", "abc"},
+		{"emoji and curly apostrophe", "Bob’s iPhone 📱", "Bob’s iPhone 📱"},
+		{"non-latin", "電話 Телефон", "電話 Телефон"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeDisplayString(tt.in); got != tt.want {
+				t.Errorf("SanitizeDisplayString(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncateMobileName_SanitizesBeforeTruncating(t *testing.T) {
+	in := strings.Repeat("\x1b", 100) + strings.Repeat("a", MaxMobileNameLen+5)
+	got := TruncateMobileName(in)
+	if want := strings.Repeat("a", MaxMobileNameLen); got != want {
+		t.Errorf("TruncateMobileName = %q, want %d 'a' runes", got, MaxMobileNameLen)
 	}
 }

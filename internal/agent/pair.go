@@ -95,7 +95,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 			name = existingDevice.DeviceID[:12] + "..."
 		}
 		pairedDate := existingDevice.PairedAt.Format("2006-01-02")
-		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", name, pairedDate)
+		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", auth.SanitizeDisplayString(name), pairedDate)
 
 		reader := bufio.NewReader(r)
 		answer, _ := reader.ReadString('\n')
@@ -158,7 +158,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	fmt.Fprintln(w, "\nScan this QR code with Pocketmux on your mobile device:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, qr.ToSmallString(false))
-	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.FormatManualCode(pairResp.PairingCode, pairingSecret))
+	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.SanitizeDisplayString(auth.FormatManualCode(pairResp.PairingCode, pairingSecret)))
 	fmt.Fprintln(w, "Waiting for mobile device to complete pairing...")
 
 	// Stop the background agent if running. During pairing, the pair CLI
@@ -229,7 +229,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if displayName == "" {
 		displayName = pairComplete.MobileDeviceID
 	}
-	fmt.Fprintf(w, "Paired successfully with device '%s'\n", displayName)
+	fmt.Fprintf(w, "Paired successfully with device '%s'\n", auth.SanitizeDisplayString(displayName))
 
 	// If the agent is still running (e.g., a racing pmux command restarted it),
 	// signal it to reload the new pairing state.

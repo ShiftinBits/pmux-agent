@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"golang.org/x/crypto/hkdf"
@@ -23,14 +24,28 @@ import (
 // This limit is enforced during both initial pairing and name-update flows.
 const MaxMobileNameLen = 64
 
-// TruncateMobileName truncates a mobile device name to MaxMobileNameLen runes.
-// It operates on Unicode code points to avoid splitting multi-byte characters.
+// SanitizeDisplayString removes every rune that is not printable per
+// unicode.IsPrint (C0/C1 controls, DEL, format characters, newlines, tabs),
+// so server-supplied text cannot inject terminal escape sequences. ASCII space
+// and printable non-ASCII text are preserved.
+func SanitizeDisplayString(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// TruncateMobileName sanitizes a mobile device name with SanitizeDisplayString
+// and then truncates it to MaxMobileNameLen runes. It operates on Unicode code
+// points to avoid splitting multi-byte characters.
 func TruncateMobileName(name string) string {
-	runes := []rune(name)
+	runes := []rune(SanitizeDisplayString(name))
 	if len(runes) > MaxMobileNameLen {
 		return string(runes[:MaxMobileNameLen])
 	}
-	return name
+	return string(runes)
 }
 
 // X25519Keypair holds an ephemeral X25519 keypair for key exchange during pairing.

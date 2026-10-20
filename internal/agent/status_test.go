@@ -286,3 +286,25 @@ func TestRunStatusFirewallLine_LowConfidence(t *testing.T) {
 		t.Errorf("firewall-allow command was removed; should not appear:\n%s", out)
 	}
 }
+
+func TestRunStatus_SanitizesStoredName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "paired_devices.json")
+	store := auth.NewMemorySecretStore()
+	devices := []auth.PairedDevice{{
+		DeviceID: "abc123def456abc123def456abc123de",
+		Name:     maliciousDeviceName,
+	}}
+	if err := auth.SavePairedDevices(path, devices); err != nil {
+		t.Fatalf("SavePairedDevices: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := RunStatus(testStatusParams(dir, store), &buf); err != nil {
+		t.Fatalf("RunStatus: %v", err)
+	}
+	assertNoControlBytes(t, buf.String())
+	if !strings.Contains(buf.String(), "Paired device: Evil[2K]52;c;ZXZpbA== phone") {
+		t.Errorf("expected sanitized name, got: %q", buf.String())
+	}
+}

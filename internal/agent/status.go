@@ -86,10 +86,10 @@ func RunStatus(params StatusParams, w io.Writer) error {
 	}
 
 	if device.Name != "" {
-		fmt.Fprintf(w, "Paired device: %s\n", device.Name)
+		fmt.Fprintf(w, "Paired device: %s\n", auth.SanitizeDisplayString(device.Name))
 		fmt.Fprintf(w, "  Device ID:  %s\n", deviceIDShort)
 	} else {
-		fmt.Fprintf(w, "Paired device: %s\n", deviceIDShort)
+		fmt.Fprintf(w, "Paired device: %s\n", auth.SanitizeDisplayString(deviceIDShort))
 	}
 	fmt.Fprintf(w, "  Paired:     %s\n", device.PairedAt.Format("2006-01-02"))
 
