@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,12 +20,20 @@ import (
 // If keepConfig is true, the server un-registration and local config/keys
 // removal are skipped, preserving the existing pairing for a future reinstall.
 func RunUninstall(paths config.Paths, store auth.SecretStore, keepConfig bool, hmacSecret string, skipConfirm bool, r io.Reader, w io.Writer) error {
+	// identity.key_path can move keys outside the config dir. That dir is
+	// user-chosen (could be $HOME), so only pmux's own key files are removed.
+	keysOutside := !strings.HasPrefix(paths.KeysDir+string(filepath.Separator), paths.ConfigDir+string(filepath.Separator))
+	removeTargets := paths.ConfigDir
+	if keysOutside {
+		removeTargets += "; pmux key files in " + paths.KeysDir
+	}
+
 	if skipConfirm {
 		fmt.Fprintln(w, "Uninstalling Pocketmux from this host:")
 		fmt.Fprintln(w, "  • Stop the agent process")
 		if !keepConfig {
 			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
-			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
+			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", removeTargets)
 		}
 		fmt.Fprintln(w)
 	} else {
@@ -33,7 +42,7 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, keepConfig bool, h
 		fmt.Fprintln(w, "  • Stop the agent process")
 		if !keepConfig {
 			fmt.Fprintln(w, "  • Un-register this host from the signaling server")
-			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", paths.ConfigDir)
+			fmt.Fprintf(w, "  • Delete config and keys (%s)\n", removeTargets)
 		}
 		fmt.Fprint(w, "\nProceed with uninstall? [y/N] ")
 
@@ -95,7 +104,12 @@ func RunUninstall(paths config.Paths, store auth.SecretStore, keepConfig bool, h
 		if err := os.RemoveAll(paths.ConfigDir); err != nil {
 			return fmt.Errorf("remove config directory: %w", err)
 		}
-		fmt.Fprintf(w, "Config directory removed (%s).\n", paths.ConfigDir)
+		if keysOutside {
+			if err := auth.RemoveKeyFiles(paths.KeysDir); err != nil {
+				return fmt.Errorf("remove key files: %w", err)
+			}
+		}
+		fmt.Fprintf(w, "Config directory removed (%s).\n", removeTargets)
 	} else {
 		fmt.Fprintln(w, "Config and keys preserved (--keep-config).")
 	}

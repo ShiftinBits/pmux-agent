@@ -172,6 +172,39 @@ func TestRunUninstall_NoIdentity(t *testing.T) {
 	}
 }
 
+func TestRunUninstall_ExternalKeysDir(t *testing.T) {
+	dir := t.TempDir()
+	paths := testUninstallPaths(dir)
+	paths.KeysDir = filepath.Join(t.TempDir(), "external-keys") // identity.key_path outside config dir
+
+	if err := os.MkdirAll(paths.KeysDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	secrets := filepath.Join(paths.KeysDir, "secrets.enc")
+	foreign := filepath.Join(paths.KeysDir, "not-ours.txt") // key_path may point at e.g. $HOME
+	for _, f := range []string{secrets, foreign} {
+		if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var buf bytes.Buffer
+	err := RunUninstall(paths, auth.NewMemorySecretStore(), false, "", false, strings.NewReader("y\n"), &buf)
+	if err != nil {
+		t.Fatalf("RunUninstall: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), paths.KeysDir) {
+		t.Errorf("expected keys dir %q named in output, got: %s", paths.KeysDir, buf.String())
+	}
+	if _, err := os.Stat(secrets); !os.IsNotExist(err) {
+		t.Errorf("pmux key file should have been removed, stat err: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("foreign file in external keys dir must survive uninstall: %v", err)
+	}
+}
+
 func TestRunUninstall_YesFlag_SkipsPrompt(t *testing.T) {
 	dir := t.TempDir()
 	paths := testUninstallPaths(dir)

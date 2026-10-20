@@ -112,6 +112,33 @@ func TestRunInit_FreshInit_CustomHostname(t *testing.T) {
 	}
 }
 
+func TestRunInit_PreservesExistingConfig(t *testing.T) {
+	paths := testPaths(t)
+	if err := os.WriteFile(paths.ConfigFile, []byte("[identity]\nkey_path = \"/custom/keys\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunInit(paths, cfg, auth.NewMemorySecretStore(), "/usr/local/bin/tmux", strings.NewReader("myhost\n"), &out); err != nil {
+		t.Fatalf("RunInit: %v", err)
+	}
+
+	got, err := config.LoadConfig(paths.ConfigFile)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got.Identity.KeyPath != "/custom/keys" {
+		t.Errorf("key_path = %q, want preserved %q", got.Identity.KeyPath, "/custom/keys")
+	}
+	if got.Name != "myhost" {
+		t.Errorf("name = %q, want %q", got.Name, "myhost")
+	}
+}
+
 func TestRunInit_FreshInit_DefaultHostname(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()

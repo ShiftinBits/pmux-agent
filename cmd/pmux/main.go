@@ -39,6 +39,15 @@ func loadEffectiveConfig() config.Config {
 	return cfg
 }
 
+// resolvePaths returns the Pocketmux paths with identity.key_path applied.
+func resolvePaths() (config.Paths, error) {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		return config.Paths{}, err
+	}
+	return paths.WithKeyPath(loadEffectiveConfig().Identity.KeyPath)
+}
+
 // initSecretStore creates a SecretStore using the config's secret_backend setting.
 // Uses the keys directory for the encrypted file fallback.
 func initSecretStore(paths config.Paths, cfg config.Config) (auth.SecretStore, error) {
@@ -64,7 +73,7 @@ func main() {
 
 	// Show update banner for Pocketmux commands (not tmux passthrough).
 	if isPocketmuxCommand(args[0]) {
-		paths, _ := config.DefaultPaths()
+		paths, _ := resolvePaths()
 		if paths.ConfigDir != "" {
 			update.PrintBannerIfAvailable(update.StateFilePath(paths.ConfigDir))
 		}
@@ -114,7 +123,7 @@ func main() {
 
 // ensureAgent starts the background agent if it's not already running.
 func ensureAgent(cfg config.Config) {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		return // Non-fatal: agent is optional if not initialized
 	}
@@ -133,7 +142,7 @@ func ensureAgent(cfg config.Config) {
 // runAgent runs the background WebRTC agent process.
 // cpuProfile and memProfile are optional file paths for runtime/pprof output.
 func runAgent(cpuProfile, memProfile string) {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		os.Exit(1)
 	}
@@ -224,7 +233,7 @@ func handleInit() {
 		os.Exit(1)
 	}
 
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -252,7 +261,7 @@ func handleInit() {
 }
 
 func handleConfig() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -268,7 +277,7 @@ func handleConfig() {
 }
 
 func handlePair() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -289,7 +298,7 @@ func handlePair() {
 }
 
 func handleUnpair() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -321,7 +330,7 @@ func handleUninstall(args []string) {
 		}
 	}
 
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -344,7 +353,7 @@ func handleUninstall(args []string) {
 }
 
 func handleStatus() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -432,7 +441,7 @@ func handleAgent(args []string) {
 }
 
 func handleAgentStatus() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -448,7 +457,7 @@ func handleAgentStatus() {
 }
 
 func handleAgentStop() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -465,7 +474,7 @@ func handleAgentStop() {
 }
 
 func handleAgentStart() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -485,7 +494,7 @@ func handleAgentStart() {
 }
 
 func handleAgentRestart() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)
@@ -515,7 +524,7 @@ func isPocketmuxCommand(cmd string) bool {
 }
 
 func handleUpdate() {
-	paths, err := config.DefaultPaths()
+	paths, err := resolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ %v\n", err)
 		os.Exit(1)

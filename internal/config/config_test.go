@@ -1379,6 +1379,39 @@ func TestDefaultPaths(t *testing.T) {
 	}
 }
 
+func TestPathsWithKeyPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir() error: %v", err)
+	}
+	base := Paths{ConfigDir: "/cfg/pmux", KeysDir: "/cfg/pmux/keys"}
+
+	tests := []struct {
+		name    string
+		keyPath string
+		want    string
+	}{
+		{"empty keeps default", "", "/cfg/pmux/keys"},
+		{"absolute", "/custom/keys/", "/custom/keys"},
+		{"tilde expands to home", "~/.config/pmux/keys/", filepath.Join(home, ".config", "pmux", "keys")},
+		{"relative resolves against config dir", "mykeys", "/cfg/pmux/mykeys"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := base.WithKeyPath(tt.keyPath)
+			if err != nil {
+				t.Fatalf("WithKeyPath(%q) error: %v", tt.keyPath, err)
+			}
+			if got.KeysDir != tt.want {
+				t.Errorf("WithKeyPath(%q).KeysDir = %q, want %q", tt.keyPath, got.KeysDir, tt.want)
+			}
+			if got.ConfigDir != base.ConfigDir {
+				t.Errorf("ConfigDir changed to %q", got.ConfigDir)
+			}
+		})
+	}
+}
+
 func TestEnsureDirs(t *testing.T) {
 	dir := t.TempDir()
 	paths := Paths{

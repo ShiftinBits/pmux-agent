@@ -36,26 +36,42 @@ func RunInit(paths config.Paths, cfg config.Config, store auth.SecretStore, tmux
 		return fmt.Errorf("failed to generate identity: %w", err)
 	}
 
-	// Prompt for host name (default: OS hostname)
-	defaultName := config.DefaultHostName()
-	fmt.Fprintf(w, "Host name [%s]: ", defaultName)
-	reader := bufio.NewReader(r)
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-	if input == "" {
-		input = defaultName
+	// A config written before init must survive — identity.key_path and
+	// secret_backend only take effect before keys exist.
+	existing, readErr := os.ReadFile(paths.ConfigFile)
+	hasConfig := readErr == nil
+
+	input := cfg.Name
+	if !hasConfig || input == "" {
+		// Prompt for host name (default: OS hostname)
+		defaultName := config.DefaultHostName()
+		fmt.Fprintf(w, "Host name [%s]: ", defaultName)
+		reader := bufio.NewReader(r)
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			input = defaultName
+		}
 	}
 
-	// Write config: start with name, then commented defaults with tmux path injected
-	tmuxSection := "# socket_name = \"pmux\""
-	if tmuxPath != "" {
-		tmuxSection += fmt.Sprintf("\ntmux_path = %q", tmuxPath)
-	}
-	template := strings.Replace(config.CommentedDefaultConfig(),
-		"# socket_name = \"pmux\"", tmuxSection, 1)
-	configContent := fmt.Sprintf("name = %q\n\n%s", input, template)
-	if err := os.WriteFile(paths.ConfigFile, []byte(configContent), 0600); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	if !hasConfig {
+		// Write config: start with name, then commented defaults with tmux path injected
+		tmuxSection := "# socket_name = \"pmux\""
+		if tmuxPath != "" {
+			tmuxSection += fmt.Sprintf("\ntmux_path = %q", tmuxPath)
+		}
+		template := strings.Replace(config.CommentedDefaultConfig(),
+			"# socket_name = \"pmux\"", tmuxSection, 1)
+		configContent := fmt.Sprintf("name = %q\n\n%s", input, template)
+		if err := os.WriteFile(paths.ConfigFile, []byte(configContent), 0600); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+	} else if cfg.Name == "" {
+		// Top-level keys must precede tables, so prepend.
+		configContent := fmt.Sprintf("name = %q\n\n%s", input, existing)
+		if err := os.WriteFile(paths.ConfigFile, []byte(configContent), 0600); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
 	}
 
 	fmt.Fprintf(w, "\nIdentity generated.\n")
