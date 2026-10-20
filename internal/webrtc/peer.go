@@ -110,6 +110,7 @@ type PeerManager struct {
 	mu               sync.Mutex
 	peers            map[string]*Peer       // keyed by mobile device ID
 	disconnectTimers map[string]*time.Timer // grace timers for disconnected peers
+	iceRestartTimers map[string]*time.Timer // ICE-restart answer watchdogs (kept apart from grace timers, SB-1008)
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
 	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
 	closed           bool                   // true after CloseAll() returns
@@ -206,6 +207,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
+		iceRestartTimers: make(map[string]*time.Timer),
 		disconnectTimes:  make(map[string]time.Time),
 	}
 }
@@ -233,12 +235,7 @@ func (pm *PeerManager) ClosePeer(deviceID string) {
 	if ok {
 		delete(pm.peers, deviceID)
 	}
-	// Cancel any pending disconnect timer for this peer.
-	if timer, hasTimer := pm.disconnectTimers[deviceID]; hasTimer {
-		timer.Stop()
-		delete(pm.disconnectTimers, deviceID)
-	}
-	delete(pm.disconnectTimes, deviceID)
+	pm.stopTimersLocked(deviceID)
 	peerCount := len(pm.peers)
 	pm.mu.Unlock()
 
@@ -270,13 +267,23 @@ func (pm *PeerManager) ClosePeerIfCurrent(deviceID string, peer *Peer) {
 		return
 	}
 	delete(pm.peers, deviceID)
+	pm.stopTimersLocked(deviceID)
+	pm.mu.Unlock()
+	peer.Close()
+}
+
+// stopTimersLocked cancels the disconnect grace timer and the ICE-restart
+// watchdog for a device. Caller must hold pm.mu.
+func (pm *PeerManager) stopTimersLocked(deviceID string) {
 	if timer, ok := pm.disconnectTimers[deviceID]; ok {
 		timer.Stop()
 		delete(pm.disconnectTimers, deviceID)
 	}
+	if timer, ok := pm.iceRestartTimers[deviceID]; ok {
+		timer.Stop()
+		delete(pm.iceRestartTimers, deviceID)
+	}
 	delete(pm.disconnectTimes, deviceID)
-	pm.mu.Unlock()
-	peer.Close()
 }
 
 // CloseAll closes all peer connections and waits for background cleanup
@@ -295,6 +302,10 @@ func (pm *PeerManager) CloseAll() {
 	for deviceID, timer := range pm.disconnectTimers {
 		timer.Stop()
 		delete(pm.disconnectTimers, deviceID)
+	}
+	for deviceID, timer := range pm.iceRestartTimers {
+		timer.Stop()
+		delete(pm.iceRestartTimers, deviceID)
 	}
 	pm.disconnectTimes = make(map[string]time.Time)
 	pm.mu.Unlock()
@@ -465,11 +476,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		oldPeer.silence()
 		delete(pm.peers, mobileDeviceID)
 	}
-	if timer, hasTimer := pm.disconnectTimers[mobileDeviceID]; hasTimer {
-		timer.Stop()
-		delete(pm.disconnectTimers, mobileDeviceID)
-	}
-	delete(pm.disconnectTimes, mobileDeviceID)
+	pm.stopTimersLocked(mobileDeviceID)
 	pm.mu.Unlock()
 
 	if hadOld {
@@ -778,6 +785,11 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 			delete(pm.disconnectTimes, deviceID)
 			pm.logger.Info("disconnect timer cancelled (connection recovered)", "mobile", deviceID)
 		}
+		if timer, ok := pm.iceRestartTimers[deviceID]; ok {
+			timer.Stop()
+			delete(pm.iceRestartTimers, deviceID)
+			pm.logger.Info("ICE restart watchdog cancelled (connection recovered)", "mobile", deviceID)
+		}
 
 	case webrtc.PeerConnectionStateDisconnected:
 		// Ignore stale callbacks from an old peer during reconnect: a timer
@@ -786,6 +798,12 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		// restart on it, corrupting the new connection (SB-1007). Mirrors the
 		// pointer-identity guard in the Failed/Closed cases below.
 		if tracked, ok := pm.peers[deviceID]; !ok || tracked != peer {
+			return
+		}
+		// An ICE restart is already in flight; its watchdog closes the peer if
+		// it doesn't reach Connected, so don't stack a second restart on top.
+		if _, ok := pm.iceRestartTimers[deviceID]; ok {
+			pm.logger.Info("peer disconnected during ICE restart, watchdog pending", "mobile", deviceID)
 			return
 		}
 		// Start a grace timer. If the connection doesn't recover within
@@ -802,12 +820,8 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		})
 
 	case webrtc.PeerConnectionStateFailed:
-		// Connection unrecoverable — cancel timer, notify handler, and close.
-		if timer, ok := pm.disconnectTimers[deviceID]; ok {
-			timer.Stop()
-			delete(pm.disconnectTimers, deviceID)
-		}
-		delete(pm.disconnectTimes, deviceID)
+		// Connection unrecoverable — cancel timers, notify handler, and close.
+		pm.stopTimersLocked(deviceID)
 		// Only cleanup if the tracked peer is the same one that fired.
 		// During reconnect, a stale callback from the old peer may fire after
 		// a new peer is stored under the same device ID.
@@ -817,12 +831,8 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 		}
 
 	case webrtc.PeerConnectionStateClosed:
-		// Peer connection closed — cancel timer and notify handler.
-		if timer, ok := pm.disconnectTimers[deviceID]; ok {
-			timer.Stop()
-			delete(pm.disconnectTimers, deviceID)
-		}
-		delete(pm.disconnectTimes, deviceID)
+		// Peer connection closed — cancel timers and notify handler.
+		pm.stopTimersLocked(deviceID)
 		// Only cleanup if the tracked peer is the same one that fired.
 		// During reconnect, a stale callback from the old peer may fire after
 		// a new peer is stored under the same device ID.
@@ -930,14 +940,18 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 
 	// Start watchdog: if no SDP answer arrives within 20 seconds,
 	// close the peer so the mobile can perform a fresh connect_request.
-	// The existing Connected handler in handlePeerStateChange cancels
-	// disconnect timers, so recovery automatically cancels this watchdog.
+	// Stored in iceRestartTimers, not disconnectTimers, so it can't be mistaken
+	// for a grace timer (SB-1008). The Connected handler in
+	// handlePeerStateChange cancels it on recovery.
 	pm.mu.Lock()
-	pm.disconnectTimers[deviceID] = time.AfterFunc(20*time.Second, func() {
+	if old, ok := pm.iceRestartTimers[deviceID]; ok {
+		old.Stop()
+	}
+	pm.iceRestartTimers[deviceID] = time.AfterFunc(20*time.Second, func() {
 		pm.mu.Lock()
-		delete(pm.disconnectTimers, deviceID)
-		peer, ok := pm.peers[deviceID]
-		if !ok {
+		delete(pm.iceRestartTimers, deviceID)
+		// Ignore if the peer was replaced by a reconnect in the meantime.
+		if pm.peers[deviceID] != peer {
 			pm.mu.Unlock()
 			return
 		}
