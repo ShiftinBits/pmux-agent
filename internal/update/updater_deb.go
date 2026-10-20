@@ -21,10 +21,9 @@ func (u *debUpdater) Update(release ReleaseInfo) error {
 		return err
 	}
 
-	fmt.Printf("Download the updated package and install it:\n\n")
-	fmt.Printf("  curl -LO %s\n", asset.BrowserDownloadURL)
-	fmt.Printf("  sudo dpkg -i %s\n\n", asset.Name)
-	return nil
+	return &ErrElevationRequired{
+		Command: fmt.Sprintf("curl -LO %s && sudo dpkg -i %s", asset.BrowserDownloadURL, asset.Name),
+	}
 }
 
 // findAsset locates a release asset matching the given suffix and architecture.

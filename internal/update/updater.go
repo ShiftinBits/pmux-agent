@@ -8,8 +8,8 @@ import (
 // Updater applies an update using an install-method-specific strategy.
 type Updater interface {
 	// Update applies the update for the given release.
-	// For methods requiring elevated privileges, it downloads the package
-	// and prints the command the user should run.
+	// For methods requiring elevated privileges (deb, rpm, snap) nothing is
+	// installed; it returns *ErrElevationRequired with the command to run.
 	Update(release ReleaseInfo) error
 
 	// Description returns a human-readable description of the update method.

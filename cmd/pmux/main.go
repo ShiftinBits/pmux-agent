@@ -75,7 +75,7 @@ func main() {
 	if isPocketmuxCommand(args[0]) {
 		paths, _ := resolvePaths()
 		if paths.ConfigDir != "" {
-			update.PrintBannerIfAvailable(update.StateFilePath(paths.ConfigDir))
+			update.PrintBannerIfAvailable(update.StateFilePath(paths.ConfigDir), version)
 		}
 	}
 
@@ -568,6 +568,13 @@ func handleUpdate() {
 	}
 
 	if err := updater.Update(release); err != nil {
+		// Nothing was installed: keep the update state so the banner stays
+		// until the new binary actually runs.
+		var elevErr *update.ErrElevationRequired
+		if errors.As(err, &elevErr) {
+			fmt.Printf("Finish the update by running:\n\n  %s\n\n", elevErr.Command)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "⚠ update failed: %v\n", err)
 		os.Exit(1)
 	}

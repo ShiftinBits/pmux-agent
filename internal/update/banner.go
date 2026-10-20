@@ -8,9 +8,9 @@ import (
 // PrintBannerIfAvailable reads the state file and prints a one-line
 // update notice to stderr if an update is available.
 // Errors are silently ignored — the banner is best-effort.
-func PrintBannerIfAvailable(stateFile string) {
+func PrintBannerIfAvailable(stateFile, runningVersion string) {
 	state, err := LoadState(stateFile)
-	if err != nil || !state.UpdateAvailable {
+	if err != nil || !state.UpdateAvailable || state.IsStale(runningVersion) {
 		return
 	}
 

@@ -73,7 +73,7 @@ func (h *Handler) newSessionsEvent(sessions []protocol.TmuxSession) *protocol.Se
 		AgentVersion: h.agentVersion,
 	}
 	if h.updateStateFile != "" {
-		if state, err := update.LoadState(h.updateStateFile); err == nil && state.UpdateAvailable {
+		if state, err := update.LoadState(h.updateStateFile); err == nil && state.UpdateAvailable && !state.IsStale(h.agentVersion) {
 			event.UpdateAvailable = state.LatestVersion
 		}
 	}

@@ -15,9 +15,5 @@ func (u *snapUpdater) Description() string {
 
 func (u *snapUpdater) Update(_ ReleaseInfo) error {
 	fmt.Println("Snap packages are automatically updated by snapd.")
-	fmt.Println("To force an immediate update, run:")
-	fmt.Println()
-	fmt.Println("  sudo snap refresh pmux")
-	fmt.Println()
-	return nil
+	return &ErrElevationRequired{Command: "sudo snap refresh pmux"}
 }
