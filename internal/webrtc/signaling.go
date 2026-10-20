@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,6 +44,14 @@ const (
 	// before the signaling client enters dormancy (stops retrying).
 	DormancyTimeout = 5 * time.Minute
 )
+
+// jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
+// after a shared server outage don't reconnect in lockstep. The result is
+// deliberately not capped at maxBackoff: capping would re-synchronize every
+// agent at exactly maxBackoff.
+func jitter(d time.Duration) time.Duration {
+	return d + time.Duration(rand.Int64N(int64(d)/2+1))
+}
 
 // SignalingMessage represents a JSON message to/from the signaling server.
 type SignalingMessage struct {
@@ -242,7 +251,9 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 
 		sc.logger.Warn("signaling connection lost", "error", err)
 
-		// Wait with exponential backoff before reconnecting
+		// Wait with jittered exponential backoff before reconnecting. Jitter
+		// applies to the wait only so it doesn't compound into backoff growth.
+		wait := jitter(backoff)
 		backoffStart := time.Now()
 		select {
 		case <-ctx.Done():
@@ -256,10 +267,10 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			backoff = startBackoff
 			sc.logger.Info("activity signal received during backoff, reconnecting immediately")
 			continue
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
 
-		sc.logger.Info("reconnecting to signaling server", "backoff", backoff)
+		sc.logger.Info("reconnecting to signaling server", "backoff", backoff, "wait", wait)
 		// Safety net: only increase backoff if monotonic elapsed time approximates
 		// the intended wait. Protects against hypothetical runtime timer anomalies.
 		if time.Since(backoffStart) >= backoff/2 {
