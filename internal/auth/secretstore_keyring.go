@@ -3,6 +3,9 @@ package auth
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 
 	"github.com/zalando/go-keyring"
 )
@@ -105,6 +108,21 @@ func ProbeKeyring() (err error) {
 
 	const probeKey = "__probe__"
 	const probeValue = "test"
+
+	// On macOS, go-keyring shells out to `security`, which resolves the default
+	// keychain via $HOME. With a fake/empty HOME it fails with
+	// errSecNoDefaultKeychain AND pops a blocking "Keychain Not Found" GUI
+	// dialog, so bail out before touching it.
+	// ponytail: checks the directory only, not the configured default keychain.
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("keyring probe: %w", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, "Library", "Keychains")); err != nil {
+			return fmt.Errorf("keyring probe: no keychain directory for HOME %q: %w", home, err)
+		}
+	}
 
 	if err := keyring.Set(ServiceName, probeKey, probeValue); err != nil {
 		return fmt.Errorf("keyring probe: %w", err)

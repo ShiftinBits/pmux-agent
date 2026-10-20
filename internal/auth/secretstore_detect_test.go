@@ -3,6 +3,7 @@ package auth
 import (
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -96,6 +97,27 @@ func TestNewSecretStore_KeyringBackend_Available(t *testing.T) {
 	}
 	if got := store.Backend(); got != "keyring" {
 		t.Errorf("Backend() = %q, want %q", got, "keyring")
+	}
+}
+
+// A fake HOME must fail fast, before `security` runs and pops a GUI dialog.
+func TestProbeKeyring_FakeHomeOnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only guard")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	err := ProbeKeyring()
+	if err == nil || !strings.Contains(err.Error(), "no keychain directory") {
+		t.Fatalf("ProbeKeyring() = %v, want no-keychain-directory error", err)
+	}
+
+	store, err := NewSecretStore(t.TempDir(), "auto", newTestLogger())
+	if err != nil {
+		t.Fatalf("NewSecretStore(auto) unexpected error: %v", err)
+	}
+	if got := store.Backend(); got != "encrypted-file" {
+		t.Errorf("Backend() = %q, want %q", got, "encrypted-file")
 	}
 }
 
