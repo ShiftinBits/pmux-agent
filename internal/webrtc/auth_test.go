@@ -2,10 +2,15 @@ package webrtc
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"testing"
@@ -53,9 +58,12 @@ func newAuthTestPeer(nonce []byte) *Peer {
 	}
 }
 
+// The valid-MAC cases use a real DataChannel: a successful verify only leaves
+// the peer authenticated if the auth proof is actually sent.
 func TestPeer_VerifyAuthResponse_ValidMACAuthenticates(t *testing.T) {
-	nonce := []byte("0123456789abcdef0123456789abcdef")
-	p := newAuthTestPeer(nonce)
+	l := newLoopbackAuthPeer(t)
+	nonce := l.challenge(t)
+	p := l.peer
 
 	p.verifyAuthResponse(&protocol.AuthResponseRequest{
 		Type: "auth_response",
@@ -104,8 +112,9 @@ func TestPeer_VerifyAuthResponse_WrongTypeDoesNotAuthenticate(t *testing.T) {
 }
 
 func TestPeer_FailAuthNoOpAfterSuccess(t *testing.T) {
-	nonce := []byte("0123456789abcdef0123456789abcdef")
-	p := newAuthTestPeer(nonce)
+	l := newLoopbackAuthPeer(t)
+	nonce := l.challenge(t)
+	p := l.peer
 
 	p.verifyAuthResponse(&protocol.AuthResponseRequest{
 		Type: "auth_response",
@@ -260,6 +269,11 @@ func TestSdpSHA256Fingerprint(t *testing.T) {
 			want: fpB,
 		},
 		{
+			// This parser rule alone is not the security boundary: Pion's DTLS
+			// accepts a certificate matching any fingerprint line, so a genuine
+			// sha-1 line can precede an arbitrary sha-256 one. The cross-check
+			// against the negotiated certificates in sendAuthChallenge
+			// (verifyDTLSFingerprints) is what rejects that.
 			name: "sha-1 line before sha-256 line is skipped",
 			sdp:  session + media + "a=fingerprint:sha-1 " + colonHex(fpA[:20]) + "\r\na=fingerprint:sha-256 " + colonHex(fpB) + "\r\n",
 			want: fpB,
@@ -378,8 +392,9 @@ func TestHostProofMAC_KnownAnswer(t *testing.T) {
 }
 
 // TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer covers the peer
-// without a DataChannel: it authenticates, but because the proof can't be sent
-// the mobile would never treat the connection as usable, so it is closed.
+// without a DataChannel: its response verifies, but because the proof can't be
+// sent the mobile would never treat the connection as usable, so authentication
+// is revoked and the peer is closed.
 func TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer(t *testing.T) {
 	nonce := []byte("0123456789abcdef0123456789abcdef")
 	p := newAuthTestPeer(nonce)
@@ -388,6 +403,15 @@ func TestPeer_VerifyAuthResponse_ProofSendFailureClosesPeer(t *testing.T) {
 		Type: "auth_response",
 		Mac:  authMAC(testSharedSecret, nonce),
 	})
+
+	// Revoked synchronously, before the asynchronous close, so inbound
+	// messages in that window are never dispatched.
+	p.mu.Lock()
+	authed := p.authenticated
+	p.mu.Unlock()
+	if authed {
+		t.Fatal("authentication must be revoked as soon as the auth proof send fails")
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -451,13 +475,21 @@ type loopbackAuthPeer struct {
 
 func newLoopbackAuthPeer(t *testing.T) *loopbackAuthPeer {
 	t.Helper()
+	return newLoopbackAuthPeerWith(t, webrtc.Configuration{}, nil)
+}
+
+// newLoopbackAuthPeerWith is newLoopbackAuthPeer with the answerer built from
+// answererConfig and, if rewriteAnswer is non-nil, the answer SDP rewritten
+// before the agent applies it (as a signaling attacker could).
+func newLoopbackAuthPeerWith(t *testing.T, answererConfig webrtc.Configuration, rewriteAnswer func(sdp string) string) *loopbackAuthPeer {
+	t.Helper()
 	api := fastAPI(t)
 
 	offerer, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("create offerer: %v", err)
 	}
-	answerer, err := api.NewPeerConnection(webrtc.Configuration{})
+	answerer, err := api.NewPeerConnection(answererConfig)
 	if err != nil {
 		offerer.Close()
 		t.Fatalf("create answerer: %v", err)
@@ -500,7 +532,11 @@ func newLoopbackAuthPeer(t *testing.T) *loopbackAuthPeer {
 		t.Fatalf("set answerer local description: %v", err)
 	}
 	<-answerGatherDone
-	if err := offerer.SetRemoteDescription(*answerer.LocalDescription()); err != nil {
+	answerSDP := answerer.LocalDescription().SDP
+	if rewriteAnswer != nil {
+		answerSDP = rewriteAnswer(answerSDP)
+	}
+	if err := offerer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answerSDP}); err != nil {
 		t.Fatalf("set offerer remote description: %v", err)
 	}
 
@@ -651,6 +687,133 @@ func TestPeer_AuthProofNotSentOnFailure(t *testing.T) {
 			l.peer.mu.Unlock()
 			if authed {
 				t.Fatal("peer must not be authenticated")
+			}
+		})
+	}
+}
+
+// TestPeer_SendAuthChallenge_RejectsFingerprintNotVerifiedByDTLS reproduces a
+// signaling attacker rewriting the answer: a genuine sha-1 fingerprint of the
+// answerer's certificate followed by an arbitrary sha-256 one. Pion's DTLS
+// accepts the certificate via the sha-1 line, while the SDP parser binds the
+// arbitrary sha-256 value, so the agent must refuse to run the handshake.
+func TestPeer_SendAuthChallenge_RejectsFingerprintNotVerifiedByDTLS(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	cert, err := webrtc.GenerateCertificate(key)
+	if err != nil {
+		t.Fatalf("generate certificate: %v", err)
+	}
+	certPEM, err := cert.PEM()
+	if err != nil {
+		t.Fatalf("encode certificate: %v", err)
+	}
+	var der []byte
+	for rest := []byte(certPEM); ; {
+		var block *pem.Block
+		if block, rest = pem.Decode(rest); block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			der = block.Bytes
+		}
+	}
+	if der == nil {
+		t.Fatal("no CERTIFICATE block in the generated certificate PEM")
+	}
+	realSHA1 := sha1.Sum(der)
+	bogusSHA256 := bytes.Repeat([]byte{0xEE}, sdpFingerprintSize)
+
+	rewrite := func(sdp string) string {
+		var out []string
+		for _, line := range strings.Split(sdp, "\r\n") {
+			if strings.HasPrefix(line, "a=fingerprint:sha-256") {
+				out = append(out,
+					"a=fingerprint:sha-1 "+strings.ToUpper(colonHex(realSHA1[:])),
+					"a=fingerprint:sha-256 "+colonHex(bogusSHA256))
+				continue
+			}
+			out = append(out, line)
+		}
+		return strings.Join(out, "\r\n")
+	}
+
+	// The helper waits for the DataChannel to open, so DTLS accepted the
+	// rewritten answer.
+	l := newLoopbackAuthPeerWith(t, webrtc.Configuration{Certificates: []webrtc.Certificate{*cert}}, rewrite)
+	p := l.peer
+
+	bound, err := sdpSHA256Fingerprint(p.conn.RemoteDescription().SDP)
+	if err != nil {
+		t.Fatalf("parse rewritten answer fingerprint: %v", err)
+	}
+	if !bytes.Equal(bound, bogusSHA256) {
+		t.Fatalf("parser bound %x, want the arbitrary sha-256 value", bound)
+	}
+
+	p.sendAuthChallenge()
+
+	p.mu.Lock()
+	resolved, authed := p.authResolved, p.authenticated
+	armed := p.authNonce != nil || p.authTimer != nil
+	p.mu.Unlock()
+	if !resolved || authed {
+		t.Fatalf("authResolved=%v authenticated=%v, want resolved and not authenticated", resolved, authed)
+	}
+	if armed {
+		t.Fatal("no challenge must be armed when the fingerprints don't match DTLS")
+	}
+
+	// Nothing at all reaches the answerer: no challenge, so never a proof.
+	select {
+	case msg := <-l.received:
+		t.Fatalf("agent sent %s, want nothing", msg.MessageType())
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		closed := p.closed
+		p.mu.Unlock()
+		if closed {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("peer must be closed when the fingerprints don't match DTLS")
+}
+
+func TestPeer_VerifyDTLSFingerprints(t *testing.T) {
+	l := newLoopbackAuthPeer(t)
+	offerFP, answerFP, err := l.peer.sdpFingerprints()
+	if err != nil {
+		t.Fatalf("read SDP fingerprints: %v", err)
+	}
+	bogus := bytes.Repeat([]byte{0xEE}, sdpFingerprintSize)
+
+	tests := []struct {
+		name     string
+		offerFP  []byte
+		answerFP []byte
+		wantErr  bool
+	}{
+		{name: "honest descriptions match DTLS", offerFP: offerFP, answerFP: answerFP},
+		{name: "answer fingerprint not the remote certificate", offerFP: offerFP, answerFP: bogus, wantErr: true},
+		{name: "offer fingerprint not the local certificate", offerFP: bogus, answerFP: answerFP, wantErr: true},
+		{name: "fingerprints swapped", offerFP: answerFP, answerFP: offerFP, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := l.peer.verifyDTLSFingerprints(tt.offerFP, tt.answerFP)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected a fingerprint mismatch error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

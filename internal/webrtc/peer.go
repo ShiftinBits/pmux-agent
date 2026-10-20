@@ -1153,14 +1153,22 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 // auth_challenge, and arms a deadline that closes the connection if the peer
 // fails to prove key possession in time. It also captures the sha-256 DTLS
 // fingerprints of both SDP descriptions, which the host proof sent after a
-// valid auth_response binds to. ICE restarts don't re-run auth, and the DTLS
-// certificate (and so its fingerprint) is stable for the PeerConnection's
-// lifetime, so capturing them once here is sufficient.
+// valid auth_response binds to, and cross-checks them against the certificates
+// the DTLS transport actually negotiated (see verifyDTLSFingerprints). It runs
+// from the DataChannel's OnOpen, so the DTLS handshake has completed. ICE
+// restarts don't re-run auth, and the DTLS certificate (and so its fingerprint)
+// is stable for the PeerConnection's lifetime, so capturing them once here is
+// sufficient.
 func (p *Peer) sendAuthChallenge() {
 	offerFP, answerFP, err := p.sdpFingerprints()
 	if err != nil {
 		p.logger.Error("failed to read DTLS fingerprints from SDP", "error", err)
 		p.failAuth("dtls fingerprint unavailable")
+		return
+	}
+	if err := p.verifyDTLSFingerprints(offerFP, answerFP); err != nil {
+		p.logger.Error("SDP fingerprints do not match the negotiated DTLS certificates", "error", err)
+		p.failAuth("dtls fingerprint mismatch")
 		return
 	}
 
@@ -1233,24 +1241,80 @@ func sdpSHA256Fingerprint(sdp string) ([]byte, error) {
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("malformed sha-256 fingerprint line")
 		}
-		parts := strings.Split(fields[1], ":")
-		if len(parts) != sdpFingerprintSize {
-			return nil, fmt.Errorf("sha-256 fingerprint has %d bytes, want %d", len(parts), sdpFingerprintSize)
-		}
-		fp := make([]byte, 0, sdpFingerprintSize)
-		for _, part := range parts {
-			if len(part) != 2 {
-				return nil, fmt.Errorf("malformed sha-256 fingerprint byte %q", part)
-			}
-			b, err := hex.DecodeString(part)
-			if err != nil {
-				return nil, fmt.Errorf("decode sha-256 fingerprint: %w", err)
-			}
-			fp = append(fp, b[0])
-		}
-		return fp, nil
+		return decodeSHA256ColonHex(fields[1])
 	}
 	return nil, fmt.Errorf("no sha-256 fingerprint in SDP")
+}
+
+// decodeSHA256ColonHex decodes a colon-separated hex sha-256 fingerprint value
+// (the SDP a=fingerprint syntax; hex is case-insensitive) into its raw 32-byte
+// digest.
+func decodeSHA256ColonHex(value string) ([]byte, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != sdpFingerprintSize {
+		return nil, fmt.Errorf("sha-256 fingerprint has %d bytes, want %d", len(parts), sdpFingerprintSize)
+	}
+	fp := make([]byte, 0, sdpFingerprintSize)
+	for _, part := range parts {
+		if len(part) != 2 {
+			return nil, fmt.Errorf("malformed sha-256 fingerprint byte %q", part)
+		}
+		b, err := hex.DecodeString(part)
+		if err != nil {
+			return nil, fmt.Errorf("decode sha-256 fingerprint: %w", err)
+		}
+		fp = append(fp, b[0])
+	}
+	return fp, nil
+}
+
+// verifyDTLSFingerprints checks that the sha-256 fingerprints parsed from the
+// SDP describe the certificates the DTLS transport actually negotiated. Pion
+// accepts the remote certificate if it matches any one of the answer's
+// fingerprint lines, of any hash algorithm, while sdpSHA256Fingerprint binds
+// the first sha-256 line. Without this check, an answer carrying a genuine
+// non-sha-256 line ahead of an arbitrary sha-256 line would complete DTLS while
+// the host proof bound a fingerprint DTLS never verified. The answer check is
+// the security boundary; the offer check guards against parser drift, since
+// the local description never crossed the wire. Fails closed: an unavailable
+// transport, certificate or local fingerprint is an error.
+func (p *Peer) verifyDTLSFingerprints(offerFP, answerFP []byte) error {
+	sctp := p.conn.SCTP()
+	if sctp == nil {
+		return fmt.Errorf("no SCTP transport")
+	}
+	dtls := sctp.Transport()
+	if dtls == nil {
+		return fmt.Errorf("no DTLS transport")
+	}
+
+	remoteCert := dtls.GetRemoteCertificate()
+	if len(remoteCert) == 0 {
+		return fmt.Errorf("no remote DTLS certificate")
+	}
+	remoteFP := sha256.Sum256(remoteCert)
+	if !hmac.Equal(answerFP, remoteFP[:]) {
+		return fmt.Errorf("answer fingerprint does not match the remote DTLS certificate")
+	}
+
+	params, err := dtls.GetLocalParameters()
+	if err != nil {
+		return fmt.Errorf("local DTLS parameters: %w", err)
+	}
+	for _, fp := range params.Fingerprints {
+		if !strings.EqualFold(fp.Algorithm, "sha-256") {
+			continue
+		}
+		localFP, err := decodeSHA256ColonHex(fp.Value)
+		if err != nil {
+			return fmt.Errorf("local DTLS fingerprint: %w", err)
+		}
+		if !hmac.Equal(offerFP, localFP) {
+			return fmt.Errorf("offer fingerprint does not match the local DTLS certificate")
+		}
+		return nil
+	}
+	return fmt.Errorf("no sha-256 local DTLS fingerprint")
 }
 
 // hostProofMAC computes the host's proof of key possession, bound to this
@@ -1277,8 +1341,8 @@ func hostProofMAC(secret, nonce, responseMAC, offerFP, answerFP []byte) []byte {
 // auth_proof (see hostProofMAC) so the mobile can authenticate the host in turn,
 // with the proof bound to the DTLS fingerprints the mobile negotiated. On any
 // verification failure the peer is closed and no proof is sent; if the proof
-// itself cannot be sent, the peer is closed too, since the mobile will never
-// treat the connection as usable without it.
+// itself cannot be sent, authentication is revoked and the peer is closed too,
+// since the mobile will never treat the connection as usable without it.
 func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 	resp, ok := decoded.(*protocol.AuthResponseRequest)
 	if !ok {
@@ -1346,8 +1410,14 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		// failAuth is a no-op now that auth has resolved, so close directly. As
 		// in failAuth, the close runs on its own goroutine because we may be
 		// inside a Pion DataChannel callback, and ClosePeerIfCurrent keeps a
-		// stale peer from evicting a replacement.
+		// stale peer from evicting a replacement. Revoke authentication first
+		// so no inbound message is dispatched before the close lands: one that
+		// arrives in the window goes back through verifyAuthResponse, which
+		// drops it (the nonce is cleared and failAuth is a no-op).
 		p.logger.Warn("closing peer: failed to send auth proof", "error", err, "mobile", p.DeviceID)
+		p.mu.Lock()
+		p.authenticated = false
+		p.mu.Unlock()
 		if p.pm != nil {
 			go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
 		} else {
