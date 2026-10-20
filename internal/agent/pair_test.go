@@ -247,6 +247,8 @@ type fakePairServer struct {
 	mu         sync.Mutex
 	hostPub    []byte
 	hostDevice string
+
+	pairingDeleted atomic.Bool
 }
 
 func newFakePairServer(t *testing.T, makePairComplete func(hostPub []byte, hostDeviceID string) auth.PairCompleteMessage) *fakePairServer {
@@ -280,6 +282,10 @@ func newFakePairServer(t *testing.T, makePairComplete func(hostPub []byte, hostD
 	})
 	mux.HandleFunc("POST /v1/auth/token", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"token":"test-jwt"}`)
+	})
+	mux.HandleFunc("DELETE /v1/auth/pairing", func(w http.ResponseWriter, r *http.Request) {
+		fs.pairingDeleted.Store(true)
+		fmt.Fprint(w, `{}`)
 	})
 	mux.HandleFunc("GET /v1/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -444,6 +450,9 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 				if restarted.Load() {
 					t.Error("agent should not be restarted after a rejected pairing")
 				}
+				if !srv.pairingDeleted.Load() {
+					t.Error("rejected pairing should be removed from the server")
+				}
 				return
 			}
 
@@ -461,6 +470,9 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 			}
 			if !restarted.Load() {
 				t.Error("agent should be restarted after pairing")
+			}
+			if srv.pairingDeleted.Load() {
+				t.Error("accepted pairing must not be removed from the server")
 			}
 
 			// The mobile derives the same secret from its own private key.

@@ -193,6 +193,11 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 		pairComplete.PairMac,
 	); err != nil {
+		// The server committed the pairing before we could check the MAC.
+		// Remove it so it doesn't point at a mobile we never stored.
+		if delErr := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); delErr != nil {
+			fmt.Fprintf(w, "warning: failed to remove rejected pairing from server: %s\n", auth.SanitizeDisplayString(delErr.Error()))
+		}
 		return fmt.Errorf("%w: %w", errPairMACRejected, err)
 	}
 
