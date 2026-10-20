@@ -463,6 +463,11 @@ func (c *Client) SendKeys(paneID string, data []byte) error {
 	out, err := c.runCtxStdin(context.Background(), defaultCommandTimeout, clean,
 		"load-buffer", "-b", name, "-", ";", "paste-buffer", "-d", "-r", "-b", name, "-t", paneID)
 	if err != nil {
+		// paste-buffer -d deletes the buffer only when the paste succeeds. If
+		// it fails (pane gone, timeout), delete the buffer so the input does
+		// not stay readable in the server's buffer list. The buffer may not
+		// exist, so the error is ignored.
+		_, _ = c.run("delete-buffer", "-b", name)
 		return fmt.Errorf("paste input: %w: %s", err, out)
 	}
 	return nil

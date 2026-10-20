@@ -55,7 +55,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		cfg, _ := config.LoadConfig(paths.ConfigFile)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
 		if err := auth.DeletePairing(identity, cfg.APIBaseURL(), httpClient, hmacSecret); err != nil {
-			fmt.Fprintf(w, "Warning: could not notify server: %v\n", auth.SanitizeDisplayString(err.Error()))
+			fmt.Fprintf(w, "Warning: could not notify server: %v\n", err)
 		}
 	}
 

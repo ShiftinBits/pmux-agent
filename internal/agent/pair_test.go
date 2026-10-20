@@ -484,6 +484,88 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 	}
 }
 
+func TestRunPair_SanitizesServerErrors(t *testing.T) {
+	type testCase struct {
+		name    string
+		failAt  string // "initiate", "token" or "ws"
+		body    string
+		wantErr string
+	}
+	var tests []testCase
+	for _, b := range hostileServerBodies {
+		tests = append(tests,
+			testCase{"initiate " + b.name, "initiate", b.body, "failed to initiate pairing: server error (500): internal error"},
+			testCase{"token " + b.name, "token", b.body, "failed to authenticate: server error (500): internal error"},
+		)
+	}
+	tests = append(tests, testCase{
+		name:    "ws auth error",
+		failAt:  "ws",
+		body:    `{"type":"error","error":"internal error\u001b]52;c;ZXZpbA==\u0007\u001b[2K\r\u009b"}`,
+		wantErr: "pairing failed: WebSocket auth failed: internal error",
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := testPaths(t)
+			store := auth.NewMemorySecretStore()
+			if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
+				t.Fatalf("GenerateIdentity: %v", err)
+			}
+
+			upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+			fail := func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, tt.body)
+			}
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /v1/auth/challenge", func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, `{"nonce":"test-nonce"}`)
+			})
+			mux.HandleFunc("POST /v1/auth/pair/initiate", func(w http.ResponseWriter, r *http.Request) {
+				if tt.failAt == "initiate" {
+					fail(w)
+					return
+				}
+				fmt.Fprint(w, `{"pairingCode":"ABC234"}`)
+			})
+			mux.HandleFunc("POST /v1/auth/token", func(w http.ResponseWriter, r *http.Request) {
+				if tt.failAt == "token" {
+					fail(w)
+					return
+				}
+				fmt.Fprint(w, `{"token":"test-jwt"}`)
+			})
+			mux.HandleFunc("GET /v1/ws", func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				if _, _, err := conn.ReadMessage(); err != nil { // auth
+					return
+				}
+				conn.WriteMessage(websocket.TextMessage, []byte(tt.body)) //nolint:errcheck // client reports read failures
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			cfg := config.Defaults()
+			cfg.Server.URL = srv.URL
+
+			var out bytes.Buffer
+			err := RunPair(paths, cfg, store, "", strings.NewReader(""), &out)
+			if err == nil {
+				t.Fatal("expected RunPair error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("RunPair error = %q, want it to contain %q", err, tt.wantErr)
+			}
+			assertNoControlBytes(t, err.Error())
+		})
+	}
+}
+
 func TestRunPair_ExistingPairing_AcceptButServerDown(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()

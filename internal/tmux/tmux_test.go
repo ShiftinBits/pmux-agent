@@ -309,6 +309,31 @@ func TestSendKeysDeliversBytesLiterally(t *testing.T) {
 	}
 }
 
+func TestSendKeysFailedPasteLeavesNoBuffer(t *testing.T) {
+	c := testClient(t)
+
+	if _, err := c.CreateSession("leak-test", ""); err != nil {
+		t.Fatalf("CreateSession() error: %v", err)
+	}
+
+	secret := "hunter2-secret-keystrokes"
+	err := c.SendKeys("%999", []byte(secret+"\n"))
+	if err == nil {
+		t.Fatal("SendKeys() to a nonexistent pane: expected error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error leaks input: %v", err)
+	}
+
+	buffers, err := c.run("list-buffers")
+	if err != nil {
+		t.Fatalf("list-buffers: %v: %s", err, buffers)
+	}
+	if strings.TrimSpace(buffers) != "" {
+		t.Errorf("expected no leftover buffers after failed paste, got %q", buffers)
+	}
+}
+
 func TestSendKeysNulOnlyIsNoop(t *testing.T) {
 	c := &Client{Socket: "pmux-never-started", TmuxBin: "tmux"}
 	if err := c.SendKeys("%0", []byte{0, 0}); err != nil {

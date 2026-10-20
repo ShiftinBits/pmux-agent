@@ -2,6 +2,8 @@ package agent
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,5 +276,49 @@ func TestRunUninstall_YesFlag_WithKeepConfig(t *testing.T) {
 	// --yes + --keep-config must not un-register from server (this is the brew upgrade path)
 	if strings.Contains(output, "un-register") || strings.Contains(output, "Un-register") {
 		t.Errorf("--keep-config must not un-register from server, got: %s", output)
+	}
+}
+
+func TestRunUninstall_ServerFailureSanitized(t *testing.T) {
+	for _, tt := range hostileServerBodies {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := testPaths(t)
+			store := auth.NewMemorySecretStore()
+			if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
+				t.Fatalf("GenerateIdentity: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Paths are /v1/... because APIVersion defaults to "v1".
+				switch {
+				case r.URL.Path == "/v1/auth/challenge" && r.Method == "POST":
+					w.Write([]byte(`{"nonce":"test-nonce"}`))
+				case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
+					w.Write([]byte(`{"token":"test-jwt"}`))
+				case r.URL.Path == "/v1/auth/device" && r.Method == "DELETE":
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte(tt.body))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			cfgContent := "[server]\nurl = " + `"` + server.URL + `"` + "\n"
+			if err := writeFile(t, paths.ConfigFile, cfgContent); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := RunUninstall(paths, store, false, "", true, strings.NewReader(""), &buf); err != nil {
+				t.Fatalf("RunUninstall: %v", err)
+			}
+
+			output := buf.String()
+			if !strings.Contains(output, "Warning: could not un-register from server: server error (500): internal error") {
+				t.Errorf("expected server warning, got: %s", output)
+			}
+			assertNoControlBytes(t, output)
+		})
 	}
 }

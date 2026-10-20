@@ -33,19 +33,21 @@ func connError(err error) string {
 }
 
 // serverError extracts a short error message from a non-200 HTTP response body.
-// Tries JSON {"error":"..."} first, falls back to truncated raw body.
+// Tries JSON {"error":"..."} first, falls back to truncated raw body. The
+// server-supplied text is passed through SanitizeDisplayString so callers can
+// print the error to a terminal.
 func serverError(statusCode int, body []byte) string {
 	var parsed struct {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
-		return fmt.Sprintf("server error (%d): %s", statusCode, parsed.Error)
+		return fmt.Sprintf("server error (%d): %s", statusCode, SanitizeDisplayString(parsed.Error))
 	}
 	msg := strings.TrimSpace(string(body))
 	if len(msg) > 200 {
 		msg = msg[:200] + "..."
 	}
-	return fmt.Sprintf("server error (%d): %s", statusCode, msg)
+	return fmt.Sprintf("server error (%d): %s", statusCode, SanitizeDisplayString(msg))
 }
 
 // PairInitiateResponse is the server response from POST /auth/pair/initiate.
@@ -176,7 +178,7 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 		return nil, fmt.Errorf("parse auth response: %w", err)
 	}
 	if authResult.Type == "error" {
-		return nil, fmt.Errorf("WebSocket auth failed: %s", authResult.Error)
+		return nil, fmt.Errorf("WebSocket auth failed: %s", SanitizeDisplayString(authResult.Error))
 	}
 
 	// Wait for pair_complete message with context deadline

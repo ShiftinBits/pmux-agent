@@ -207,63 +207,79 @@ func TestRunUnpair_NotifiesServer(t *testing.T) {
 	}
 }
 
+// hostileServerBodies are server error responses that carry terminal control
+// sequences, in both forms serverError handles: a JSON "error" field and a
+// raw non-JSON body.
+var hostileServerBodies = []struct {
+	name string
+	body string
+}{
+	{"json error field", `{"error":"internal error\u001b]52;c;ZXZpbA==\u0007\u001b[2K\r\u009b"}`},
+	{"raw body", "internal error\x1b]52;c;ZXZpbA==\x07\x1b[2K\r\u009b"},
+}
+
 func TestRunUnpair_ServerFailureContinues(t *testing.T) {
-	paths := testPaths(t)
-	store := auth.NewMemorySecretStore()
+	for _, tt := range hostileServerBodies {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := testPaths(t)
+			store := auth.NewMemorySecretStore()
 
-	// Generate identity so LoadIdentity succeeds
-	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
-		t.Fatalf("GenerateIdentity: %v", err)
-	}
+			// Generate identity so LoadIdentity succeeds
+			if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
+				t.Fatalf("GenerateIdentity: %v", err)
+			}
 
-	writeSinglePairedDevice(t, paths.PairedDevices)
+			writeSinglePairedDevice(t, paths.PairedDevices)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Paths are /v1/... because APIVersion defaults to "v1".
-		switch {
-		case r.URL.Path == "/v1/auth/challenge" && r.Method == "POST":
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"nonce":"test-nonce"}`))
-		case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"token":"test-jwt"}`))
-		case r.URL.Path == "/v1/auth/pairing" && r.Method == "DELETE":
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"internal error"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Paths are /v1/... because APIVersion defaults to "v1".
+				switch {
+				case r.URL.Path == "/v1/auth/challenge" && r.Method == "POST":
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{"nonce":"test-nonce"}`))
+				case r.URL.Path == "/v1/auth/token" && r.Method == "POST":
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{"token":"test-jwt"}`))
+				case r.URL.Path == "/v1/auth/pairing" && r.Method == "DELETE":
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte(tt.body))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
 
-	// Write config pointing to test server
-	cfgContent := "[server]\nurl = " + `"` + server.URL + `"` + "\n"
-	if err := writeFile(t, paths.ConfigFile, cfgContent); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+			// Write config pointing to test server
+			cfgContent := "[server]\nurl = " + `"` + server.URL + `"` + "\n"
+			if err := writeFile(t, paths.ConfigFile, cfgContent); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
 
-	var out bytes.Buffer
-	in := strings.NewReader("y\n")
+			var out bytes.Buffer
+			in := strings.NewReader("y\n")
 
-	if err := RunUnpair(paths, store, "", in, &out); err != nil {
-		t.Fatalf("RunUnpair should succeed even if server fails: %v", err)
-	}
+			if err := RunUnpair(paths, store, "", in, &out); err != nil {
+				t.Fatalf("RunUnpair should succeed even if server fails: %v", err)
+			}
 
-	output := out.String()
-	if !strings.Contains(output, "Warning: could not notify server") {
-		t.Errorf("expected server warning, got: %s", output)
-	}
-	if !strings.Contains(output, "unpaired successfully") {
-		t.Errorf("expected success message, got: %s", output)
-	}
+			output := out.String()
+			if !strings.Contains(output, "Warning: could not notify server: server error (500): internal error") {
+				t.Errorf("expected server warning, got: %s", output)
+			}
+			if !strings.Contains(output, "unpaired successfully") {
+				t.Errorf("expected success message, got: %s", output)
+			}
+			assertNoControlBytes(t, output)
 
-	// Verify device was still removed locally
-	device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
-	if err != nil {
-		t.Fatalf("LoadPairedDevice: %v", err)
-	}
-	if device != nil {
-		t.Error("device should have been removed despite server failure")
+			// Verify device was still removed locally
+			device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
+			if err != nil {
+				t.Fatalf("LoadPairedDevice: %v", err)
+			}
+			if device != nil {
+				t.Error("device should have been removed despite server failure")
+			}
+		})
 	}
 }
 
