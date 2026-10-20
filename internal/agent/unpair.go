@@ -36,7 +36,7 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		deviceIDShort = deviceIDShort[:12] + "..."
 	}
 
-	fmt.Fprintf(w, "Unpair device '%s' (%s)?\nThis device will need to scan a new QR code to reconnect. [y/N] ", name, deviceIDShort)
+	fmt.Fprintf(w, "Unpair device '%s' (%s)?\nThis device will need to scan a new QR code to reconnect. [y/N] ", auth.SanitizeDisplayString(name), auth.SanitizeDisplayString(deviceIDShort))
 	var response string
 	if _, err := fmt.Fscanln(r, &response); err != nil {
 		// EOF or read error — treat as cancel
@@ -69,6 +69,6 @@ func RunUnpair(paths config.Paths, store auth.SecretStore, hmacSecret string, r 
 		signalReloadPairing(pid)
 	}
 
-	fmt.Fprintf(w, "Device '%s' unpaired successfully.\n", name)
+	fmt.Fprintf(w, "Device '%s' unpaired successfully.\n", auth.SanitizeDisplayString(name))
 	return nil
 }

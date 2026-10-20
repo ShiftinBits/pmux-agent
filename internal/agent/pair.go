@@ -3,10 +3,13 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +18,43 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/auth"
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
+
+// Indirected through package vars so tests can drive a full pairing against a
+// fake server: the secret never reaches the server, so a fake mobile can only
+// compute pairMac if the test controls it, and restarting the agent would
+// spawn the test binary.
+var (
+	generatePairingSecret = auth.GeneratePairingSecret
+	ensureAgentRunning    = EnsureRunning
+)
+
+// errPairMACRejected is returned when pair_complete does not carry a valid
+// pairMac. Pairing is aborted rather than waiting for another pair_complete:
+// one guess per pairing session is what keeps the pairing secret's length
+// sufficient.
+var errPairMACRejected = errors.New("pairing rejected: mobile could not prove it scanned this code (update the Pocketmux app, or the signaling server tampered with pairing)")
+
+// checkServerTransport refuses a cleartext (http:// or ws://) server URL
+// unless the host is loopback or an RFC 1918 private IPv4 address, matching
+// the mobile app's validateServerUrl. Pairing data sent in cleartext to a
+// public host could be rewritten in transit.
+func checkServerTransport(serverURL string) error {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return fmt.Errorf("parse server URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "ws" {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && ip.IsPrivate() {
+		return nil
+	}
+	return fmt.Errorf("refusing to pair over unencrypted %s:// with non-local server %q; use https://", u.Scheme, host)
+}
 
 // RunPair pairs this host with a mobile device via the signaling server.
 // It displays a QR code for scanning, waits for the mobile to complete
@@ -30,6 +70,19 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		return fmt.Errorf("failed to load identity: %w", err)
 	}
 
+	// serverURL is the bare host URL — used for the transport check below
+	// and the QR code payload (the mobile decodes the bare URL and adds its
+	// own version prefix). apiBaseURL carries the configured API version
+	// suffix and is passed to every HTTP/WS helper.
+	serverURL := cfg.ServerURL()
+	apiBaseURL := cfg.APIBaseURL()
+
+	// Refuse cleartext transport to a non-local server before touching the
+	// existing pairing or contacting the server.
+	if err := checkServerTransport(serverURL); err != nil {
+		return err
+	}
+
 	// Check for existing pairing
 	existingDevice, err := auth.LoadPairedDevice(paths.PairedDevices, store)
 	if err != nil {
@@ -42,7 +95,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 			name = existingDevice.DeviceID[:12] + "..."
 		}
 		pairedDate := existingDevice.PairedAt.Format("2006-01-02")
-		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", name, pairedDate)
+		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", auth.SanitizeDisplayString(name), pairedDate)
 
 		reader := bufio.NewReader(r)
 		answer, _ := reader.ReadString('\n')
@@ -57,29 +110,17 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		}
 	}
 
-	// serverURL is the bare host URL — used for the HTTP warning check below
-	// and the QR code payload (the mobile decodes the bare URL and adds its
-	// own version prefix). apiBaseURL carries the configured API version
-	// suffix and is passed to every HTTP/WS helper.
-	serverURL := cfg.ServerURL()
-	apiBaseURL := cfg.APIBaseURL()
-
-	// Warn if using unencrypted HTTP for non-local server
-	if strings.HasPrefix(serverURL, "http://") || strings.HasPrefix(serverURL, "ws://") {
-		host := strings.TrimPrefix(strings.TrimPrefix(serverURL, "http://"), "ws://")
-		host = strings.Split(host, "/")[0] // strip path
-		host = strings.Split(host, ":")[0] // strip port
-		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-			fmt.Fprintf(w, "WARNING: Server URL %q uses unencrypted HTTP.\n", serverURL)
-			fmt.Fprintf(w, "  Pairing data (public keys, device IDs) will be sent in cleartext.\n")
-			fmt.Fprintf(w, "  Use https:// for production servers.\n\n")
-		}
-	}
-
 	// Generate X25519 ephemeral keypair for key exchange
 	x25519kp, err := auth.GenerateX25519Keypair()
 	if err != nil {
 		return fmt.Errorf("failed to generate X25519 keypair: %w", err)
+	}
+
+	// The pairing secret goes only into the QR code / manual code, never to
+	// the server, and is not persisted.
+	pairingSecret, err := generatePairingSecret()
+	if err != nil {
+		return fmt.Errorf("failed to generate pairing secret: %w", err)
 	}
 
 	hostName := cfg.Name
@@ -103,6 +144,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		x25519kp.PublicKeyBase64(),
 		id.DeviceID,
 		serverURL,
+		pairingSecret,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to build QR payload: %w", err)
@@ -116,7 +158,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	fmt.Fprintln(w, "\nScan this QR code with Pocketmux on your mobile device:")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, qr.ToSmallString(false))
-	fmt.Fprintf(w, "Manual pairing code: %s\n\n", pairResp.PairingCode)
+	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.SanitizeDisplayString(auth.FormatManualCode(pairResp.PairingCode, pairingSecret)))
 	fmt.Fprintln(w, "Waiting for mobile device to complete pairing...")
 
 	// Stop the background agent if running. During pairing, the pair CLI
@@ -143,8 +185,29 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		return fmt.Errorf("pairing failed: %w", err)
 	}
 
+	// Verify the mobile proved knowledge of the QR-only secret before using
+	// its key. On failure, abort instead of waiting for another pair_complete.
+	if err := auth.VerifyPairMAC(
+		pairingSecret,
+		pairComplete.MobileX25519PublicKey,
+		pairComplete.MobileDeviceID,
+		pairComplete.PairMac,
+	); err != nil {
+		// The server committed the pairing before we could check the MAC.
+		// Remove it so it doesn't point at a mobile we never stored.
+		if delErr := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); delErr != nil {
+			fmt.Fprintf(w, "warning: failed to remove rejected pairing from server: %s\n", auth.SanitizeDisplayString(delErr.Error()))
+		}
+		return fmt.Errorf("%w: %w", errPairMACRejected, err)
+	}
+
 	// Compute shared secret via X25519 key exchange
-	sharedSecret, err := x25519kp.ComputeSharedSecret(pairComplete.MobileX25519PublicKey)
+	sharedSecret, err := x25519kp.ComputeSharedSecret(
+		pairComplete.MobileX25519PublicKey,
+		pairingSecret,
+		id.DeviceID,
+		pairComplete.MobileDeviceID,
+	)
 	if err != nil {
 		return fmt.Errorf("key exchange failed: %w", err)
 	}
@@ -169,7 +232,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if displayName == "" {
 		displayName = pairComplete.MobileDeviceID
 	}
-	fmt.Fprintf(w, "Paired successfully with device '%s'\n", displayName)
+	fmt.Fprintf(w, "Paired successfully with device '%s'\n", auth.SanitizeDisplayString(displayName))
 
 	// If the agent is still running (e.g., a racing pmux command restarted it),
 	// signal it to reload the new pairing state.
@@ -179,7 +242,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	}
 
 	// Restart the background agent (stopped earlier to avoid WebSocket race).
-	if err := EnsureRunning(paths, store); err != nil {
+	if err := ensureAgentRunning(paths, store); err != nil {
 		fmt.Fprintf(w, "warning: failed to restart agent: %v\n", err)
 	}
 

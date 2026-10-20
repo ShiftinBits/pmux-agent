@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1117,5 +1118,54 @@ func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Error("Run() did not return after cancel")
+	}
+}
+
+func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
+	oversized := make([]byte, maxSignalingMessageSize+1)
+	for i := range oversized {
+		oversized[i] = 'a'
+	}
+
+	tests := []struct {
+		name         string
+		authenticate bool
+	}{
+		{name: "during authentication", authenticate: false},
+		{name: "in read loop", authenticate: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, logger := testSetup(t)
+
+			server := mockWSServer(t, func(conn *websocket.Conn) {
+				conn.ReadMessage()
+				if tt.authenticate {
+					conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+				}
+				conn.WriteMessage(websocket.TextMessage, oversized)
+				// Wait for the client to drop the connection.
+				conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				conn.ReadMessage()
+			})
+			defer server.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+			sc.HTTPClient = server.Client()
+
+			connected, err := sc.connectAndServe(ctx)
+			if err == nil {
+				t.Fatal("connectAndServe() error = nil, want read limit error")
+			}
+			if !errors.Is(err, websocket.ErrReadLimit) {
+				t.Errorf("connectAndServe() error = %v, want wrapping websocket.ErrReadLimit", err)
+			}
+			if connected != tt.authenticate {
+				t.Errorf("connected = %v, want %v", connected, tt.authenticate)
+			}
+		})
 	}
 }

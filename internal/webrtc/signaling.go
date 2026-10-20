@@ -22,6 +22,10 @@ import (
 )
 
 const (
+	// maxSignalingMessageSize bounds a single inbound signaling WebSocket
+	// frame so a hostile or compromised server cannot exhaust agent memory.
+	maxSignalingMessageSize = 128 << 10
+
 	// DefaultPresenceInterval is how often the agent sends presence heartbeats.
 	DefaultPresenceInterval = 30 * time.Second
 
@@ -385,6 +389,8 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		}
 		return false, fmt.Errorf("connect to signaling server: %w", err)
 	}
+
+	conn.SetReadLimit(maxSignalingMessageSize)
 
 	defer func() {
 		conn.Close()

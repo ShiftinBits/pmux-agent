@@ -29,7 +29,7 @@ func TestSinglePairing_RejectsSecondDevice(t *testing.T) {
 
 	tc := tmux.NewClient(singlePairingSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Create a session
 	_, err := tc.CreateSession("single-1", "")
@@ -144,7 +144,7 @@ func TestSinglePairing_AllowsReconnect(t *testing.T) {
 
 	tc := tmux.NewClient(singlePairingSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Create a session
 	_, err := tc.CreateSession("reconnect-1", "")
@@ -270,7 +270,7 @@ func TestSinglePairing_ConcurrentListSessions(t *testing.T) {
 
 	tc := tmux.NewClient(singlePairingSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Create a few sessions
 	for i := 0; i < 3; i++ {

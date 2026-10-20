@@ -132,7 +132,7 @@ func TestLifecycle_FullCycle(t *testing.T) {
 
 	tc := tmux.NewClient(lifecycleSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Allow runtime to stabilize before baseline measurement
 	runtime.GC()
@@ -278,7 +278,7 @@ func TestLifecycle_PingPong(t *testing.T) {
 
 	tc := tmux.NewClient(lifecycleSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Send a ping
 	h.HandleMessage("peer1", &protocol.PingRequest{Type: "ping"})
@@ -315,7 +315,7 @@ func TestLifecycle_ReattachAfterDetach(t *testing.T) {
 
 	tc := tmux.NewClient(lifecycleSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Create two sessions
 	_, err := tc.CreateSession("reattach-1", "")

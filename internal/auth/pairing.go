@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,7 +12,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/shiftinbits/pmux-agent/internal/config"
 	"golang.org/x/crypto/hkdf"
@@ -21,14 +24,28 @@ import (
 // This limit is enforced during both initial pairing and name-update flows.
 const MaxMobileNameLen = 64
 
-// TruncateMobileName truncates a mobile device name to MaxMobileNameLen runes.
-// It operates on Unicode code points to avoid splitting multi-byte characters.
+// SanitizeDisplayString removes every rune that is not printable per
+// unicode.IsPrint (C0/C1 controls, DEL, format characters, newlines, tabs),
+// so server-supplied text cannot inject terminal escape sequences. ASCII space
+// and printable non-ASCII text are preserved.
+func SanitizeDisplayString(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// TruncateMobileName sanitizes a mobile device name with SanitizeDisplayString
+// and then truncates it to MaxMobileNameLen runes. It operates on Unicode code
+// points to avoid splitting multi-byte characters.
 func TruncateMobileName(name string) string {
-	runes := []rune(name)
+	runes := []rune(SanitizeDisplayString(name))
 	if len(runes) > MaxMobileNameLen {
 		return string(runes[:MaxMobileNameLen])
 	}
-	return name
+	return string(runes)
 }
 
 // X25519Keypair holds an ephemeral X25519 keypair for key exchange during pairing.
@@ -67,10 +84,129 @@ func (kp *X25519Keypair) PublicKeyBase64() string {
 	return base64.StdEncoding.EncodeToString(kp.PublicKey.Bytes())
 }
 
-// ComputeSharedSecret performs X25519 key exchange with the peer's public key.
-// peerPubKeyBase64 is the base64-encoded X25519 public key from the peer.
+// PairingSecretLen is the length of the QR-only pairing secret.
+const PairingSecretLen = 16
+
+// pairingSecretAlphabet is the 32-character alphabet for the pairing secret
+// (no 0/O or 1/I). Its size being exactly 32 makes alphabet[b&31] unbiased.
+const pairingSecretAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// pairMACLabel is the domain-separation prefix of the pair_complete MAC input
+// and pairingHKDFLabel is the prefix of the shared-secret HKDF info. Both must
+// match the mobile app byte for byte.
+const (
+	pairMACLabel     = "pocketmux-pair-mac-v2"
+	pairingHKDFLabel = "pocketmux-pairing-v2"
+)
+
+// GeneratePairingSecret returns a fresh PairingSecretLen-character secret
+// drawn from pairingSecretAlphabet. The secret travels only in the QR code
+// (or the manual pairing code) and is never sent to the signaling server or
+// persisted; it authenticates the mobile's pair_complete and salts the
+// shared-secret derivation, so a server that relays pairing cannot
+// substitute its own X25519 key.
+func GeneratePairingSecret() (string, error) {
+	buf := make([]byte, PairingSecretLen)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate pairing secret: %w", err)
+	}
+	out := make([]byte, PairingSecretLen)
+	for i, b := range buf {
+		out[i] = pairingSecretAlphabet[b&31]
+	}
+	return string(out), nil
+}
+
+// FormatManualCode formats the pairing code and pairing secret for manual
+// entry as PPPPPP-SSSS-SSSS-SSSS-SSSS.
+func FormatManualCode(pairingCode, pairingSecret string) string {
+	var sb strings.Builder
+	sb.WriteString(pairingCode)
+	for i := 0; i < len(pairingSecret); i += 4 {
+		sb.WriteByte('-')
+		sb.WriteString(pairingSecret[i:min(i+4, len(pairingSecret))])
+	}
+	return sb.String()
+}
+
+// pairBind builds BIND = hostX25519Pub || mobileX25519Pub ||
+// ASCII(hostDeviceID) || ASCII(mobileDeviceID). Every field is fixed at 32
+// bytes, so the concatenation is unambiguous.
+func pairBind(hostPub, mobilePub []byte, hostDeviceID, mobileDeviceID string) ([]byte, error) {
+	if len(hostPub) != 32 {
+		return nil, fmt.Errorf("host X25519 public key must be 32 bytes, got %d", len(hostPub))
+	}
+	if len(mobilePub) != 32 {
+		return nil, fmt.Errorf("mobile X25519 public key must be 32 bytes, got %d", len(mobilePub))
+	}
+	if err := ValidateDeviceID(hostDeviceID); err != nil {
+		return nil, fmt.Errorf("host device ID: %w", err)
+	}
+	if err := ValidateDeviceID(mobileDeviceID); err != nil {
+		return nil, fmt.Errorf("mobile device ID: %w", err)
+	}
+	bind := make([]byte, 0, 128)
+	bind = append(bind, hostPub...)
+	bind = append(bind, mobilePub...)
+	bind = append(bind, hostDeviceID...)
+	bind = append(bind, mobileDeviceID...)
+	return bind, nil
+}
+
+// VerifyPairMAC checks the pairMac from a pair_complete message. The mobile
+// computes it as HMAC-SHA256(key=ASCII(pairingSecret),
+// ASCII("pocketmux-pair-mac-v2") || mobileX25519Pub || ASCII(mobileDeviceID)),
+// proving it read the secret from this host's QR code (or manual pairing code)
+// and binding the mobile's X25519 key and device ID, both fixed at 32 bytes.
+// The MAC cannot cover the host key or host device ID: on the manual-code path
+// the mobile learns them only after POST /auth/pair/complete. Those are bound
+// instead through the HKDF info in ComputeSharedSecret. A missing MAC is
+// rejected: it means an outdated app or a relay that never saw the QR code.
+func VerifyPairMAC(pairingSecret, mobilePubB64, mobileDeviceID, pairMacB64 string) error {
+	if pairingSecret == "" {
+		return errors.New("verify pair MAC: empty pairing secret")
+	}
+	if pairMacB64 == "" {
+		return errors.New("verify pair MAC: pair_complete has no pairMac")
+	}
+	mac, err := base64.StdEncoding.DecodeString(pairMacB64)
+	if err != nil {
+		return fmt.Errorf("verify pair MAC: decode pairMac: %w", err)
+	}
+	if len(mac) != sha256.Size {
+		return fmt.Errorf("verify pair MAC: pairMac must be %d bytes, got %d", sha256.Size, len(mac))
+	}
+	mobilePub, err := base64.StdEncoding.DecodeString(mobilePubB64)
+	if err != nil {
+		return fmt.Errorf("verify pair MAC: decode mobile public key: %w", err)
+	}
+	if len(mobilePub) != 32 {
+		return fmt.Errorf("verify pair MAC: mobile X25519 public key must be 32 bytes, got %d", len(mobilePub))
+	}
+	if err := ValidateDeviceID(mobileDeviceID); err != nil {
+		return fmt.Errorf("verify pair MAC: mobile device ID: %w", err)
+	}
+
+	h := hmac.New(sha256.New, []byte(pairingSecret))
+	h.Write([]byte(pairMACLabel))
+	h.Write(mobilePub)
+	h.Write([]byte(mobileDeviceID))
+	if !hmac.Equal(h.Sum(nil), mac) {
+		return errors.New("verify pair MAC: pairMac does not match")
+	}
+	return nil
+}
+
+// ComputeSharedSecret performs X25519 key exchange with the mobile's public
+// key and derives the long-term shared secret. It is called only by the host,
+// so the receiver's own public key is the host key in BIND.
+// peerPubKeyBase64 is the base64-encoded X25519 public key from the mobile.
 // Returns the base64-encoded shared secret.
-func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, error) {
+func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64, pairingSecret, hostDeviceID, mobileDeviceID string) (string, error) {
+	if pairingSecret == "" {
+		return "", errors.New("compute shared secret: empty pairing secret")
+	}
+
 	peerBytes, err := base64.StdEncoding.DecodeString(peerPubKeyBase64)
 	if err != nil {
 		return "", fmt.Errorf("decode peer public key: %w", err)
@@ -80,6 +216,11 @@ func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, e
 	peerPub, err := curve.NewPublicKey(peerBytes)
 	if err != nil {
 		return "", fmt.Errorf("parse peer X25519 public key: %w", err)
+	}
+
+	bind, err := pairBind(kp.PublicKey.Bytes(), peerBytes, hostDeviceID, mobileDeviceID)
+	if err != nil {
+		return "", fmt.Errorf("compute shared secret: %w", err)
 	}
 
 	raw, err := kp.PrivateKey.ECDH(peerPub)
@@ -97,9 +238,12 @@ func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, e
 
 	// Derive key material using HKDF (RFC 5869, §3.1 extract-then-expand).
 	// Raw X25519 output is not uniformly distributed and must be processed
-	// through a KDF before use. Salt (§3.3): static domain separator.
-	// Info (§3.2): versioned context label for protocol isolation.
-	hkdfReader := hkdf.New(sha256.New, raw, []byte("pocketmux"), []byte("pocketmux-pairing-v1"))
+	// through a KDF before use. Salt (§3.3): the QR-only pairing secret, so a
+	// relay that never saw the QR code cannot derive the same key. Info
+	// (§3.2): versioned label followed by BIND, tying the key to both public
+	// keys and both device IDs.
+	info := append([]byte(pairingHKDFLabel), bind...)
+	hkdfReader := hkdf.New(sha256.New, raw, []byte(pairingSecret), info)
 	derived := make([]byte, 32)
 	if _, err := io.ReadFull(hkdfReader, derived); err != nil {
 		return "", fmt.Errorf("derive shared secret via HKDF: %w", err)
@@ -109,14 +253,15 @@ func (kp *X25519Keypair) ComputeSharedSecret(peerPubKeyBase64 string) (string, e
 }
 
 // BuildQRPayload creates a pipe-delimited payload for the pairing QR code.
-// Format: pairingCode|x25519PubKey|deviceId[|serverUrl]
-// The server URL is omitted when it matches the production default to minimize
-// QR code size. The mobile app falls back to the default when absent.
-func BuildQRPayload(pairingCode string, x25519PubKeyBase64 string, hostDeviceID string, serverURL string) (string, error) {
+// Format: pairingCode|x25519PubKey|deviceId|serverUrl|pairingSecret
+// All five fields are always present. serverUrl is empty when it matches the
+// production default, to keep the QR code small; the mobile app falls back
+// to the default when the field is empty.
+func BuildQRPayload(pairingCode, x25519PubKeyBase64, hostDeviceID, serverURL, pairingSecret string) (string, error) {
 	if serverURL == config.DefaultServerURL {
-		return pairingCode + "|" + x25519PubKeyBase64 + "|" + hostDeviceID, nil
+		serverURL = ""
 	}
-	return pairingCode + "|" + x25519PubKeyBase64 + "|" + hostDeviceID + "|" + serverURL, nil
+	return strings.Join([]string{pairingCode, x25519PubKeyBase64, hostDeviceID, serverURL, pairingSecret}, "|"), nil
 }
 
 // LoadPairedDevices reads the paired devices list from disk and retrieves

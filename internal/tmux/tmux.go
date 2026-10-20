@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,6 +75,10 @@ type PaneSize struct {
 type Client struct {
 	Socket  string // Socket name (default: "pmux")
 	TmuxBin string // Path to tmux binary (default: "tmux")
+
+	// inputSeq numbers the tmux paste buffers used by SendKeys so concurrent
+	// calls never share a buffer name.
+	inputSeq atomic.Uint64
 }
 
 // NewClient creates a tmux client targeting the given socket.
@@ -111,16 +116,36 @@ func (c *Client) run(args ...string) (string, error) {
 // context and timeout. The timeout is applied as a context deadline on top
 // of any existing deadline in ctx.
 func (c *Client) runCtx(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
+	return c.runCtxStdin(ctx, timeout, nil, args...)
+}
+
+// runCtxStdin is runCtx with the given bytes supplied on tmux's stdin. A nil
+// stdin leaves the command's stdin unset. The timeout error names only the
+// tmux subcommand, never the arguments, so user input cannot reach logs.
+func (c *Client) runCtxStdin(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	fullArgs := append([]string{"-L", c.Socket}, args...)
 	cmd := exec.CommandContext(ctx, c.TmuxBin, fullArgs...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return strings.TrimRight(string(out), "\n"), fmt.Errorf("tmux command timed out after %s: %v", timeout, args)
+		return strings.TrimRight(string(out), "\n"), timeoutError(args, timeout)
 	}
 	return strings.TrimRight(string(out), "\n"), err
+}
+
+// timeoutError builds the timeout error for a tmux command without echoing
+// its arguments.
+func timeoutError(args []string, timeout time.Duration) error {
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+	return fmt.Errorf("tmux %s timed out after %s", name, timeout)
 }
 
 // IsServerRunning checks if the tmux server on the pmux socket is alive.
@@ -424,17 +449,26 @@ func (c *Client) PaneDimensions(paneID string) (int, int, error) {
 	return cols, rows, nil
 }
 
-// SendKeys sends literal input to a tmux pane using the -l flag.
-// Null bytes are stripped because execve truncates argv strings at \x00,
-// which would silently discard trailing input.
+// SendKeys sends literal input to a tmux pane. The bytes travel on tmux's
+// stdin via load-buffer and are pasted with paste-buffer, so they never appear
+// in a process argument list. -r keeps LF byte-literal, -d deletes the buffer,
+// and -p is omitted so no bracketed-paste markers are added.
+// Null bytes are stripped; they are not valid terminal input.
 func (c *Client) SendKeys(paneID string, data []byte) error {
 	clean := bytes.ReplaceAll(data, []byte{0}, nil)
 	if len(clean) == 0 {
 		return nil
 	}
-	out, err := c.run("send-keys", "-t", paneID, "-l", string(clean))
+	name := fmt.Sprintf("pmux-in-%d", c.inputSeq.Add(1))
+	out, err := c.runCtxStdin(context.Background(), defaultCommandTimeout, clean,
+		"load-buffer", "-b", name, "-", ";", "paste-buffer", "-d", "-r", "-b", name, "-t", paneID)
 	if err != nil {
-		return fmt.Errorf("send-keys: %w: %s", err, out)
+		// paste-buffer -d deletes the buffer only when the paste succeeds. If
+		// it fails (pane gone, timeout), delete the buffer so the input does
+		// not stay readable in the server's buffer list. The buffer may not
+		// exist, so the error is ignored.
+		_, _ = c.run("delete-buffer", "-b", name)
+		return fmt.Errorf("paste input: %w: %s", err, out)
 	}
 	return nil
 }

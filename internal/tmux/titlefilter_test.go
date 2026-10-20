@@ -103,3 +103,29 @@ func TestTitleFilter_Reset(t *testing.T) {
 		t.Errorf("after Reset: got %q, want %q", got, "hello")
 	}
 }
+
+func TestTitleFilter_EscFloodInTitleIsBounded(t *testing.T) {
+	const floodLen = 100000
+	f := NewTitleFilter()
+
+	input := append([]byte("\x1bk"), bytes.Repeat([]byte{0x1b}, floodLen)...)
+	input = append(input, 'x')
+
+	var total int
+	for i, b := range input {
+		out := f.Filter([]byte{b})
+		total += len(out)
+		if len(f.titleBuf) > maxTitleLen+1 {
+			t.Fatalf("titleBuf len %d exceeds %d after byte %d", len(f.titleBuf), maxTitleLen+1, i)
+		}
+	}
+
+	// Nothing may be amplified: output never exceeds input, and the buffer
+	// was flushed (not retained) once the cap was hit.
+	if total > len(input) {
+		t.Errorf("output %d bytes exceeds input %d bytes", total, len(input))
+	}
+	if total+len(f.titleBuf) < len(input)-1 {
+		t.Errorf("bytes lost: out=%d buffered=%d input=%d", total, len(f.titleBuf), len(input))
+	}
+}

@@ -23,7 +23,7 @@ func TestManySessions_20x3(t *testing.T) {
 
 	tc := tmux.NewClient(sessionsSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	const numSessions = 20
 	const windowsPerSession = 3

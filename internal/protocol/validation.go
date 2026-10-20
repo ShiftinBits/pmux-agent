@@ -100,18 +100,25 @@ func (m *InputRequest) Validate() error {
 	return validateByteSize("input", "data", len(m.Data), MaxInputSize)
 }
 
-// Validate enforces bounds on an auth-response request. An empty mac is
-// unambiguously malformed (it would also fail the HMAC compare, but reject it
-// here so the contract is complete and the failure is diagnostic).
+// Validate enforces bounds on an auth-response request. An empty mac or nonce
+// is unambiguously malformed (either would also fail verification, but reject
+// it here so the contract is complete and the failure is diagnostic). The
+// exact decoded lengths are checked by the handshake verifier.
 //
-// AuthChallengeEvent intentionally has no Validate: it is host→mobile, so the
-// agent only ever *sends* it and never decodes a peer-supplied one. The TS
-// codec validates the nonce on the mobile's decode side.
+// AuthChallengeEvent and AuthConfirmEvent intentionally have no Validate: they
+// are host→mobile, so the agent only ever *sends* them and never decodes a
+// peer-supplied one. The TS codec validates them on the mobile's decode side.
 func (m *AuthResponseRequest) Validate() error {
 	if len(m.Mac) == 0 {
 		return fmt.Errorf("auth_response: %q must not be empty", "mac")
 	}
-	return validateStringLen("auth_response", "mac", m.Mac, MaxAuthBlobLength)
+	if err := validateStringLen("auth_response", "mac", m.Mac, MaxAuthBlobLength); err != nil {
+		return err
+	}
+	if len(m.Nonce) == 0 {
+		return fmt.Errorf("auth_response: %q must not be empty", "nonce")
+	}
+	return validateStringLen("auth_response", "nonce", m.Nonce, MaxAuthBlobLength)
 }
 
 // Validate enforces bounds on a resize request.
