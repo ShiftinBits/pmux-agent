@@ -69,6 +69,7 @@ Config file: `~/.config/pmux/config.toml`
 - Integration tests: `test/integration/` — build tag `//go:build integration`, uses isolated tmux sockets (`pmux-integ-*`)
 - Stress tests: `test/stress/` — build tag `//go:build stress`, sockets `pmux-stress-*`
 - Integration/stress tests require tmux installed and use `-race` flag
+- ⚠ Running a built `pmux` with a fake `HOME` (e.g. `HOME=$tmp pmux init`): **always also set `PMUX_SECRET_BACKEND=file`**. On macOS the keyring probe shells out to `security add-generic-password`, which can't find a default keychain under a fake `HOME` (`errSecNoDefaultKeychain`) and pops a blocking "Keychain Not Found … `__probe__`" GUI dialog on the user's desktop for every invocation.
 
 ## Release Pipeline
 
