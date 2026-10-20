@@ -944,12 +944,22 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	// for a grace timer (SB-1008). The Connected handler in
 	// handlePeerStateChange cancels it on recovery.
 	pm.mu.Lock()
+	// The lock was released while the offer was sent; if the peer was closed or
+	// replaced meanwhile, a watchdog here would block the new peer's grace timer.
+	if pm.closed || pm.peers[deviceID] != peer {
+		pm.mu.Unlock()
+		return
+	}
 	if old, ok := pm.iceRestartTimers[deviceID]; ok {
 		old.Stop()
 	}
-	pm.iceRestartTimers[deviceID] = time.AfterFunc(20*time.Second, func() {
+	var watchdog *time.Timer
+	watchdog = time.AfterFunc(20*time.Second, func() {
 		pm.mu.Lock()
-		delete(pm.iceRestartTimers, deviceID)
+		// Only remove our own entry; a late-firing watchdog must not delete a newer one.
+		if pm.iceRestartTimers[deviceID] == watchdog {
+			delete(pm.iceRestartTimers, deviceID)
+		}
 		// Ignore if the peer was replaced by a reconnect in the meantime.
 		if pm.peers[deviceID] != peer {
 			pm.mu.Unlock()
@@ -961,6 +971,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 		}
 		pm.mu.Unlock()
 	})
+	pm.iceRestartTimers[deviceID] = watchdog
 	pm.mu.Unlock()
 }
 
