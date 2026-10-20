@@ -27,7 +27,7 @@ pmux ls
 brew install shiftinbits/tap/pmux
 ```
 
-Pre-built binaries and DEB/RPM/Snap packages are available on [GitHub Releases](https://github.com/ShiftinBits/pmux-agent/releases).
+Pre-built binaries and DEB/RPM packages are available on [GitHub Releases](https://github.com/ShiftinBits/pmux-agent/releases).
 
 ## Getting Started
 
