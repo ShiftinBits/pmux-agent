@@ -36,4 +36,3 @@ func TestLinuxProbe(t *testing.T) {
 		})
 	}
 }
-

@@ -6,7 +6,7 @@ const maxTitleLen = 512
 
 // Title filter states.
 const (
-	tfPassthrough    = iota // Normal: copying bytes to output
+	tfPassthrough   = iota // Normal: copying bytes to output
 	tfSawEsc               // Saw ESC; waiting to see if next byte is 'k'
 	tfInTitle              // Inside ESC k ...; discarding until ESC \
 	tfSawEscInTitle        // Inside title, saw ESC; waiting for '\' to end

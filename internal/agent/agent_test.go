@@ -72,4 +72,3 @@ func TestIsFatalInitError(t *testing.T) {
 		}
 	})
 }
-
