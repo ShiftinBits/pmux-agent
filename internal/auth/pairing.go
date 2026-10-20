@@ -91,9 +91,9 @@ const PairingSecretLen = 16
 // (no 0/O or 1/I). Its size being exactly 32 makes alphabet[b&31] unbiased.
 const pairingSecretAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-// pairMACLabel and pairingHKDFLabel are the domain-separation labels for the
-// pair_complete MAC and the shared-secret HKDF info. Both must match the
-// mobile app byte for byte.
+// pairMACLabel is the domain-separation prefix of the pair_complete MAC input
+// and pairingHKDFLabel is the prefix of the shared-secret HKDF info. Both must
+// match the mobile app byte for byte.
 const (
 	pairMACLabel     = "pocketmux-pair-mac-v2"
 	pairingHKDFLabel = "pocketmux-pairing-v2"
@@ -155,11 +155,14 @@ func pairBind(hostPub, mobilePub []byte, hostDeviceID, mobileDeviceID string) ([
 
 // VerifyPairMAC checks the pairMac from a pair_complete message. The mobile
 // computes it as HMAC-SHA256(key=ASCII(pairingSecret),
-// ASCII("pocketmux-pair-mac-v2") || BIND), proving it read the secret from
-// this host's QR code and binding both X25519 keys and both device IDs. A
-// missing MAC is rejected: it means an outdated app or a relay that never
-// saw the QR code.
-func VerifyPairMAC(pairingSecret string, hostPub []byte, mobilePubB64, hostDeviceID, mobileDeviceID, pairMacB64 string) error {
+// ASCII("pocketmux-pair-mac-v2") || mobileX25519Pub || ASCII(mobileDeviceID)),
+// proving it read the secret from this host's QR code (or manual pairing code)
+// and binding the mobile's X25519 key and device ID, both fixed at 32 bytes.
+// The MAC cannot cover the host key or host device ID: on the manual-code path
+// the mobile learns them only after POST /auth/pair/complete. Those are bound
+// instead through the HKDF info in ComputeSharedSecret. A missing MAC is
+// rejected: it means an outdated app or a relay that never saw the QR code.
+func VerifyPairMAC(pairingSecret, mobilePubB64, mobileDeviceID, pairMacB64 string) error {
 	if pairingSecret == "" {
 		return errors.New("verify pair MAC: empty pairing secret")
 	}
@@ -177,14 +180,17 @@ func VerifyPairMAC(pairingSecret string, hostPub []byte, mobilePubB64, hostDevic
 	if err != nil {
 		return fmt.Errorf("verify pair MAC: decode mobile public key: %w", err)
 	}
-	bind, err := pairBind(hostPub, mobilePub, hostDeviceID, mobileDeviceID)
-	if err != nil {
-		return fmt.Errorf("verify pair MAC: %w", err)
+	if len(mobilePub) != 32 {
+		return fmt.Errorf("verify pair MAC: mobile X25519 public key must be 32 bytes, got %d", len(mobilePub))
+	}
+	if err := ValidateDeviceID(mobileDeviceID); err != nil {
+		return fmt.Errorf("verify pair MAC: mobile device ID: %w", err)
 	}
 
 	h := hmac.New(sha256.New, []byte(pairingSecret))
 	h.Write([]byte(pairMACLabel))
-	h.Write(bind)
+	h.Write(mobilePub)
+	h.Write([]byte(mobileDeviceID))
 	if !hmac.Equal(h.Sum(nil), mac) {
 		return errors.New("verify pair MAC: pairMac does not match")
 	}

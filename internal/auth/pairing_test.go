@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -89,7 +91,7 @@ const (
 	vecPairingSecret  = "ABCDEFGHJKLMNPQR"
 	vecHostPub        = "e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM="
 	vecMobilePub      = "D6poTtKIZ7l/Smot7l34zpdOdrcBjj8iocTPJnhXDyA="
-	vecPairMac        = "AbPSxoD0EUD/NFLuOE3SzJ5V+/WumalqFLlFSNSuhKY="
+	vecPairMac        = "+WJq2u9YNctr2j0+n/66h36wqJP4fvuohxvPnZa+Xvk="
 	vecSharedSecret   = "FaYdo9hMbk1fzjwKPJfMDpQa7VMIBrjwN1p/CaSO47Y="
 )
 
@@ -115,7 +117,7 @@ func TestPairingV2_KnownVector(t *testing.T) {
 	}
 
 	t.Run("pairMac verifies", func(t *testing.T) {
-		err := VerifyPairMAC(vecPairingSecret, host.PublicKey.Bytes(), vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac)
+		err := VerifyPairMAC(vecPairingSecret, vecMobilePub, vecMobileDeviceID, vecPairMac)
 		if err != nil {
 			t.Errorf("VerifyPairMAC() error: %v", err)
 		}
@@ -226,46 +228,66 @@ func TestFormatManualCode(t *testing.T) {
 	}
 }
 
+// pairMacFor computes the pair_complete MAC the way the mobile app does,
+// independently of VerifyPairMAC.
+func pairMacFor(secret string, mobilePub []byte, mobileDeviceID string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte("pocketmux-pair-mac-v2"))
+	h.Write(mobilePub)
+	h.Write([]byte(mobileDeviceID))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
 func TestVerifyPairMAC(t *testing.T) {
-	host := fixedKeypair(t, 0x11)
 	other := fixedKeypair(t, 0x33)
+	const otherMobileDeviceID = "fedcba9876543210fedcba9876543211"
 
 	tests := []struct {
 		name           string
 		pairingSecret  string
 		mobilePub      string
-		hostDeviceID   string
 		mobileDeviceID string
 		pairMac        string
 		wantErr        bool
 	}{
-		{"valid", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, false},
-		{"tampered mobile key", vecPairingSecret, other.PublicKeyBase64(), vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
-		{"tampered mobile device ID", vecPairingSecret, vecMobilePub, vecHostDeviceID, "fedcba9876543210fedcba9876543211", vecPairMac, true},
-		{"tampered host device ID", vecPairingSecret, vecMobilePub, "0123456789abcdef0123456789abcdee", vecMobileDeviceID, vecPairMac, true},
-		{"wrong secret", "ABCDEFGHJKLMNPQS", vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
-		{"empty secret", "", vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
-		{"missing MAC", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, "", true},
-		{"MAC not base64", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, "!!!", true},
-		{"MAC wrong length", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, base64.StdEncoding.EncodeToString(make([]byte, 16)), true},
-		{"mobile key not base64", vecPairingSecret, "!!!", vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
-		{"mobile key wrong length", vecPairingSecret, base64.StdEncoding.EncodeToString(make([]byte, 31)), vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+		{"valid", vecPairingSecret, vecMobilePub, vecMobileDeviceID, vecPairMac, false},
+		{"tampered mobile key", vecPairingSecret, other.PublicKeyBase64(), vecMobileDeviceID, vecPairMac, true},
+		{"tampered mobile device ID", vecPairingSecret, vecMobilePub, otherMobileDeviceID, vecPairMac, true},
+		{"MAC over a different mobile key", vecPairingSecret, vecMobilePub, vecMobileDeviceID, pairMacFor(vecPairingSecret, other.PublicKey.Bytes(), vecMobileDeviceID), true},
+		{"MAC over a different mobile device ID", vecPairingSecret, vecMobilePub, vecMobileDeviceID, pairMacFor(vecPairingSecret, mustDecodeB64(t, vecMobilePub), otherMobileDeviceID), true},
+		{"wrong secret", "ABCDEFGHJKLMNPQS", vecMobilePub, vecMobileDeviceID, vecPairMac, true},
+		{"empty secret", "", vecMobilePub, vecMobileDeviceID, vecPairMac, true},
+		{"missing MAC", vecPairingSecret, vecMobilePub, vecMobileDeviceID, "", true},
+		{"MAC not base64", vecPairingSecret, vecMobilePub, vecMobileDeviceID, "!!!", true},
+		{"MAC wrong length", vecPairingSecret, vecMobilePub, vecMobileDeviceID, base64.StdEncoding.EncodeToString(make([]byte, 16)), true},
+		{"mobile key not base64", vecPairingSecret, "!!!", vecMobileDeviceID, vecPairMac, true},
+		{"mobile key wrong length", vecPairingSecret, base64.StdEncoding.EncodeToString(make([]byte, 31)), vecMobileDeviceID, vecPairMac, true},
+		{"mobile device ID too short", vecPairingSecret, vecMobilePub, "fedcba98", vecPairMac, true},
+		{"mobile device ID uppercase hex", vecPairingSecret, vecMobilePub, "FEDCBA9876543210FEDCBA9876543210", vecPairMac, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := VerifyPairMAC(tt.pairingSecret, host.PublicKey.Bytes(), tt.mobilePub, tt.hostDeviceID, tt.mobileDeviceID, tt.pairMac)
+			err := VerifyPairMAC(tt.pairingSecret, tt.mobilePub, tt.mobileDeviceID, tt.pairMac)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("VerifyPairMAC() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 
-	t.Run("tampered host key", func(t *testing.T) {
-		err := VerifyPairMAC(vecPairingSecret, other.PublicKey.Bytes(), vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac)
-		if err == nil {
-			t.Error("expected error for a different host public key")
+	t.Run("helper reproduces the vector", func(t *testing.T) {
+		if got := pairMacFor(vecPairingSecret, mustDecodeB64(t, vecMobilePub), vecMobileDeviceID); got != vecPairMac {
+			t.Errorf("pairMacFor() = %s, want %s", got, vecPairMac)
 		}
 	})
+}
+
+func mustDecodeB64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("decode %q: %v", s, err)
+	}
+	return b
 }
 
 func TestBuildQRPayload(t *testing.T) {

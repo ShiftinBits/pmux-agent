@@ -319,10 +319,13 @@ func pairBindForTest(hostPub, mobilePub []byte, hostDeviceID, mobileDeviceID str
 	return append(bind, mobileDeviceID...)
 }
 
-func pairMacForTest(secret string, bind []byte) string {
+// pairMacForTest computes the pair_complete MAC the way the mobile does:
+// HMAC-SHA256(secret, "pocketmux-pair-mac-v2" || mobilePub || mobileDeviceID).
+func pairMacForTest(secret string, mobilePub []byte, mobileDeviceID string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte("pocketmux-pair-mac-v2"))
-	h.Write(bind)
+	h.Write(mobilePub)
+	h.Write([]byte(mobileDeviceID))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
@@ -358,7 +361,7 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 					MobileDeviceID:        mobileDeviceID,
 					MobileX25519PublicKey: mobilePubB64,
 					MobileName:            "Test Phone",
-					PairMac:               pairMacForTest(testSecret, pairBindForTest(hostPub, mobilePub, hostDeviceID, mobileDeviceID)),
+					PairMac:               pairMacForTest(testSecret, mobilePub, mobileDeviceID),
 				}
 			},
 			wantPaired: true,
@@ -370,7 +373,7 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 					Type:                  "pair_complete",
 					MobileDeviceID:        mobileDeviceID,
 					MobileX25519PublicKey: mobilePubB64,
-					PairMac:               pairMacForTest("ZZZZZZZZZZZZZZZZ", pairBindForTest(hostPub, mobilePub, hostDeviceID, mobileDeviceID)),
+					PairMac:               pairMacForTest("ZZZZZZZZZZZZZZZZ", mobilePub, mobileDeviceID),
 				}
 			},
 		},
@@ -381,7 +384,7 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 					Type:                  "pair_complete",
 					MobileDeviceID:        mobileDeviceID,
 					MobileX25519PublicKey: attackerPubB64,
-					PairMac:               pairMacForTest(testSecret, pairBindForTest(hostPub, mobilePub, hostDeviceID, mobileDeviceID)),
+					PairMac:               pairMacForTest(testSecret, mobilePub, mobileDeviceID),
 				}
 			},
 		},

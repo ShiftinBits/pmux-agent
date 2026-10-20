@@ -189,9 +189,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	// its key. On failure, abort instead of waiting for another pair_complete.
 	if err := auth.VerifyPairMAC(
 		pairingSecret,
-		x25519kp.PublicKey.Bytes(),
 		pairComplete.MobileX25519PublicKey,
-		id.DeviceID,
 		pairComplete.MobileDeviceID,
 		pairComplete.PairMac,
 	); err != nil {
