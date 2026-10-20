@@ -1,8 +1,12 @@
 package tmux
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -260,6 +264,67 @@ func TestSendKeysAndCapture(t *testing.T) {
 	}
 
 	_ = id
+}
+
+func TestSendKeysDeliversBytesLiterally(t *testing.T) {
+	c := testClient(t)
+
+	payload := []byte("a\rb\nc\x1b[31md\x1b]0;t\x07 h\u00e9llo \u2713 \U0001F600\n")
+	out := filepath.Join(t.TempDir(), "received")
+	script := fmt.Sprintf("stty raw -echo; head -c %d > %s; sleep 30", len(payload), out)
+	if o, err := c.run("new-session", "-d", "-s", "literal-test", script); err != nil {
+		t.Fatalf("new-session: %v: %s", err, o)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll() error: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	// Let stty put the pty in raw mode before the bytes arrive.
+	time.Sleep(500 * time.Millisecond)
+	if err := c.SendKeys(paneID, payload); err != nil {
+		t.Fatalf("SendKeys() error: %v", err)
+	}
+
+	var got []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = os.ReadFile(out)
+		if len(got) >= len(payload) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("received %q, want %q", got, payload)
+	}
+
+	buffers, err := c.run("list-buffers")
+	if err != nil {
+		t.Fatalf("list-buffers: %v: %s", err, buffers)
+	}
+	if strings.TrimSpace(buffers) != "" {
+		t.Errorf("expected no leftover buffers, got %q", buffers)
+	}
+}
+
+func TestSendKeysNulOnlyIsNoop(t *testing.T) {
+	c := &Client{Socket: "pmux-never-started", TmuxBin: "tmux"}
+	if err := c.SendKeys("%0", []byte{0, 0}); err != nil {
+		t.Errorf("SendKeys(NUL only) error: %v", err)
+	}
+}
+
+func TestTimeoutErrorOmitsPayload(t *testing.T) {
+	secret := "hunter2-secret-keystrokes"
+	err := timeoutError([]string{"send-keys", "-t", "%0", "-l", secret}, 3*time.Second)
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("timeout error leaks payload: %q", err.Error())
+	}
+	if want := "tmux send-keys timed out after 3s"; err.Error() != want {
+		t.Errorf("timeout error = %q, want %q", err.Error(), want)
+	}
 }
 
 func TestResizeWindow(t *testing.T) {
