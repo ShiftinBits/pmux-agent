@@ -46,7 +46,9 @@ const (
 )
 
 // jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
-// after a shared server outage don't reconnect in lockstep.
+// after a shared server outage don't reconnect in lockstep. The result is
+// deliberately not capped at maxBackoff: capping would re-synchronize every
+// agent at exactly maxBackoff.
 func jitter(d time.Duration) time.Duration {
 	return d + time.Duration(rand.Int64N(int64(d)/2+1))
 }
@@ -268,7 +270,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 
-		sc.logger.Info("reconnecting to signaling server", "backoff", wait)
+		sc.logger.Info("reconnecting to signaling server", "backoff", backoff, "wait", wait)
 		// Safety net: only increase backoff if monotonic elapsed time approximates
 		// the intended wait. Protects against hypothetical runtime timer anomalies.
 		if time.Since(backoffStart) >= backoff/2 {
