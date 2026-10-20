@@ -274,6 +274,9 @@ func handleConfig() {
 	}
 
 	fmt.Print(config.FormatEffective(cfg, sources))
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ invalid config: %v\n", err)
+	}
 }
 
 func handlePair() {

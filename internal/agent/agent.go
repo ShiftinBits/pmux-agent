@@ -101,6 +101,10 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	if err != nil {
 		logger.Warn("failed to load config, using defaults", "error", err)
 		cfg = config.Defaults()
+	} else if err := cfg.Validate(); err != nil {
+		// Advisory only — rejecting the config would silently swap in
+		// defaults (e.g. a different tmux socket) after an upgrade.
+		logger.Warn("invalid config", "error", err)
 	}
 
 	// Apply configured log level (default: info)
