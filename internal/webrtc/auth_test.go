@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +104,225 @@ func (m *testMobileAuth) handle(t *testing.T, dc *webrtc.DataChannel, data []byt
 		return true
 	}
 	return false
+}
+
+// testMobile is a test-side mobile connected to a PeerManager over a real
+// loopback PeerConnection. It records every DataChannel message it receives,
+// in arrival order, and runs the mobile half of the AUTH V2 handshake.
+type testMobile struct {
+	t           *testing.T
+	pc          *webrtc.PeerConnection
+	auth        *testMobileAuth
+	autoRespond bool // answer auth_challenge immediately; otherwise hold it on challenges
+
+	challenges chan *protocol.AuthChallengeEvent // held challenges (autoRespond false)
+	confirmed  chan bool                         // auth_confirm verification results
+
+	mu       sync.Mutex
+	dc       *webrtc.DataChannel
+	received []protocol.Message
+}
+
+// connectTestMobile sends a connect_request for deviceID and completes the SDP
+// and ICE exchange from the mobile side. Only signaling sent after this call
+// is used, so it also works for a reconnect that replaces an existing peer.
+func connectTestMobile(t *testing.T, pm *PeerManager, sender *mockSender, deviceID string, autoRespond bool) *testMobile {
+	t.Helper()
+	mark := sender.mark()
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+	offers := sender.messagesOfTypeSince("sdp_offer", mark)
+	if len(offers) == 0 {
+		t.Fatalf("no SDP offer sent to %s", deviceID)
+	}
+
+	pc, err := pm.API.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create mobile PC: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+
+	m := &testMobile{
+		t:           t,
+		pc:          pc,
+		auth:        &testMobileAuth{pc: pc, secret: testSharedSecret},
+		autoRespond: autoRespond,
+		challenges:  make(chan *protocol.AuthChallengeEvent, 1),
+		confirmed:   make(chan bool, 1),
+	}
+	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		m.mu.Lock()
+		m.dc = dc
+		m.mu.Unlock()
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			m.receive(dc, msg.Data)
+		})
+	})
+
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+		t.Fatalf("set remote offer: %v", err)
+	}
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	gathered := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set local answer: %v", err)
+	}
+	<-gathered
+	// The gathered answer carries the mobile's candidates in its SDP.
+	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: deviceID, SDP: pc.LocalDescription().SDP})
+
+	// Trickle the agent's candidates to the mobile until the test ends.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		seen := make(map[string]bool)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			for _, msg := range sender.messagesOfTypeSince("ice_candidate", mark) {
+				if msg.TargetDeviceID != deviceID || seen[msg.Candidate] {
+					continue
+				}
+				seen[msg.Candidate] = true
+				var mIdx *uint16
+				if msg.SDPMLineIndex != nil {
+					v := uint16(*msg.SDPMLineIndex)
+					mIdx = &v
+				}
+				mid := msg.SDPMid
+				_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: msg.Candidate, SDPMid: &mid, SDPMLineIndex: mIdx})
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+	return m
+}
+
+// receive records an incoming message and drives the mobile's handshake.
+func (m *testMobile) receive(dc *webrtc.DataChannel, data []byte) {
+	decoded, err := protocol.Decode(data)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	m.received = append(m.received, decoded)
+	m.mu.Unlock()
+
+	switch ev := decoded.(type) {
+	case *protocol.AuthChallengeEvent:
+		if !m.autoRespond {
+			select {
+			case m.challenges <- ev:
+			default:
+			}
+			return
+		}
+		m.respond(dc, ev)
+	case *protocol.AuthConfirmEvent:
+		select {
+		case m.confirmed <- m.auth.verifyConfirm(ev):
+		default:
+		}
+	}
+}
+
+// respond sends the auth_response for a challenge.
+func (m *testMobile) respond(dc *webrtc.DataChannel, ch *protocol.AuthChallengeEvent) {
+	resp, err := m.auth.respond(ch)
+	if err != nil {
+		m.t.Errorf("test mobile: %v", err)
+		return
+	}
+	if err := dc.Send(resp); err != nil {
+		m.t.Errorf("test mobile: send auth_response: %v", err)
+	}
+}
+
+// send encodes and sends a request to the agent.
+func (m *testMobile) send(msg protocol.Message) {
+	m.t.Helper()
+	m.mu.Lock()
+	dc := m.dc
+	m.mu.Unlock()
+	if dc == nil {
+		m.t.Fatal("test mobile: DataChannel not open")
+	}
+	data, err := protocol.Encode(msg)
+	if err != nil {
+		m.t.Fatalf("test mobile: encode %s: %v", msg.MessageType(), err)
+	}
+	if err := dc.Send(data); err != nil {
+		m.t.Fatalf("test mobile: send %s: %v", msg.MessageType(), err)
+	}
+}
+
+// waitConfirmed waits for the agent's auth_confirm and requires it to verify.
+func (m *testMobile) waitConfirmed() {
+	m.t.Helper()
+	select {
+	case ok := <-m.confirmed:
+		if !ok {
+			m.t.Fatal("auth_confirm from the agent did not verify on the mobile")
+		}
+	case <-time.After(15 * time.Second):
+		m.t.Fatal("no auth_confirm received from the agent")
+	}
+}
+
+// types returns the types of the messages received so far, in order.
+func (m *testMobile) types() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	types := make([]string, len(m.received))
+	for i, msg := range m.received {
+		types[i] = msg.MessageType()
+	}
+	return types
+}
+
+// outputs returns the data of every output event received so far, in order.
+func (m *testMobile) outputs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var outs []string
+	for _, msg := range m.received {
+		if ev, ok := msg.(*protocol.OutputEvent); ok {
+			outs = append(outs, string(ev.Data))
+		}
+	}
+	return outs
+}
+
+// waitUntil polls cond until it holds or the timeout expires.
+func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// newAuthTestManager returns a PeerManager that accepts deviceID, using loopback
+// ICE and the test shared secret.
+func newAuthTestManager(t *testing.T, sender *mockSender, deviceID string, handler ProtocolHandler) *PeerManager {
+	t.Helper()
+	pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, handler, "")
+	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID(deviceID)
+	pm.SharedSecretFn = testSharedSecretFn
+	return pm
 }
 
 // fixedBytes returns n copies of b.
@@ -375,38 +596,222 @@ func TestPCDTLSFingerprints_BeforeHandshake(t *testing.T) {
 	}
 }
 
-// TestPeer_FailAuthDoesNotEvictReplacementPeer guards the reconnect-replace race:
-// a stale peer's auth-failure teardown must not close the new peer that already
-// replaced it under the same device ID.
-func TestPeer_FailAuthDoesNotEvictReplacementPeer(t *testing.T) {
-	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+// TestPeer_FailAuthTeardown checks that failAuth closes the failing peer and
+// fires the disconnect handler only while that peer is still the one tracked
+// under its device ID. A stale peer's failure (after a reconnect replaced it)
+// must neither evict the replacement nor tear down the replacement's handler
+// state, which is keyed by the same device ID.
+func TestPeer_FailAuthTeardown(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   bool // the failing peer is tracked under its device ID
+		closing   bool // CloseAll has already run
+		wantFires int
+	}{
+		{name: "current peer fires disconnect and is removed", current: true, wantFires: 1},
+		{name: "stale peer leaves the replacement alone", current: false, wantFires: 0},
+		{name: "closing manager closes the peer without firing", closing: true, wantFires: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+			var mu sync.Mutex
+			var fired []string
+			pm.OnPeerDisconnect = func(id string) {
+				mu.Lock()
+				fired = append(fired, id)
+				mu.Unlock()
+			}
 
-	// The new peer currently tracked under the device ID.
-	peerB := &Peer{DeviceID: "m", logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
-	pm.mu.Lock()
-	pm.peers["m"] = peerB
-	pm.mu.Unlock()
+			failing := &Peer{DeviceID: "m", pm: pm, logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+			replacement := &Peer{DeviceID: "m", logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+			var wantTracked *Peer
+			switch {
+			case tt.closing:
+				pm.CloseAll()
+			case tt.current:
+				pm.mu.Lock()
+				pm.peers["m"] = failing
+				pm.mu.Unlock()
+			default:
+				pm.mu.Lock()
+				pm.peers["m"] = replacement
+				pm.mu.Unlock()
+				wantTracked = replacement
+			}
 
-	// A stale peer A (same device ID, never inserted) fails auth.
-	peerA := &Peer{DeviceID: "m", pm: pm, logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
-	peerA.failAuth("authentication timeout")
+			failing.failAuth("authentication timeout")
+			// failAuth registers its teardown with cleanupWg before returning.
+			pm.cleanupWg.Wait()
 
-	// failAuth closes on a goroutine; wait for it to settle.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		pm.mu.Lock()
-		settled := pm.peers["m"] == peerB
-		pm.mu.Unlock()
-		if settled {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+			select {
+			case <-failing.done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("failing peer was not closed")
+			}
+			select {
+			case <-replacement.done:
+				t.Error("failAuth closed the replacement peer")
+			default:
+			}
+
+			mu.Lock()
+			gotFired := append([]string(nil), fired...)
+			mu.Unlock()
+			if len(gotFired) != tt.wantFires {
+				t.Errorf("OnPeerDisconnect fired %d times (%v), want %d", len(gotFired), gotFired, tt.wantFires)
+			}
+			for _, id := range gotFired {
+				if id != "m" {
+					t.Errorf("OnPeerDisconnect fired for %q, want %q", id, "m")
+				}
+			}
+			if got := getPeer(pm, "m"); got != wantTracked {
+				t.Errorf("tracked peer after failAuth = %p, want %p", got, wantTracked)
+			}
+		})
+	}
+}
+
+// TestPeer_SendMessageAuthGate checks that, until auth_confirm has been sent,
+// SendMessage refuses everything except the host's handshake messages.
+func TestPeer_SendMessageAuthGate(t *testing.T) {
+	pc, err := fastAPI(t).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create PC: %v", err)
+	}
+	defer pc.Close()
+	// The channel never opens, so messages that pass the gate fail in dc.Send
+	// with a different error; only the gate's refusal is asserted here.
+	dc, err := pc.CreateDataChannel(DataChannelLabel, nil)
+	if err != nil {
+		t.Fatalf("create DataChannel: %v", err)
 	}
 
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if pm.peers["m"] != peerB {
-		t.Fatal("failAuth on a stale peer must not evict the replacement peer")
+	tests := []struct {
+		name          string
+		msg           protocol.Message
+		authConfirmed bool
+		wantRefused   bool
+	}{
+		{name: "pong before confirm is refused", msg: &protocol.PongEvent{Type: "pong"}, wantRefused: true},
+		{name: "output before confirm is refused", msg: &protocol.OutputEvent{Type: "output", Data: []byte("x")}, wantRefused: true},
+		{name: "sessions before confirm is refused", msg: &protocol.SessionsEvent{Type: "sessions"}, wantRefused: true},
+		{name: "auth_challenge before confirm is allowed", msg: &protocol.AuthChallengeEvent{Type: "auth_challenge", Nonce: "n"}},
+		{name: "auth_confirm before confirm is allowed", msg: &protocol.AuthConfirmEvent{Type: "auth_confirm", Mac: "m"}},
+		{name: "pong after confirm is allowed", msg: &protocol.PongEvent{Type: "pong"}, authConfirmed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newAuthTestPeer(nil)
+			p.dc = dc
+			p.authConfirmed = tt.authConfirmed
+
+			err := p.SendMessage(tt.msg)
+			refused := err != nil && strings.Contains(err.Error(), "peer not authenticated")
+			if refused != tt.wantRefused {
+				t.Errorf("SendMessage(%s) err = %v; refused = %v, want %v", tt.msg.MessageType(), err, refused, tt.wantRefused)
+			}
+		})
+	}
+}
+
+// TestPeerManager_SendToRefusedUntilAuthConfirmed holds the mobile's
+// auth_response so the pre-auth window is deterministic: the challenge still
+// goes out, any other message is refused without reaching the DataChannel, and
+// the gate lifts only once auth_confirm has been sent.
+func TestPeerManager_SendToRefusedUntilAuthConfirmed(t *testing.T) {
+	const deviceID = "mobile-gate"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	defer pm.CloseAll()
+
+	m := connectTestMobile(t, pm, sender, deviceID, false)
+
+	var ch *protocol.AuthChallengeEvent
+	select {
+	case ch = <-m.challenges:
+	case <-time.After(15 * time.Second):
+		t.Fatal("no auth_challenge received before authentication")
+	}
+
+	pong := &protocol.PongEvent{Type: "pong"}
+	err := pm.SendTo(deviceID, pong)
+	if err == nil || !strings.Contains(err.Error(), "peer not authenticated") {
+		t.Fatalf("SendTo before auth: err = %v, want a peer not authenticated error", err)
+	}
+	// Give anything wrongly written to the DataChannel time to arrive.
+	time.Sleep(200 * time.Millisecond)
+	if got := m.types(); len(got) != 1 || got[0] != "auth_challenge" {
+		t.Fatalf("mobile received %v before answering the challenge, want [auth_challenge]", got)
+	}
+
+	m.mu.Lock()
+	dc := m.dc
+	m.mu.Unlock()
+	m.respond(dc, ch)
+	m.waitConfirmed()
+
+	// authConfirmed is set once the auth_confirm send returns, so poll.
+	waitUntil(t, 2*time.Second, "SendTo to succeed after auth_confirm", func() bool {
+		return pm.SendTo(deviceID, pong) == nil
+	})
+	waitUntil(t, 5*time.Second, "pong delivery", func() bool { return len(m.types()) >= 3 })
+
+	got := m.types()
+	if got[0] != "auth_challenge" || got[1] != "auth_confirm" {
+		t.Fatalf("mobile received %v, want auth_challenge then auth_confirm first", got)
+	}
+	for _, typ := range got[2:] {
+		if typ != "pong" {
+			t.Fatalf("unexpected %s after the handshake in %v", typ, got)
+		}
+	}
+}
+
+// TestPeerManager_AuthConfirmFirstAfterHandshake hammers SendTo across the
+// whole handshake. Nothing may reach the mobile ahead of the handshake
+// messages: the first message after its auth_response must be auth_confirm.
+func TestPeerManager_AuthConfirmFirstAfterHandshake(t *testing.T) {
+	const deviceID = "mobile-hammer"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pong := &protocol.PongEvent{Type: "pong"}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = pm.SendTo(deviceID, pong)
+			runtime.Gosched()
+		}
+	}()
+	defer func() {
+		close(stop)
+		wg.Wait()
+		pm.CloseAll()
+	}()
+
+	m := connectTestMobile(t, pm, sender, deviceID, true)
+	m.waitConfirmed()
+	// Pongs flowing afterwards show the hammer was live and the gate lifted.
+	waitUntil(t, 5*time.Second, "pongs after auth_confirm", func() bool { return len(m.types()) >= 3 })
+
+	got := m.types()
+	if got[0] != "auth_challenge" || got[1] != "auth_confirm" {
+		t.Fatalf("mobile received %v, want auth_challenge then auth_confirm first", got)
+	}
+	for _, typ := range got[2:] {
+		if typ != "pong" {
+			t.Fatalf("unexpected %s after the handshake in %v", typ, got)
+		}
 	}
 }
 

@@ -500,6 +500,15 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	pm.mu.Unlock()
 
 	if hadOld {
+		// Tear down the old session's handler state (pane bridge, output
+		// stream) synchronously, before the new peer is inserted. Handler state
+		// is keyed by device ID, so a teardown that ran after the insert would
+		// destroy the new peer's session instead (see scheduleCleanup). Called
+		// without pm.mu held; the handler's teardown is bounded local tmux work.
+		if pm.OnPeerDisconnect != nil {
+			pm.OnPeerDisconnect(mobileDeviceID)
+		}
+
 		oldState := oldPeer.conn.ConnectionState().String()
 		pm.logger.Info("closing old peer for reconnect (async)",
 			"mobile", mobileDeviceID, "oldPcState", oldState)
@@ -605,7 +614,10 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		pm.ClosePeer(mobileDeviceID)
 		return
 	}
+	// The peer is already in the map, so SendTo may be reading dc concurrently.
+	peer.mu.Lock()
 	peer.dc = dc
+	peer.mu.Unlock()
 	peer.setupDataChannelHandlers(dc)
 
 	// Create offer
@@ -1352,8 +1364,11 @@ func pcDTLSFingerprints(pc *webrtc.PeerConnection) (local, remote []byte, err er
 // failAuth tears down a peer that failed the key-possession proof. It is a
 // no-op if auth already resolved (a successful verify or an earlier failure),
 // so it is safe to call from the timeout, the verify path, and the challenge
-// sender. The close runs on its own goroutine because callers may be inside a
-// Pion DataChannel callback, where a synchronous PeerConnection Close() can block.
+// sender. The teardown runs on its own goroutine because callers may be inside
+// a Pion DataChannel callback, where a synchronous PeerConnection Close() can
+// block. Like any other terminal teardown it goes through scheduleCleanup, so
+// the disconnect handler fires only while this peer is still the current one:
+// a stale peer must never tear down the handler state of its replacement.
 func (p *Peer) failAuth(reason string) {
 	p.mu.Lock()
 	if p.authResolved {
@@ -1368,11 +1383,22 @@ func (p *Peer) failAuth(reason string) {
 	p.mu.Unlock()
 
 	p.logger.Warn("closing peer: authentication failed", "reason", reason, "mobile", p.DeviceID)
-	if p.pm != nil {
-		// ClosePeerIfCurrent (not ClosePeer): if a reconnect has already replaced
-		// us under this device ID, we must not evict the new peer.
-		go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
-	} else {
+	if p.pm == nil {
+		go p.Close()
+		return
+	}
+	// p.mu is released above, so taking pm.mu here keeps the pm.mu-before-p.mu
+	// order. scheduleCleanup skips the teardown once CloseAll has started (so
+	// the cleanup WaitGroup is never added to after CloseAll waits on it); in
+	// that case close this peer directly, since it may no longer be tracked.
+	pm := p.pm
+	pm.mu.Lock()
+	closing := pm.closed
+	if !closing {
+		pm.scheduleCleanup(p)
+	}
+	pm.mu.Unlock()
+	if closing {
 		go p.Close()
 	}
 }
@@ -1488,6 +1514,10 @@ func (p *Peer) SendRaw(data []byte) error {
 
 // SendMessage encodes and sends a protocol message over the DataChannel.
 // Blocks if the send buffer is full, waiting for backpressure to clear.
+//
+// Until auth_confirm has been sent, only the handshake messages may go out;
+// anything else is refused rather than queued, so auth_confirm is always the
+// first message the peer receives after the handshake.
 func (p *Peer) SendMessage(msg protocol.Message) error {
 	p.mu.Lock()
 	if p.closed {
@@ -1497,6 +1527,10 @@ func (p *Peer) SendMessage(msg protocol.Message) error {
 	if p.dc == nil {
 		p.mu.Unlock()
 		return fmt.Errorf("data channel not established")
+	}
+	if !p.authConfirmed && !isAuthHandshakeMessage(msg) {
+		p.mu.Unlock()
+		return fmt.Errorf("peer not authenticated: refusing %s", msg.MessageType())
 	}
 	dc := p.dc
 	p.mu.Unlock()
@@ -1540,6 +1574,16 @@ func (p *Peer) Close() {
 }
 
 // --- Helpers ---
+
+// isAuthHandshakeMessage reports whether msg is one of the host's handshake
+// messages, the only messages SendMessage lets out before auth is confirmed.
+func isAuthHandshakeMessage(msg protocol.Message) bool {
+	switch msg.MessageType() {
+	case "auth_challenge", "auth_confirm":
+		return true
+	}
+	return false
+}
 
 func boolPtr(b bool) *bool {
 	return &b

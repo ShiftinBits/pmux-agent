@@ -2,10 +2,12 @@ package webrtc
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,10 +33,23 @@ func (m *mockSender) Send(msg SignalingMessage) error {
 }
 
 func (m *mockSender) messagesOfType(t string) []SignalingMessage {
+	return m.messagesOfTypeSince(t, 0)
+}
+
+// mark returns the number of messages captured so far. Pass it to
+// messagesOfTypeSince to see only messages sent after this point.
+func (m *mockSender) mark() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.messages)
+}
+
+// messagesOfTypeSince returns messages of type t captured after mark.
+func (m *mockSender) messagesOfTypeSince(t string, mark int) []SignalingMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var result []SignalingMessage
-	for _, msg := range m.messages {
+	for _, msg := range m.messages[mark:] {
 		if msg.Type == t {
 			result = append(result, msg)
 		}
@@ -1372,6 +1387,210 @@ func TestPeerManager_OnPeerDisconnect_CalledOnFailure(t *testing.T) {
 	}
 
 	pm.CloseAll()
+}
+
+// TestPeerManager_ReplacementFiresDisconnectBeforeInsert checks that replacing
+// a peer fires OnPeerDisconnect exactly once, synchronously, without pm.mu held,
+// after the old peer is removed and before the new peer is inserted.
+func TestPeerManager_ReplacementFiresDisconnectBeforeInsert(t *testing.T) {
+	const deviceID = "mobile-replace"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	defer pm.CloseAll()
+
+	var mu sync.Mutex
+	var trackedAtFire []*Peer
+	pm.OnPeerDisconnect = func(id string) {
+		// getPeer takes pm.mu, so this deadlocks if the hook runs under it.
+		tracked := getPeer(pm, id)
+		mu.Lock()
+		trackedAtFire = append(trackedAtFire, tracked)
+		mu.Unlock()
+	}
+	fires := func() []*Peer {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]*Peer(nil), trackedAtFire...)
+	}
+
+	connect := func() {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("connect_request did not return: OnPeerDisconnect must not run with pm.mu held")
+		}
+	}
+
+	connect()
+	first := getPeer(pm, deviceID)
+	if first == nil {
+		t.Fatal("first peer should exist")
+	}
+	if got := fires(); len(got) != 0 {
+		t.Fatalf("a first connection fired OnPeerDisconnect %d times, want 0", len(got))
+	}
+
+	connect()
+	got := fires()
+	if len(got) != 1 {
+		t.Fatalf("replacement fired OnPeerDisconnect %d times by the time connect_request returned, want 1", len(got))
+	}
+	if got[0] != nil {
+		t.Errorf("OnPeerDisconnect ran while %p was tracked; want it after the old peer is removed and before the new one is inserted", got[0])
+	}
+	second := getPeer(pm, deviceID)
+	if second == nil || second == first {
+		t.Fatalf("second connect_request should install a new peer, got %p (first %p)", second, first)
+	}
+
+	// The old peer's asynchronous close must not fire the hook again.
+	waitUntil(t, 5*time.Second, "old peer to close", func() bool {
+		first.mu.Lock()
+		defer first.mu.Unlock()
+		return first.closed
+	})
+	time.Sleep(200 * time.Millisecond)
+	if got := fires(); len(got) != 1 {
+		t.Errorf("OnPeerDisconnect fired %d times after the old peer closed, want 1", len(got))
+	}
+}
+
+// fakeBridge is one fakeBridgeHandler stream.
+type fakeBridge struct {
+	stop chan struct{}
+	done chan struct{}
+}
+
+// fakeBridgeHandler stands in for agent.Handler: an attach starts a per-device
+// bridge that streams labelled output through the PeerManager until it is torn
+// down, and teardown waits for the stream to stop, as detachPeer does.
+type fakeBridgeHandler struct {
+	pm *PeerManager
+
+	mu       sync.Mutex
+	attaches int
+	bridges  map[string]*fakeBridge
+}
+
+func (h *fakeBridgeHandler) handle(peerID string, msg protocol.Message) {
+	if _, ok := msg.(*protocol.AttachRequest); !ok {
+		return
+	}
+	h.detach(peerID) // like Handler.handleAttach
+
+	h.mu.Lock()
+	h.attaches++
+	out := &protocol.OutputEvent{Type: "output", Data: []byte(fmt.Sprintf("bridge-%d", h.attaches))}
+	b := &fakeBridge{stop: make(chan struct{}), done: make(chan struct{})}
+	h.bridges[peerID] = b
+	h.mu.Unlock()
+
+	go func() {
+		defer close(b.done)
+		for {
+			select {
+			case <-b.stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+			_ = h.pm.SendTo(peerID, out)
+		}
+	}()
+}
+
+func (h *fakeBridgeHandler) detach(peerID string) {
+	h.mu.Lock()
+	b := h.bridges[peerID]
+	delete(h.bridges, peerID)
+	h.mu.Unlock()
+	if b != nil {
+		close(b.stop)
+		<-b.done
+	}
+}
+
+func (h *fakeBridgeHandler) active() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.bridges)
+}
+
+// TestPeerManager_ReplacementLeavesNoStaleBridge reconnects a device that is
+// attached and streaming. The old session's bridge must be torn down before the
+// new peer authenticates, the new peer must see auth_confirm before anything
+// else, and it must then be able to attach and stream with no stale output.
+func TestPeerManager_ReplacementLeavesNoStaleBridge(t *testing.T) {
+	const deviceID = "mobile-bridge"
+	sender := &mockSender{}
+	h := &fakeBridgeHandler{bridges: make(map[string]*fakeBridge)}
+	pm := newAuthTestManager(t, sender, deviceID, h.handle)
+	h.pm = pm
+
+	var mu sync.Mutex
+	fires := 0
+	pm.OnPeerDisconnect = func(id string) {
+		h.detach(id)
+		mu.Lock()
+		fires++
+		mu.Unlock()
+	}
+	fireCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return fires
+	}
+	defer func() {
+		pm.CloseAll()
+		h.detach(deviceID)
+	}()
+
+	attach := &protocol.AttachRequest{Type: "attach", PaneID: "%1", Cols: 80, Rows: 24}
+
+	// First session: authenticate, attach and stream.
+	first := connectTestMobile(t, pm, sender, deviceID, true)
+	first.waitConfirmed()
+	first.send(attach)
+	waitUntil(t, 5*time.Second, "output from the first bridge", func() bool {
+		return slices.Contains(first.outputs(), "bridge-1")
+	})
+
+	// Reconnect. The disconnect hook runs inside connect_request, so the old
+	// bridge is already gone before the new peer can authenticate.
+	second := connectTestMobile(t, pm, sender, deviceID, true)
+	if n := fireCount(); n != 1 {
+		t.Fatalf("OnPeerDisconnect fired %d times on replacement, want 1", n)
+	}
+	if n := h.active(); n != 0 {
+		t.Fatalf("%d bridge(s) still active after replacement, want 0", n)
+	}
+
+	second.waitConfirmed()
+	second.send(attach)
+	waitUntil(t, 5*time.Second, "output from the second bridge", func() bool {
+		return slices.Contains(second.outputs(), "bridge-2")
+	})
+
+	got := second.types()
+	if got[0] != "auth_challenge" || got[1] != "auth_confirm" {
+		t.Fatalf("new session received %v, want auth_challenge then auth_confirm first", got)
+	}
+	for _, out := range second.outputs() {
+		if out != "bridge-2" {
+			t.Fatalf("new session received stale output %q", out)
+		}
+	}
+	if n := h.active(); n != 1 {
+		t.Errorf("%d bridges active, want only the new session's", n)
+	}
+	if n := fireCount(); n != 1 {
+		t.Errorf("OnPeerDisconnect fired %d times in total, want 1", n)
+	}
 }
 
 func TestPeerManager_ICECandidateBuffering(t *testing.T) {
