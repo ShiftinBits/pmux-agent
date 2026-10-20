@@ -1455,6 +1455,28 @@ func TestPeerManager_ReplacementFiresDisconnectBeforeInsert(t *testing.T) {
 	}
 }
 
+// TestPeerManager_ReplacementTeardownWaitIsBounded checks that a wedged
+// handler teardown can't hold the signaling readLoop past
+// replacementTeardownTimeout.
+func TestPeerManager_ReplacementTeardownWaitIsBounded(t *testing.T) {
+	const deviceID = "mobile-slow-teardown"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	release := make(chan struct{})
+	defer func() {
+		close(release)
+		pm.CloseAll()
+	}()
+	pm.OnPeerDisconnect = func(string) { <-release }
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+	start := time.Now()
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+	if elapsed := time.Since(start); elapsed > replacementTeardownTimeout+2*time.Second {
+		t.Fatalf("replacement connect_request took %v with a wedged teardown, want about %v", elapsed, replacementTeardownTimeout)
+	}
+}
+
 // fakeBridge is one fakeBridgeHandler stream.
 type fakeBridge struct {
 	stop chan struct{}

@@ -15,6 +15,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// maxPairMessageSize bounds a single inbound pairing WebSocket message. It
+// matches the agent's signaling limit (webrtc.maxSignalingMessageSize).
+const maxPairMessageSize = 128 << 10
+
 // connError extracts a clean message from Go's verbose network errors.
 // "Post http://...: dial tcp ...: connect: connection refused" → "server unreachable (connection refused)"
 func connError(err error) string {
@@ -128,8 +132,10 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 		return nil, fmt.Errorf("parse pair initiate response: %w", err)
 	}
 
-	if result.PairingCode == "" {
-		return nil, fmt.Errorf("pair initiate returned empty pairing code")
+	// The code is embedded in the '|'-delimited QR payload and the
+	// '-'-delimited manual code, so accept only the server's 6-char alphabet.
+	if len(result.PairingCode) != 6 || strings.Trim(result.PairingCode, pairingSecretAlphabet) != "" {
+		return nil, fmt.Errorf("pair initiate returned invalid pairing code")
 	}
 
 	return &result, nil
@@ -157,6 +163,9 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 		return nil, fmt.Errorf("connect to signaling server: %s", connError(err))
 	}
 	defer conn.Close()
+	// gorilla's default read limit is unlimited; a hostile server could
+	// otherwise stream one huge frame into memory.
+	conn.SetReadLimit(maxPairMessageSize)
 
 	// Authenticate with JWT
 	authMsg := fmt.Sprintf(`{"type":"auth","token":%q}`, jwt)
@@ -167,7 +176,8 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 	// Read auth response
 	_, authResp, err := conn.ReadMessage()
 	if err != nil {
-		return nil, fmt.Errorf("read auth response: %w", err)
+		// Close errors carry the server's close-reason text; sanitize it.
+		return nil, fmt.Errorf("read auth response: %s", SanitizeDisplayString(err.Error()))
 	}
 
 	var authResult struct {
@@ -189,7 +199,7 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("read WebSocket message: %w", err)
+				errCh <- fmt.Errorf("read WebSocket message: %s", SanitizeDisplayString(err.Error()))
 				return
 			}
 
