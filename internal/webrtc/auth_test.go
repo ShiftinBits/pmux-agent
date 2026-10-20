@@ -560,8 +560,14 @@ func TestPeer_VerifySuccessIgnoredAfterFailAuth(t *testing.T) {
 	useFakeDTLSFingerprints(t, testHostFp, testMobileFp, nil)
 	p := newAuthTestPeer(testHostNonce)
 
-	// The timeout resolves auth first.
+	// The timeout resolves auth first, and the challenge nonce is dropped.
 	p.failAuth("authentication timeout")
+	p.mu.Lock()
+	nonceCleared := p.authNonce == nil
+	p.mu.Unlock()
+	if !nonceCleared {
+		t.Fatal("failAuth must clear the challenge nonce")
+	}
 
 	// A valid response arriving afterwards must NOT flip authenticated or send
 	// auth_confirm — the peer is already being torn down.
@@ -838,12 +844,12 @@ func TestPeerManager_RejectsWhenSharedSecretUnavailable(t *testing.T) {
 	}
 	rejected := false
 	for _, m := range sender.messagesOfType("connection_rejected") {
-		if m.TargetDeviceID == "mobile-nosecret" {
+		if m.TargetDeviceID == "mobile-nosecret" && m.Reason == "secret_unavailable" {
 			rejected = true
 		}
 	}
 	if !rejected {
-		t.Error("expected connection_rejected sent to the device")
+		t.Error("expected connection_rejected with reason secret_unavailable sent to the device")
 	}
 
 	pm.CloseAll()

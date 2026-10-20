@@ -450,7 +450,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 			"mobile", mobileDeviceID, "error", ssErr)
 		if err := pm.signaling.Send(SignalingMessage{
 			Type:           "connection_rejected",
-			Reason:         "not_paired",
+			Reason:         "secret_unavailable",
 			TargetDeviceID: mobileDeviceID,
 		}); err != nil {
 			pm.logger.Warn("failed to send rejection", "error", err)
@@ -1213,6 +1213,21 @@ func (p *Peer) sendAuthChallenge() {
 // peer is marked authenticated and the host proves itself back with an
 // auth_confirm; on any failure the peer is closed.
 func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
+	// Capture the auth state, nonce and secret under the lock. sharedSecret is
+	// set once at creation, but reading it here under mu keeps the race detector
+	// satisfied (the write happened on a different goroutine).
+	p.mu.Lock()
+	resolved := p.authResolved
+	hostNonce := p.authNonce
+	secret := p.sharedSecret
+	p.mu.Unlock()
+
+	// Auth already failed (timeout, bad response, send failure) and the peer is
+	// being torn down: drop the message, never answer the challenge again.
+	if resolved {
+		return
+	}
+
 	resp, ok := decoded.(*protocol.AuthResponseRequest)
 	if !ok {
 		p.failAuth(fmt.Sprintf("expected auth_response, got %s", decoded.MessageType()))
@@ -1234,14 +1249,6 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		p.failAuth("auth response MAC not valid base64")
 		return
 	}
-
-	// Capture both nonce and secret under the lock. sharedSecret is set once at
-	// creation, but reading it here under mu keeps the race detector satisfied
-	// (the write happened on a different goroutine).
-	p.mu.Lock()
-	hostNonce := p.authNonce
-	secret := p.sharedSecret
-	p.mu.Unlock()
 
 	// Defensive: a response must never arrive before the challenge nonce is set
 	// (Pion delivers OnOpen before OnMessage). Reject rather than hash a nil
@@ -1385,6 +1392,8 @@ func (p *Peer) failAuth(reason string) {
 		return
 	}
 	p.authResolved = true
+	// The challenge can never be answered now; drop its nonce.
+	p.authNonce = nil
 	if p.authTimer != nil {
 		p.authTimer.Stop()
 		p.authTimer = nil

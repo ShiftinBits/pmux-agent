@@ -223,12 +223,14 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	turnServer := mockTurnServer(t)
 	defer turnServer.Close()
 
-	var received []protocol.Message
-	var receivedMu sync.Mutex
+	pingReceived := make(chan struct{}, 1)
 	handler := func(peerID string, msg protocol.Message) {
-		receivedMu.Lock()
-		received = append(received, msg)
-		receivedMu.Unlock()
+		if msg.MessageType() == "ping" {
+			select {
+			case pingReceived <- struct{}{}:
+			default:
+			}
+		}
 	}
 
 	api := fastAPI(t)
@@ -385,18 +387,10 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 		data, _ := protocol.Encode(pingMsg)
 		dc.Send(data)
 
-		time.Sleep(500 * time.Millisecond)
-
-		receivedMu.Lock()
-		found := false
-		for _, msg := range received {
-			if msg.MessageType() == "ping" {
-				found = true
-			}
-		}
-		receivedMu.Unlock()
-		if !found {
-			t.Error("handler did not receive ping message")
+		select {
+		case <-pingReceived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handler did not receive ping message")
 		}
 
 	case <-time.After(15 * time.Second):
