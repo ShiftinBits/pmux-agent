@@ -72,6 +72,53 @@ func TestGenerateIdentity(t *testing.T) {
 	})
 }
 
+func TestRemoveKeyFiles(t *testing.T) {
+	t.Run("removes pmux files and empty dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "keys")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := GenerateIdentity(dir, NewMemorySecretStore()); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeyFiles(dir); err != nil {
+			t.Fatalf("RemoveKeyFiles() error: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("empty keys dir should be removed, stat err: %v", err)
+		}
+	})
+	t.Run("keeps foreign files", func(t *testing.T) {
+		// key_path is user-configurable and may point at e.g. $HOME.
+		dir := t.TempDir()
+		foreign := filepath.Join(dir, "notes.txt")
+		for _, f := range []string{filepath.Join(dir, secretsFileName), foreign} {
+			if err := os.WriteFile(f, []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := RemoveKeyFiles(dir); err != nil {
+			t.Fatalf("RemoveKeyFiles() error: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, secretsFileName)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed, stat err: %v", secretsFileName, err)
+		}
+		if _, err := os.Stat(foreign); err != nil {
+			t.Errorf("foreign file must survive: %v", err)
+		}
+	})
+	t.Run("remove failure", func(t *testing.T) {
+		dir := t.TempDir()
+		// A non-empty directory in place of a key file makes os.Remove fail.
+		if err := os.MkdirAll(filepath.Join(dir, publicKeyFile, "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveKeyFiles(dir); err == nil {
+			t.Error("RemoveKeyFiles() error = nil, want failure")
+		}
+	})
+}
+
 func TestLoadIdentity(t *testing.T) {
 	keysDir := t.TempDir()
 	store := NewMemorySecretStore()

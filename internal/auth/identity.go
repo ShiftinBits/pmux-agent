@@ -117,6 +117,19 @@ func enforceKeyFilePerms(path string, logger *slog.Logger) error {
 	return nil
 }
 
+// RemoveKeyFiles deletes the files pmux writes to keysDir, then removes the
+// directory only if it is now empty. It never deletes foreign files, since
+// keysDir is user-configurable (identity.key_path) and may be e.g. $HOME.
+func RemoveKeyFiles(keysDir string) error {
+	for _, name := range []string{publicKeyFile, secretsFileName, fallbackKeyFileName} {
+		if err := os.Remove(filepath.Join(keysDir, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
+	}
+	_ = os.Remove(keysDir) // fails harmlessly if other files remain
+	return nil
+}
+
 // HasIdentity checks whether an Ed25519 keypair exists.
 // The private key is checked in the SecretStore and the public key on disk.
 func HasIdentity(keysDir string, store SecretStore) bool {

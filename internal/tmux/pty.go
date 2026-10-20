@@ -11,9 +11,10 @@ import (
 	"time"
 )
 
-// shellQuote wraps s in POSIX single quotes, escaping any embedded
-// single quotes with the '\'' idiom. The result is safe to embed as a
-// single token in a shell command string.
+// shellQuote wraps s in POSIX single quotes, escaping each embedded
+// single quote by closing the quoted string, emitting an escaped quote
+// (\'), and reopening it. The result is safe to embed as a single token
+// in a shell command string.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -32,9 +33,9 @@ type PaneBridge struct {
 	client         *Client
 	paneID         string
 	fifoDir        string
-	fifoFd         int      // raw fd for non-blocking FIFO reads
-	pipeR          *os.File // read end of relay pipe (used by Read)
-	pipeW          *os.File // write end of relay pipe (written by relay goroutine)
+	fifoFd         int           // raw fd for non-blocking FIFO reads
+	pipeR          *os.File      // read end of relay pipe (used by Read)
+	pipeW          *os.File      // write end of relay pipe (written by relay goroutine)
 	done           chan struct{} // closed on Close() to signal relay to stop
 	relayDone      chan struct{} // closed when relay goroutine exits
 	initialContent string

@@ -20,8 +20,7 @@ func (u *rpmUpdater) Update(release ReleaseInfo) error {
 		return err
 	}
 
-	fmt.Printf("Download the updated package and install it:\n\n")
-	fmt.Printf("  curl -LO %s\n", asset.BrowserDownloadURL)
-	fmt.Printf("  sudo rpm -U %s\n\n", asset.Name)
-	return nil
+	return &ErrElevationRequired{
+		Command: fmt.Sprintf("curl -LO %s && sudo rpm -U %s", asset.BrowserDownloadURL, asset.Name),
+	}
 }

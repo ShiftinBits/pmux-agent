@@ -750,8 +750,33 @@ func DefaultPaths() (Paths, error) {
 	}, nil
 }
 
+// WithKeyPath returns p with KeysDir set from identity.key_path. A leading "~"
+// expands to $HOME, and a relative path resolves against ConfigDir (never the
+// cwd, which differs between CLI invocations). Empty keeps the default.
+func (p Paths) WithKeyPath(keyPath string) (Paths, error) {
+	if keyPath == "" {
+		return p, nil
+	}
+	if keyPath == "~" || strings.HasPrefix(keyPath, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Paths{}, fmt.Errorf("determine home directory: %w", err)
+		}
+		keyPath = filepath.Join(home, keyPath[1:])
+	}
+	if !filepath.IsAbs(keyPath) {
+		keyPath = filepath.Join(p.ConfigDir, keyPath)
+	}
+	p.KeysDir = filepath.Clean(keyPath)
+	return p, nil
+}
+
 // EnsureDirs creates the config and keys directories if they don't exist.
 func (p Paths) EnsureDirs() error {
+	// KeysDir may live outside ConfigDir (identity.key_path), so create both.
+	if err := os.MkdirAll(p.ConfigDir, 0700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
 	if err := os.MkdirAll(p.KeysDir, 0700); err != nil {
 		return fmt.Errorf("create keys directory: %w", err)
 	}

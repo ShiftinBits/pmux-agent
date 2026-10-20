@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -69,8 +68,6 @@ func (c *Checker) Check(method InstallMethod) (State, error) {
 	latest := release.TagName
 	updateAvailable := CompareVersions(c.current, latest) < 0
 
-	binaryPath, _ := os.Executable()
-
 	state := State{
 		LastCheck:       time.Now().UTC(),
 		CurrentVersion:  c.current,
@@ -78,7 +75,6 @@ func (c *Checker) Check(method InstallMethod) (State, error) {
 		UpdateAvailable: updateAvailable,
 		ReleaseURL:      release.HTMLURL,
 		InstallMethod:   string(method),
-		BinaryPath:      binaryPath,
 	}
 
 	if err := SaveState(c.stateFile, state); err != nil {

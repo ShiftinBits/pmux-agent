@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1376,6 +1377,84 @@ func TestDefaultPaths(t *testing.T) {
 	}
 	if paths.ConfigFile != filepath.Join(wantConfigDir, "config.toml") {
 		t.Errorf("ConfigFile = %q, want %q", paths.ConfigFile, filepath.Join(wantConfigDir, "config.toml"))
+	}
+}
+
+func TestPathsWithKeyPath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir() error: %v", err)
+	}
+	base := Paths{ConfigDir: "/cfg/pmux", KeysDir: "/cfg/pmux/keys"}
+
+	tests := []struct {
+		name    string
+		keyPath string
+		want    string
+	}{
+		{"empty keeps default", "", "/cfg/pmux/keys"},
+		{"absolute", "/custom/keys/", "/custom/keys"},
+		{"tilde expands to home", "~/.config/pmux/keys/", filepath.Join(home, ".config", "pmux", "keys")},
+		{"relative resolves against config dir", "mykeys", "/cfg/pmux/mykeys"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := base.WithKeyPath(tt.keyPath)
+			if err != nil {
+				t.Fatalf("WithKeyPath(%q) error: %v", tt.keyPath, err)
+			}
+			if got.KeysDir != tt.want {
+				t.Errorf("WithKeyPath(%q).KeysDir = %q, want %q", tt.keyPath, got.KeysDir, tt.want)
+			}
+			if got.ConfigDir != base.ConfigDir {
+				t.Errorf("ConfigDir changed to %q", got.ConfigDir)
+			}
+		})
+	}
+}
+
+func TestPathsWithKeyPath_NoHome(t *testing.T) {
+	t.Setenv("HOME", "") // os.UserHomeDir fails without $HOME on unix
+	if _, err := (Paths{ConfigDir: "/cfg"}).WithKeyPath("~/keys"); err == nil {
+		t.Error("WithKeyPath(~/keys) error = nil, want home directory failure")
+	}
+}
+
+func TestEnsureDirs_Errors(t *testing.T) {
+	// A regular file where a parent directory should be makes MkdirAll fail.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ok := t.TempDir()
+
+	tests := []struct {
+		name    string
+		paths   Paths
+		wantErr string
+	}{
+		{"config dir", Paths{ConfigDir: filepath.Join(blocker, "cfg"), KeysDir: filepath.Join(ok, "keys")}, "create config directory"},
+		{"keys dir", Paths{ConfigDir: ok, KeysDir: filepath.Join(blocker, "keys")}, "create keys directory"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.paths.EnsureDirs()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("EnsureDirs() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEnsureDirs_ExternalKeysDir(t *testing.T) {
+	p := Paths{ConfigDir: filepath.Join(t.TempDir(), "cfg"), KeysDir: filepath.Join(t.TempDir(), "keys")}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error: %v", err)
+	}
+	for _, d := range []string{p.ConfigDir, p.KeysDir} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("%s not created: %v", d, err)
+		}
 	}
 }
 

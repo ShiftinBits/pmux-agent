@@ -3,6 +3,9 @@ package auth
 import (
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -96,6 +99,59 @@ func TestNewSecretStore_KeyringBackend_Available(t *testing.T) {
 	}
 	if got := store.Backend(); got != "keyring" {
 		t.Errorf("Backend() = %q, want %q", got, "keyring")
+	}
+}
+
+func TestCheckKeychainDir(t *testing.T) {
+	withKeychains := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(withKeychains, "Library", "Keychains"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		home    string
+		wantErr string
+	}{
+		{"keychain dir present", withKeychains, ""},
+		{"fake home without keychains", t.TempDir(), "no keychain directory"},
+		{"no HOME", "", "keyring probe"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", tt.home)
+			err := checkKeychainDir()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("checkKeychainDir() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("checkKeychainDir() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A fake HOME must fail fast, before `security` runs and pops a GUI dialog.
+func TestProbeKeyring_FakeHomeOnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-only guard")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	err := ProbeKeyring()
+	if err == nil || !strings.Contains(err.Error(), "no keychain directory") {
+		t.Fatalf("ProbeKeyring() = %v, want no-keychain-directory error", err)
+	}
+
+	store, err := NewSecretStore(t.TempDir(), "auto", newTestLogger())
+	if err != nil {
+		t.Fatalf("NewSecretStore(auto) unexpected error: %v", err)
+	}
+	if got := store.Backend(); got != "encrypted-file" {
+		t.Errorf("Backend() = %q, want %q", got, "encrypted-file")
 	}
 }
 

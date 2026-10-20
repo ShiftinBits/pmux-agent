@@ -6,75 +6,105 @@ Go agent binary for Pocketmux. `pmux` is a transparent tmux wrapper that proxies
 
 | Task | Command |
 |------|---------|
-| Build | `make build` (or `go build -o bin/pmux ./cmd/pmux`) |
-| Unit tests | `make test` |
-| Integration tests | `make test-integration` (requires tmux) |
-| Stress tests | `make test-stress` (requires tmux, several minutes) |
+| Build | `make build` — sets `main.version=dev`, `main.installMethod=dev`, `main.hmacSecret=$PMUX_HMAC_SECRET` |
+| Build (release-like) | `make build-obfuscated` (needs `garble`) |
+| Unit tests | `make test` (tmux-dependent tests skip if tmux absent) |
+| Integration tests | `make test-integration` (tag `integration`, `-race`, needs tmux) |
+| Stress tests | `make test-stress` (tag `stress`, `-race`, several minutes) |
 | All tests | `make test-all` |
-| Release snapshot | `make snapshot` (goreleaser dry-run) |
-| Clean | `make clean` |
+| Vet (only static check; no golangci config) | `go vet ./...` |
+| Release snapshot | `make snapshot` |
+
+CI (`.github/workflows/`): `build.yml` = vet + build; `test.yml` = unit tests + coverage on ubuntu (no `-race`, no integration/stress). Go `1.25.13`.
 
 ## Architecture
 
 | Package | Purpose |
 |---------|---------|
-| `cmd/pmux/main.go` | CLI entry point, command routing, `handlePair()`, `handleAgent()` |
-| `internal/agent/` | Agent lifecycle — `Run()`, `EnsureRunning()`, `Handler`, `Supervisor`, `ConnectionCleaner`, tmux monitor, PID file management |
-| `internal/auth/` | Ed25519 identity, JWT signing, X25519 pairing, secret store (keyring/file backends), `PairedDevice` storage |
-| `internal/config/` | TOML config parsing (`~/.config/pmux/config.toml`), env overrides, path resolution |
-| `internal/protocol/` | MessagePack codec, message types (mirrors `@pocketmux/shared`) |
-| `internal/proxy/` | tmux passthrough via `syscall.Exec` |
-| `internal/tmux/` | tmux CLI wrapper (`Client`), `PaneBridge` (FIFO-based PTY streaming), `PaneSizeTracker`, `TitleFilter` |
-| `internal/webrtc/` | Pion WebRTC `PeerManager`, `SignalingClient`, dormancy handling |
+| `cmd/pmux/main.go` | CLI routing, ldflag vars (`version`, `hmacSecret`, `installMethod`), `runAgent()` exit-code handling |
+| `internal/agent/` | `Run()` (agent main loop), `EnsureRunning()`/`spawn()` (supervisor.go), `Handler` (DataChannel request handling), tmux monitor, PID file, keep-awake, Linux sleep watcher, `pmux init/pair/status/unpair/uninstall` impls |
+| `internal/auth/` | Ed25519 identity, JWT exchange, X25519 pairing, `SecretStore` (keyring/file), build HMAC request signing (hmac.go), server pairing session (pair_session.go) |
+| `internal/config/` | TOML config + env overrides, `DefaultPaths()` |
+| `internal/firewall/` | Detect-only host firewall probe (macOS `socketfilterfw`, Linux ufw/firewalld); never modifies settings |
+| `internal/protocol/` | MessagePack codec, message types (mirror `@pocketmux/shared`), `Validate()` limits, per-peer deflate (`OutputCompressor`) |
+| `internal/proxy/` | `ExecTmux()` — `syscall.Exec` into `tmux -L <socket>` |
+| `internal/tmux/` | `Client` (tmux CLI wrapper), `PaneBridge` (pipe-pane → FIFO streaming), `PaneSizeTracker`, `TitleFilter` |
+| `internal/update/` | GitHub Releases checker, banner, install-method `Detect()`, per-method `Updater` |
+| `internal/webrtc/` | Pion `PeerManager` (peer.go), `SignalingClient` (signaling.go) |
 
-## Key Design Decisions
+### Commands
 
-- **Command routing**: `init`, `pair`, `config`, `status`, `unpair`, `agent`, `--version` are intercepted; everything else passes through to `tmux -L pmux`
-- **PTY streaming**: Uses FIFO + non-blocking relay pipe (not `creack/pty`). macOS FIFO `Read()` doesn't unblock on `Close()` — the relay goroutine polls with short timeouts and checks a done channel
-- **Agent lifecycle**: Persistent background process, spawned by `EnsureRunning()` on any `pmux` command (idempotent via flock + PID file). No OS service layer — on macOS a launchd-spawned agent is a faceless process the Application Firewall never auto-allows, forcing TURN relay; foreground spawn by `pmux` in the GUI session gets direct P2P. Fatal init errors exit 0; runtime errors exit 1
-- **Secret storage**: Auto-detects backend — OS keyring (`go-keyring`) preferred, falls back to encrypted file. Configurable via `identity.secret_backend` or `PMUX_SECRET_BACKEND`
-- **Single-pairing model**: One mobile per host. Re-pairing replaces old device with confirmation prompt
+Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstall [--keep-config] [-y]`, `update`, `agent`, `--version/-v`, `--help/-h`. `agent` subcommands: `start`, `stop`, `restart`, `status`, and internal `run` (what `spawn()` execs). Everything else (and no args) → `ensureAgent()` then `proxy.ExecTmux()`.
+
+**There is no OS service layer** (no launchd/systemd install). The agent is spawned by `EnsureRunning()` on any `pmux` command: `flock` on `agent.pid` → if alive send SIGUSR1, else spawn `pmux agent run` with `Setsid`. On macOS a launchd-spawned agent is faceless and never auto-allowed by the Application Firewall, forcing TURN relay.
+
+### Signals (agent process)
+
+| Signal | Effect |
+|--------|--------|
+| SIGUSR1 | Activity ping from CLI — wakes signaling from dormancy (`SignalActivity()`) |
+| SIGUSR2 | Reload pairing state, close all peers (sent by `pmux pair`) |
+| SIGTERM/SIGINT | Graceful stop (10s cap); second signal → `os.Exit(1)` |
+
+### Files (`~/.config/pmux/`, hardcoded via `os.UserHomeDir`, not XDG)
+
+`config.toml`, `keys/` (0700; relocatable via `identity.key_path`), `paired_devices.json`, `agent.pid`, `agent.log` (rotated at 10 MiB → `agent.log.1`), `update-state.json`.
+
+Always get paths via `resolvePaths()` in `main.go` (`DefaultPaths()` + `Paths.WithKeyPath()`), never bare `config.DefaultPaths()` — that ignores `key_path`.
 
 ## Configuration
 
-Config file: `~/.config/pmux/config.toml`
+Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `true`/`1`/`yes`, anything else = false. `Config.Validate()` is advisory: it warns in `agent.log` and `pmux config` but never rejects the config (falling back to defaults could silently switch the tmux socket).
 
 | Env Variable | Override |
 |-------------|---------|
-| `PMUX_SERVER_URL` | Signaling server URL (default: `https://signal.pmux.io`) |
-| `PMUX_SOCKET_NAME` | tmux socket name (default: `pmux`) |
-| `PMUX_TMUX_PATH` | Absolute path to tmux binary |
-| `PMUX_KEY_PATH` | Key storage directory |
-| `PMUX_SECRET_BACKEND` | `keyring` or `file` |
-| `PMUX_MAX_CONNECTIONS` | Max concurrent WebRTC connections |
-| `PMUX_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
-| `PMUX_KEEP_AWAKE` | Inhibit host sleep while the agent runs (default: `false`) |
+| `PMUX_SERVER_URL` | Signaling server (default `https://signal.pmux.io`); wins over legacy `PMUX_AGENT_SIGNAL_URL` |
+| `PMUX_API_VERSION` | URL prefix (default `v1`); explicitly set `""` = legacy unversioned paths (uses `LookupEnv`) |
+| `PMUX_SOCKET_NAME` | tmux socket (default `pmux`) |
+| `PMUX_TMUX_PATH` | Absolute tmux path |
+| `PMUX_KEY_PATH` | Keys dir; `~` expands, relative resolves against config dir. Only meaningful before `pmux init` — changing it later orphans the identity (re-init + re-pair). `init` preserves a pre-existing `config.toml` |
+| `PMUX_SECRET_BACKEND` | `auto` (default), `keyring`, `file` |
+| `PMUX_MAX_CONNECTIONS` | → `PeerManager.MaxPeers` (default 1) |
+| `PMUX_LOG_LEVEL` | `debug`/`info`/`warn`/`error` |
+| `PMUX_UPDATE_ENABLED` / `PMUX_UPDATE_INTERVAL` | Background update check (default on, `24h`) |
+| `PMUX_FORCE_RELAY` | Relay-only (TURN) ICE, for debugging |
+| `PMUX_KEEP_AWAKE` | Inhibit host sleep (macOS `caffeinate -i -w`, Linux logind inhibitor, WSL powershell) |
 
-## Dependencies
+`PMUX_HMAC_SECRET` is **build-time only** (Makefile/goreleaser ldflag), not read at runtime.
 
-| Module | Purpose |
-|--------|---------|
-| `pion/webrtc/v4` | WebRTC DataChannels |
-| `pion/ice/v4` | ICE transport |
-| `vmihailenco/msgpack/v5` | Wire protocol codec |
-| `gorilla/websocket` | Signaling WebSocket client |
-| `skip2/go-qrcode` | QR code for pairing |
-| `pelletier/go-toml/v2` | Config file parsing |
-| `zalando/go-keyring` | OS keychain/keyring access |
-| `golang.org/x/crypto` | Ed25519 signing, X25519 key exchange |
+**Adding a config field/env var** touches: `Config` + `fileConfig` (pointer fields distinguish absent vs false), `applyEnvOverrides` **and** `applyEnvOverridesTracked` (duplicated), `ConfigSources`/`FormatEffective`, `CommentedDefaultConfig()`.
+
+## Key Design Decisions
+
+- **PTY streaming**: `tmux pipe-pane` → FIFO (not `creack/pty`). macOS FIFO `Read()` doesn't unblock on `Close()`, so `relayFIFOToPipe` polls a non-blocking fd (50ms) and copies into an `os.Pipe`. Input via `send-keys -l`.
+- **Two auth layers — don't confuse**: (1) build HMAC (`auth.SignRequest`) proves an official build to the server; empty secret = no headers, server 401s. (2) DataChannel key-possession challenge (`sendAuthChallenge`/`verifyAuthResponse`) uses the per-device X25519 shared secret. Before auth only `auth_response` is accepted; `protocol.IsRequest` excludes it afterward.
+- **Exit codes**: `FatalInitError` and `*auth.HMACRejectedError` exit **0** (no point restarting); other runtime errors exit 1.
+- **Fail-closed pairing**: unpaired/load-error states set allowed device ID to `"!"`-prefixed sentinels.
+- **Single-pairing**: enforced at runtime by `PeerManager.MaxPeers` (default 1) + `SetAllowedDeviceID`. Re-pairing replaces the old device with confirmation.
+- **Wire limits** in `protocol/validation.go` must match `@pocketmux/shared` `src/codec.ts`. `TestCrossLanguageFixtures` reads `packages/shared/src/__tests__/fixtures` (skips if shared isn't cloned alongside).
+- **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`. Falls back to uncompressed on error.
+- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` (no macOS sleep hook).
+- **ICE recovery** (`peer.go`): `disconnectTimers` (10s grace, rescheduled if fired early after sleep) → `attemptICERestart` → separate `iceRestartTimers` 20s watchdog closes the peer if not Connected.
+- **TURN**: `fetchTurnCredentials` (JWT + HMAC), cached 10m, falls back to STUN-only on failure.
+- **Updates**: `update.Detect()` order: ldflag `dev` → `/snap/` → `/Cellar/` or `/opt/homebrew/` → `dpkg -s` → `rpm -q` → github. Only the github method self-replaces (`minio/selfupdate`, SHA256-verified, host allow-list); homebrew runs `brew upgrade`; deb/rpm/snap install nothing and return `*ErrElevationRequired{Command}` — `pmux update` prints the command and leaves update state untouched. The CLI banner and mobile `SessionsEvent.UpdateAvailable` are gated on `State.IsStale(runningVersion)`, so state written by an older binary is ignored. Release builds leave `installMethod` empty. `Checker.Check` no-ops when version is `dev`.
+- **Firewall warning** shown in agent log, `pmux status`, `pmux init`. macOS 15+ always reports low-confidence "not authorized" when the firewall is on (`--listapps` is unreliable there).
+- **zsh**: `Run()` sets tmux global env `PROMPT_EOL_MARK=""` so the `%` marker doesn't appear on mobile.
 
 ## Testing
 
-- Unit tests: co-located `*_test.go` files in each package
-- Integration tests: `test/integration/` — build tag `//go:build integration`, uses isolated tmux sockets (`pmux-integ-*`)
-- Stress tests: `test/stress/` — build tag `//go:build stress`, sockets `pmux-stress-*`
-- Integration/stress tests require tmux installed and use `-race` flag
+- **tmux is not mocked**: tests run real tmux on isolated sockets (`pmux-test`, `pmux-handler-test`, `pmux-integ-*`, `pmux-stress-*`), `skipIfNoTmux`, `kill-server` in `t.Cleanup`. Use a new unique socket name for new tests.
+- **Test seams are package-level func vars** (`firewall.execCommand`, `firewall.osMajor`, `update.executablePath`, `proxy.sysExec`, `agent.runAgentStop/Start`) — swapped in tests, so no `t.Parallel()` (repo uses none).
+- **Subprocess fakes**: `firewall/exec_test.go` `TestHelperProcess` re-exec pattern (`GO_WANT_HELPER_PROCESS`).
+- **Paths**: tests build `config.Paths{}` from `t.TempDir()`; no `HOME` override. Secrets via `auth.NewMemorySecretStore()`.
+- ⚠ `secretstore_detect_test.go` / `ProbeKeyring` touch the **real OS keyring**.
 - ⚠ Running a built `pmux` with a fake `HOME` (e.g. `HOME=$tmp pmux init`): **always also set `PMUX_SECRET_BACKEND=file`**. On macOS the keyring probe shells out to `security add-generic-password`, which can't find a default keychain under a fake `HOME` (`errSecNoDefaultKeychain`) and pops a blocking "Keychain Not Found … `__probe__`" GUI dialog on the user's desktop for every invocation.
+- Platform code split by filename suffix (`_darwin.go`, `_linux.go`) plus `_other.go` with `!darwin && !linux` / `!linux` tags.
 
 ## Release Pipeline
 
-`.goreleaser.yaml` — builds linux (amd64, arm64) + darwin universal binary. Supports:
-- macOS code signing/notarization (env-gated)
-- Homebrew cask publishing to `ShiftinBits/homebrew-tap` (env-gated)
-- DEB and RPM packages via nFPM (tmux as dependency)
-- Snap package publishing to the Snap Store (classic confinement, core24 base, `SNAPCRAFT_STORE_CREDENTIALS` env-gated)
+`.goreleaser.yaml` (tag `v*` → `release.yml`): linux amd64/arm64 + darwin universal, `CGO_ENABLED=0`, built through `scripts/garble.sh`.
+- **garble** obfuscates literals to protect the embedded HMAC secret. `GOGARBLE` is limited to this module — obfuscating godbus/go-keyring breaks D-Bus type assertions and panics on Linux.
+- Archive names must match `githubUpdater.matchArchiveName` or self-update breaks.
+- `checksums.txt` GPG-signed; macOS sign/notarize gated on `MACOS_SIGN_P12`.
+- Homebrew cask → `ShiftinBits/homebrew-tap` (`uninstall_preflight_steps` pkills `pmux agent run`).
+- DEB/RPM via nFPM (depends on tmux). No Snap publishing configured; no Windows target.

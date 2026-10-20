@@ -25,7 +25,7 @@ func TestPrintBannerIfAvailable_UpdateAvailable(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	PrintBannerIfAvailable(path)
+	PrintBannerIfAvailable(path, "1.0.0")
 
 	w.Close()
 	os.Stderr = old
@@ -62,7 +62,7 @@ func TestPrintBannerIfAvailable_NoBanner(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	PrintBannerIfAvailable(path)
+	PrintBannerIfAvailable(path, "1.0.0")
 
 	w.Close()
 	os.Stderr = old
@@ -76,5 +76,29 @@ func TestPrintBannerIfAvailable_NoBanner(t *testing.T) {
 
 func TestPrintBannerIfAvailable_NoFile(t *testing.T) {
 	// Should not panic or error — just silently do nothing.
-	PrintBannerIfAvailable("/nonexistent/path/update-state.json")
+	PrintBannerIfAvailable("/nonexistent/path/update-state.json", "1.0.0")
+}
+
+func TestPrintBannerIfAvailable_StaleState(t *testing.T) {
+	// State recorded by 1.0.0, but 1.1.0 is now running (e.g. upgraded via
+	// brew/dpkg outside pmux update): the banner must not claim 1.0.0 → 1.1.0.
+	path := filepath.Join(t.TempDir(), "update-state.json")
+	state := State{CurrentVersion: "1.0.0", LatestVersion: "1.1.0", UpdateAvailable: true}
+	if err := SaveState(path, state); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	PrintBannerIfAvailable(path, "1.1.0")
+
+	w.Close()
+	os.Stderr = old
+
+	buf := make([]byte, 1024)
+	if n, _ := r.Read(buf); n > 0 {
+		t.Errorf("expected no banner for stale state, got: %q", string(buf[:n]))
+	}
 }

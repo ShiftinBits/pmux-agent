@@ -26,7 +26,6 @@ func TestStateRoundTrip(t *testing.T) {
 		UpdateAvailable: true,
 		ReleaseURL:      "https://github.com/ShiftinBits/pmux-agent/releases/tag/v1.1.0",
 		InstallMethod:   "homebrew",
-		BinaryPath:      "/opt/homebrew/bin/pmux",
 	}
 
 	if err := SaveState(path, want); err != nil {
@@ -52,9 +51,6 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if got.InstallMethod != want.InstallMethod {
 		t.Errorf("InstallMethod = %q, want %q", got.InstallMethod, want.InstallMethod)
-	}
-	if got.BinaryPath != want.BinaryPath {
-		t.Errorf("BinaryPath = %q, want %q", got.BinaryPath, want.BinaryPath)
 	}
 	if !got.LastCheck.Equal(want.LastCheck) {
 		t.Errorf("LastCheck = %v, want %v", got.LastCheck, want.LastCheck)

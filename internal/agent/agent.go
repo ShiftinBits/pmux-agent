@@ -60,6 +60,21 @@ func rotateLogIfNeeded(logPath string) {
 	os.Rename(logPath, logPath+".1") //nolint:errcheck
 }
 
+// loadConfig loads the agent config, falling back to defaults if it can't be
+// read. Validation is advisory only — rejecting the config would silently
+// swap in defaults (e.g. a different tmux socket) after an upgrade.
+func loadConfig(path string, logger *slog.Logger) config.Config {
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		logger.Warn("failed to load config, using defaults", "error", err)
+		return config.Defaults()
+	}
+	if err := cfg.Validate(); err != nil {
+		logger.Warn("invalid config", "error", err)
+	}
+	return cfg
+}
+
 // Run starts the Pocketmux agent. It connects to the signaling server,
 // handles WebRTC connections, and monitors the tmux server.
 // Blocks until the context is canceled (SIGTERM/SIGINT or fatal error).
@@ -97,11 +112,7 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	signal.Notify(usr2Ch, syscall.SIGUSR2)
 
 	// Load config for server URL, socket name, and timing settings
-	cfg, err := config.LoadConfig(paths.ConfigFile)
-	if err != nil {
-		logger.Warn("failed to load config, using defaults", "error", err)
-		cfg = config.Defaults()
-	}
+	cfg := loadConfig(paths.ConfigFile, logger)
 
 	// Apply configured log level (default: info)
 	logLevel.Set(cfg.ParseLogLevel())

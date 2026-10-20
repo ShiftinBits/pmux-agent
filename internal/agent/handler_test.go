@@ -1273,7 +1273,7 @@ func TestHandler_NewSessionsEvent_WithUpdateAvailable(t *testing.T) {
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "update-state.json")
 
-	state := update.State{UpdateAvailable: true, LatestVersion: "v2.0.0"}
+	state := update.State{UpdateAvailable: true, CurrentVersion: "1.0.0", LatestVersion: "v2.0.0"}
 	data, _ := json.Marshal(state)
 	os.WriteFile(stateFile, data, 0600)
 
@@ -1284,6 +1284,21 @@ func TestHandler_NewSessionsEvent_WithUpdateAvailable(t *testing.T) {
 	event := h.newSessionsEvent(nil)
 	if event.UpdateAvailable != "v2.0.0" {
 		t.Errorf("UpdateAvailable = %q, want v2.0.0", event.UpdateAvailable)
+	}
+}
+
+func TestHandler_NewSessionsEvent_StaleUpdateState(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "update-state.json")
+
+	// Recorded by an older binary; the running agent is already newer.
+	state := update.State{UpdateAvailable: true, CurrentVersion: "0.9.0", LatestVersion: "v1.0.0"}
+	data, _ := json.Marshal(state)
+	os.WriteFile(stateFile, data, 0600)
+
+	h := NewHandler(tmux.NewClient("nonexistent-socket"), (&messageCatcher{}).Send, slog.Default(), "1.0.0", stateFile)
+
+	if event := h.newSessionsEvent(nil); event.UpdateAvailable != "" {
+		t.Errorf("UpdateAvailable = %q, want empty for stale state", event.UpdateAvailable)
 	}
 }
 

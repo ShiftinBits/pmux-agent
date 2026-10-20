@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -73,3 +78,36 @@ func TestIsFatalInitError(t *testing.T) {
 	})
 }
 
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		wantSocket string
+		wantLog    string
+	}{
+		{"valid config", "[tmux]\nsocket_name = \"work\"\n", "work", ""},
+		// Invalid values only warn: the user's other settings (socket) must survive.
+		{"invalid config is advisory", "log_level = \"verbose\"\n[tmux]\nsocket_name = \"work\"\n", "work", "invalid config"},
+		{"unparseable config falls back to defaults", "not = [valid toml", "pmux", "using defaults"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			cfg := loadConfig(path, slog.New(slog.NewTextHandler(&logs, nil)))
+
+			if cfg.Tmux.SocketName != tt.wantSocket {
+				t.Errorf("SocketName = %q, want %q", cfg.Tmux.SocketName, tt.wantSocket)
+			}
+			if tt.wantLog == "" && logs.Len() > 0 {
+				t.Errorf("unexpected log output: %s", logs.String())
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want it to contain %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}

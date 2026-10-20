@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -497,10 +498,18 @@ func TestDebUpdater_Update(t *testing.T) {
 		},
 	}
 
-	// deb updater just prints instructions, should not error with matching asset
-	err := u.Update(release)
-	if err != nil {
-		t.Errorf("debUpdater.Update() error: %v", err)
+	// deb needs root, so nothing is installed: the command comes back as an error
+	assertElevation(t, u.Update(release), "sudo dpkg -i pmux_1.0.0_linux_")
+}
+
+func assertElevation(t *testing.T, err error, wantInCommand string) {
+	t.Helper()
+	var elevErr *ErrElevationRequired
+	if !errors.As(err, &elevErr) {
+		t.Fatalf("Update() error = %v, want *ErrElevationRequired", err)
+	}
+	if !strings.Contains(elevErr.Command, wantInCommand) {
+		t.Errorf("Command = %q, want it to contain %q", elevErr.Command, wantInCommand)
 	}
 }
 
@@ -523,10 +532,7 @@ func TestRPMUpdater_Update(t *testing.T) {
 		},
 	}
 
-	err := u.Update(release)
-	if err != nil {
-		t.Errorf("rpmUpdater.Update() error: %v", err)
-	}
+	assertElevation(t, u.Update(release), "sudo rpm -U pmux_1.0.0_linux_")
 }
 
 func TestRPMUpdater_Update_MissingAsset(t *testing.T) {
@@ -542,11 +548,7 @@ func TestRPMUpdater_Update_MissingAsset(t *testing.T) {
 func TestSnapUpdater_Update(t *testing.T) {
 	u := &snapUpdater{logger: testLogger()}
 
-	// Snap updater always returns nil (just prints instructions)
-	err := u.Update(ReleaseInfo{})
-	if err != nil {
-		t.Errorf("snapUpdater.Update() error: %v", err)
-	}
+	assertElevation(t, u.Update(ReleaseInfo{}), "sudo snap refresh pmux")
 }
 
 func TestHomebrewUpdater_Update_NoBrew(t *testing.T) {

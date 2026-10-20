@@ -16,7 +16,13 @@ type State struct {
 	UpdateAvailable bool      `json:"updateAvailable"`
 	ReleaseURL      string    `json:"releaseURL"`
 	InstallMethod   string    `json:"installMethod"`
-	BinaryPath      string    `json:"binaryPath"` // for cache invalidation
+}
+
+// IsStale reports whether the state was recorded by a different binary
+// version than the one running (e.g. after an out-of-band brew upgrade or
+// dpkg -i, or with background checks disabled), so its result is outdated.
+func (s State) IsStale(runningVersion string) bool {
+	return s.CurrentVersion != runningVersion
 }
 
 // StateFilePath returns the path to the update state file.

@@ -39,4 +39,3 @@ func TestExecutablePath(t *testing.T) {
 		t.Errorf("ExecutablePath() = %q, not stat-able: %v", p, err)
 	}
 }
-

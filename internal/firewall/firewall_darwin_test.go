@@ -124,4 +124,3 @@ func TestDarwinProbeSequoia(t *testing.T) {
 		t.Error("expected Authorized=true when firewall disabled")
 	}
 }
-

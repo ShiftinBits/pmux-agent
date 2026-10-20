@@ -28,13 +28,13 @@ type Handler struct {
 	updateStateFile string          // path to update-state.json for update notifications
 
 	mu           sync.Mutex
-	bridges      map[string]*tmux.PaneBridge              // per-peer attached bridge
-	cancels      map[string]context.CancelFunc             // per-peer streamOutput cancel
-	paneForPeer  map[string]string                        // peerID -> paneID (for restore on detach)
-	lastPingTime map[string]time.Time                     // peerID -> last ping received
-	lastDims     map[string][2]int                        // peerID -> [cols, rows] to skip redundant resizes
-	compressors  map[string]*protocol.OutputCompressor    // per-peer stateful deflate compressor
-	exitNotified map[string]bool                          // peerID -> true if handlePaneExit already fired
+	bridges      map[string]*tmux.PaneBridge           // per-peer attached bridge
+	cancels      map[string]context.CancelFunc         // per-peer streamOutput cancel
+	paneForPeer  map[string]string                     // peerID -> paneID (for restore on detach)
+	lastPingTime map[string]time.Time                  // peerID -> last ping received
+	lastDims     map[string][2]int                     // peerID -> [cols, rows] to skip redundant resizes
+	compressors  map[string]*protocol.OutputCompressor // per-peer stateful deflate compressor
+	exitNotified map[string]bool                       // peerID -> true if handlePaneExit already fired
 }
 
 // NewHandler creates a protocol message handler.
@@ -47,13 +47,13 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger, age
 		agentVersion:    agentVersion,
 		updateStateFile: updateStateFile,
 		ctx:             context.Background(), // overridden by SetContext in agent.go
-		bridges:      make(map[string]*tmux.PaneBridge),
-		cancels:      make(map[string]context.CancelFunc),
-		paneForPeer:  make(map[string]string),
-		lastPingTime: make(map[string]time.Time),
-		lastDims:     make(map[string][2]int),
-		compressors:  make(map[string]*protocol.OutputCompressor),
-		exitNotified: make(map[string]bool),
+		bridges:         make(map[string]*tmux.PaneBridge),
+		cancels:         make(map[string]context.CancelFunc),
+		paneForPeer:     make(map[string]string),
+		lastPingTime:    make(map[string]time.Time),
+		lastDims:        make(map[string][2]int),
+		compressors:     make(map[string]*protocol.OutputCompressor),
+		exitNotified:    make(map[string]bool),
 	}
 }
 
@@ -73,7 +73,7 @@ func (h *Handler) newSessionsEvent(sessions []protocol.TmuxSession) *protocol.Se
 		AgentVersion: h.agentVersion,
 	}
 	if h.updateStateFile != "" {
-		if state, err := update.LoadState(h.updateStateFile); err == nil && state.UpdateAvailable {
+		if state, err := update.LoadState(h.updateStateFile); err == nil && state.UpdateAvailable && !state.IsStale(h.agentVersion) {
 			event.UpdateAvailable = state.LatestVersion
 		}
 	}
