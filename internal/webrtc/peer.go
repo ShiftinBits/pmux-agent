@@ -437,7 +437,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 			"mobile", mobileDeviceID, "error", ssErr)
 		if err := pm.signaling.Send(SignalingMessage{
 			Type:           "connection_rejected",
-			Reason:         "not_paired",
+			Reason:         "secret_unavailable",
 			TargetDeviceID: mobileDeviceID,
 		}); err != nil {
 			pm.logger.Warn("failed to send rejection", "error", err)

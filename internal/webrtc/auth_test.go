@@ -208,12 +208,12 @@ func TestPeerManager_RejectsWhenSharedSecretUnavailable(t *testing.T) {
 	}
 	rejected := false
 	for _, m := range sender.messagesOfType("connection_rejected") {
-		if m.TargetDeviceID == "mobile-nosecret" {
+		if m.TargetDeviceID == "mobile-nosecret" && m.Reason == "secret_unavailable" {
 			rejected = true
 		}
 	}
 	if !rejected {
-		t.Error("expected connection_rejected sent to the device")
+		t.Error("expected connection_rejected with reason secret_unavailable sent to the device")
 	}
 
 	pm.CloseAll()
