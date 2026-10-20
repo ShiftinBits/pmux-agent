@@ -1,14 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"encoding/base64"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
 func TestTruncateMobileName(t *testing.T) {
@@ -79,149 +81,216 @@ func TestGenerateX25519Keypair(t *testing.T) {
 	})
 }
 
-func TestComputeSharedSecret(t *testing.T) {
-	alice, err := GenerateX25519Keypair()
+// Pairing v2 test vector. Must match the mobile app's cross-implementation
+// test byte for byte.
+const (
+	vecHostDeviceID   = "0123456789abcdef0123456789abcdef"
+	vecMobileDeviceID = "fedcba9876543210fedcba9876543210"
+	vecPairingSecret  = "ABCDEFGHJKLMNPQR"
+	vecHostPub        = "e06Qm75//kTEZaIgA31gjuNYl9Me+XLwf3SJLLD3PxM="
+	vecMobilePub      = "D6poTtKIZ7l/Smot7l34zpdOdrcBjj8iocTPJnhXDyA="
+	vecPairMac        = "AbPSxoD0EUD/NFLuOE3SzJ5V+/WumalqFLlFSNSuhKY="
+	vecSharedSecret   = "FaYdo9hMbk1fzjwKPJfMDpQa7VMIBrjwN1p/CaSO47Y="
+)
+
+// fixedKeypair builds an X25519 keypair from a 32-byte scalar filled with b.
+func fixedKeypair(t *testing.T, b byte) *X25519Keypair {
+	t.Helper()
+	priv, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{b}, 32))
 	if err != nil {
-		t.Fatalf("GenerateX25519Keypair() alice error: %v", err)
+		t.Fatalf("NewPrivateKey(0x%02x): %v", b, err)
 	}
-	bob, err := GenerateX25519Keypair()
-	if err != nil {
-		t.Fatalf("GenerateX25519Keypair() bob error: %v", err)
+	return &X25519Keypair{PrivateKey: priv, PublicKey: priv.PublicKey()}
+}
+
+func TestPairingV2_KnownVector(t *testing.T) {
+	host := fixedKeypair(t, 0x11)
+	mobile := fixedKeypair(t, 0x22)
+
+	if got := host.PublicKeyBase64(); got != vecHostPub {
+		t.Fatalf("host public key = %s, want %s", got, vecHostPub)
+	}
+	if got := mobile.PublicKeyBase64(); got != vecMobilePub {
+		t.Fatalf("mobile public key = %s, want %s", got, vecMobilePub)
 	}
 
-	t.Run("both sides compute same shared secret", func(t *testing.T) {
-		aliceSecret, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
+	t.Run("pairMac verifies", func(t *testing.T) {
+		err := VerifyPairMAC(vecPairingSecret, host.PublicKey.Bytes(), vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac)
 		if err != nil {
-			t.Fatalf("alice.ComputeSharedSecret() error: %v", err)
-		}
-		bobSecret, err := bob.ComputeSharedSecret(alice.PublicKeyBase64())
-		if err != nil {
-			t.Fatalf("bob.ComputeSharedSecret() error: %v", err)
-		}
-		if aliceSecret != bobSecret {
-			t.Error("shared secrets do not match")
+			t.Errorf("VerifyPairMAC() error: %v", err)
 		}
 	})
 
-	t.Run("shared secret is 32 bytes base64", func(t *testing.T) {
-		secret, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
+	t.Run("shared secret matches", func(t *testing.T) {
+		secret, err := host.ComputeSharedSecret(vecMobilePub, vecPairingSecret, vecHostDeviceID, vecMobileDeviceID)
 		if err != nil {
 			t.Fatalf("ComputeSharedSecret() error: %v", err)
 		}
-		decoded, err := base64.StdEncoding.DecodeString(secret)
-		if err != nil {
-			t.Fatalf("base64 decode error: %v", err)
-		}
-		if len(decoded) != 32 {
-			t.Errorf("shared secret size = %d, want 32", len(decoded))
-		}
-	})
-
-	t.Run("rejects invalid base64", func(t *testing.T) {
-		_, err := alice.ComputeSharedSecret("not-valid-base64!!!")
-		if err == nil {
-			t.Error("expected error for invalid base64")
-		}
-	})
-
-	t.Run("rejects wrong key size", func(t *testing.T) {
-		wrongKey := base64.StdEncoding.EncodeToString([]byte("too-short"))
-		_, err := alice.ComputeSharedSecret(wrongKey)
-		if err == nil {
-			t.Error("expected error for wrong key size")
-		}
-	})
-
-	t.Run("output differs from raw ECDH (HKDF applied)", func(t *testing.T) {
-		derived, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
-		if err != nil {
-			t.Fatalf("ComputeSharedSecret() error: %v", err)
-		}
-
-		// Compute raw ECDH directly (without HKDF)
-		peerBytes, _ := base64.StdEncoding.DecodeString(bob.PublicKeyBase64())
-		curve := alice.PrivateKey.Curve()
-		peerPub, _ := curve.NewPublicKey(peerBytes)
-		raw, _ := alice.PrivateKey.ECDH(peerPub)
-		rawB64 := base64.StdEncoding.EncodeToString(raw)
-
-		if derived == rawB64 {
-			t.Error("derived secret should differ from raw ECDH output (HKDF not applied)")
+		if secret != vecSharedSecret {
+			t.Errorf("shared secret = %s, want %s", secret, vecSharedSecret)
 		}
 	})
 }
 
-func TestComputeSharedSecret_KnownVector(t *testing.T) {
-	curve := ecdh.X25519()
+func TestComputeSharedSecret(t *testing.T) {
+	host := fixedKeypair(t, 0x11)
+	mobile := fixedKeypair(t, 0x22)
 
-	aliceHex := "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
-	bobHex := "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
-
-	aliceBytes, err := hex.DecodeString(aliceHex)
-	if err != nil {
-		t.Fatalf("decode alice hex: %v", err)
+	tests := []struct {
+		name           string
+		peerPub        string
+		pairingSecret  string
+		hostDeviceID   string
+		mobileDeviceID string
+		wantErr        bool
+		wantSecret     string
+	}{
+		{"known vector", vecMobilePub, vecPairingSecret, vecHostDeviceID, vecMobileDeviceID, false, vecSharedSecret},
+		{"rejects invalid base64", "not-valid-base64!!!", vecPairingSecret, vecHostDeviceID, vecMobileDeviceID, true, ""},
+		{"rejects wrong key size", base64.StdEncoding.EncodeToString([]byte("too-short")), vecPairingSecret, vecHostDeviceID, vecMobileDeviceID, true, ""},
+		{"rejects empty pairing secret", vecMobilePub, "", vecHostDeviceID, vecMobileDeviceID, true, ""},
+		{"rejects invalid host device ID", vecMobilePub, vecPairingSecret, "short", vecMobileDeviceID, true, ""},
+		{"rejects invalid mobile device ID", vecMobilePub, vecPairingSecret, vecHostDeviceID, "short", true, ""},
 	}
-	bobBytes, err := hex.DecodeString(bobHex)
-	if err != nil {
-		t.Fatalf("decode bob hex: %v", err)
-	}
-
-	alicePriv, err := curve.NewPrivateKey(aliceBytes)
-	if err != nil {
-		t.Fatalf("alice private key: %v", err)
-	}
-	bobPriv, err := curve.NewPrivateKey(bobBytes)
-	if err != nil {
-		t.Fatalf("bob private key: %v", err)
-	}
-
-	alice := &X25519Keypair{PrivateKey: alicePriv, PublicKey: alicePriv.PublicKey()}
-	bob := &X25519Keypair{PrivateKey: bobPriv, PublicKey: bobPriv.PublicKey()}
-
-	secret, err := alice.ComputeSharedSecret(bob.PublicKeyBase64())
-	if err != nil {
-		t.Fatalf("ComputeSharedSecret() error: %v", err)
-	}
-
-	// Known vector: deterministic output from fixed keypairs with HKDF salt="pocketmux", info="pocketmux-pairing-v1".
-	// Must match pocketmux-mobile's "HKDF known-vector (cross-implementation)" test.
-	const expected = "u4yr2Slh8UHncKnmDoXdLaoa9SGZ4aaJ9KBrEfNgd54="
-	if secret != expected {
-		t.Errorf("known vector mismatch:\n  got:  %s\n  want: %s", secret, expected)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := host.ComputeSharedSecret(tt.peerPub, tt.pairingSecret, tt.hostDeviceID, tt.mobileDeviceID)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got secret %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ComputeSharedSecret() error: %v", err)
+			}
+			if got != tt.wantSecret {
+				t.Errorf("secret = %s, want %s", got, tt.wantSecret)
+			}
+		})
 	}
 
-	// Verify bob computes the same secret
-	bobSecret, err := bob.ComputeSharedSecret(alice.PublicKeyBase64())
-	if err != nil {
-		t.Fatalf("bob.ComputeSharedSecret() error: %v", err)
+	t.Run("bound to pairing secret and device IDs", func(t *testing.T) {
+		variants := []struct {
+			name           string
+			pairingSecret  string
+			hostDeviceID   string
+			mobileDeviceID string
+		}{
+			{"different secret", "ABCDEFGHJKLMNPQS", vecHostDeviceID, vecMobileDeviceID},
+			{"swapped device IDs", vecPairingSecret, vecMobileDeviceID, vecHostDeviceID},
+		}
+		for _, v := range variants {
+			got, err := host.ComputeSharedSecret(mobile.PublicKeyBase64(), v.pairingSecret, v.hostDeviceID, v.mobileDeviceID)
+			if err != nil {
+				t.Fatalf("%s: ComputeSharedSecret() error: %v", v.name, err)
+			}
+			if got == vecSharedSecret {
+				t.Errorf("%s: secret should differ from the vector", v.name)
+			}
+		}
+	})
+}
+
+func TestGeneratePairingSecret(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 64; i++ {
+		secret, err := GeneratePairingSecret()
+		if err != nil {
+			t.Fatalf("GeneratePairingSecret() error: %v", err)
+		}
+		if len(secret) != PairingSecretLen {
+			t.Fatalf("secret length = %d, want %d", len(secret), PairingSecretLen)
+		}
+		for _, c := range secret {
+			if !strings.ContainsRune(pairingSecretAlphabet, c) {
+				t.Fatalf("secret %q contains %q outside the alphabet", secret, c)
+			}
+		}
+		if seen[secret] {
+			t.Fatalf("duplicate secret %q", secret)
+		}
+		seen[secret] = true
 	}
-	if secret != bobSecret {
-		t.Errorf("alice and bob secrets differ: %s vs %s", secret, bobSecret)
+
+	if len(pairingSecretAlphabet) != 32 {
+		t.Errorf("alphabet length = %d, want 32 (alphabet[b&31] must be unbiased)", len(pairingSecretAlphabet))
 	}
+}
+
+func TestFormatManualCode(t *testing.T) {
+	got := FormatManualCode("ABC234", vecPairingSecret)
+	const want = "ABC234-ABCD-EFGH-JKLM-NPQR"
+	if got != want {
+		t.Errorf("FormatManualCode() = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyPairMAC(t *testing.T) {
+	host := fixedKeypair(t, 0x11)
+	other := fixedKeypair(t, 0x33)
+
+	tests := []struct {
+		name           string
+		pairingSecret  string
+		mobilePub      string
+		hostDeviceID   string
+		mobileDeviceID string
+		pairMac        string
+		wantErr        bool
+	}{
+		{"valid", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, false},
+		{"tampered mobile key", vecPairingSecret, other.PublicKeyBase64(), vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+		{"tampered mobile device ID", vecPairingSecret, vecMobilePub, vecHostDeviceID, "fedcba9876543210fedcba9876543211", vecPairMac, true},
+		{"tampered host device ID", vecPairingSecret, vecMobilePub, "0123456789abcdef0123456789abcdee", vecMobileDeviceID, vecPairMac, true},
+		{"wrong secret", "ABCDEFGHJKLMNPQS", vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+		{"empty secret", "", vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+		{"missing MAC", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, "", true},
+		{"MAC not base64", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, "!!!", true},
+		{"MAC wrong length", vecPairingSecret, vecMobilePub, vecHostDeviceID, vecMobileDeviceID, base64.StdEncoding.EncodeToString(make([]byte, 16)), true},
+		{"mobile key not base64", vecPairingSecret, "!!!", vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+		{"mobile key wrong length", vecPairingSecret, base64.StdEncoding.EncodeToString(make([]byte, 31)), vecHostDeviceID, vecMobileDeviceID, vecPairMac, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := VerifyPairMAC(tt.pairingSecret, host.PublicKey.Bytes(), tt.mobilePub, tt.hostDeviceID, tt.mobileDeviceID, tt.pairMac)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("VerifyPairMAC() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("tampered host key", func(t *testing.T) {
+		err := VerifyPairMAC(vecPairingSecret, other.PublicKey.Bytes(), vecMobilePub, vecHostDeviceID, vecMobileDeviceID, vecPairMac)
+		if err == nil {
+			t.Error("expected error for a different host public key")
+		}
+	})
 }
 
 func TestBuildQRPayload(t *testing.T) {
-	t.Run("produces pipe-delimited format", func(t *testing.T) {
-		payload, err := BuildQRPayload("ABC123", "x25519pubkey==", "device-abc", "http://localhost:8787")
-		if err != nil {
-			t.Fatalf("BuildQRPayload() error: %v", err)
-		}
-		want := "ABC123|x25519pubkey==|device-abc|http://localhost:8787"
-		if payload != want {
-			t.Errorf("payload = %q, want %q", payload, want)
-		}
-	})
-
-	t.Run("omits default server URL", func(t *testing.T) {
-		payload, err := BuildQRPayload("ABC123", "x25519pubkey==", "device-abc", "https://signal.pmux.io")
-		if err != nil {
-			t.Fatalf("BuildQRPayload() error: %v", err)
-		}
-		want := "ABC123|x25519pubkey==|device-abc"
-		if payload != want {
-			t.Errorf("payload = %q, want %q", payload, want)
-		}
-	})
+	tests := []struct {
+		name      string
+		serverURL string
+		want      string
+	}{
+		{"custom server URL", "http://localhost:8787", "ABC123|x25519pubkey==|device-abc|http://localhost:8787|" + vecPairingSecret},
+		{"default server URL is empty", config.DefaultServerURL, "ABC123|x25519pubkey==|device-abc||" + vecPairingSecret},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := BuildQRPayload("ABC123", "x25519pubkey==", "device-abc", tt.serverURL, vecPairingSecret)
+			if err != nil {
+				t.Fatalf("BuildQRPayload() error: %v", err)
+			}
+			if payload != tt.want {
+				t.Errorf("payload = %q, want %q", payload, tt.want)
+			}
+			if n := len(strings.Split(payload, "|")); n != 5 {
+				t.Errorf("payload has %d fields, want 5", n)
+			}
+		})
+	}
 }
 
 func TestPairedDeviceStorage(t *testing.T) {

@@ -60,6 +60,9 @@ type PairCompleteMessage struct {
 	MobileDeviceID        string `json:"mobileDeviceId"`
 	MobileX25519PublicKey string `json:"mobileX25519PublicKey"`
 	MobileName            string `json:"mobileName,omitempty"`
+	// PairMac is the mobile's HMAC over the pairing binding, keyed by the
+	// QR-only pairing secret (see VerifyPairMAC). Empty from outdated apps.
+	PairMac string `json:"pairMac"`
 }
 
 // InitiatePairing calls the server to create a pairing session.

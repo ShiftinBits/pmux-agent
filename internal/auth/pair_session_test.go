@@ -184,7 +184,7 @@ func TestInitiatePairing(t *testing.T) {
 
 func TestPairCompleteMessageDeserialization(t *testing.T) {
 	t.Run("deserializes mobileName", func(t *testing.T) {
-		raw := `{"type":"pair_complete","mobileDeviceId":"dd44ee55ff66aa11bb22cc33dd44ee55","mobileX25519PublicKey":"key==","mobileName":"My iPhone"}`
+		raw := `{"type":"pair_complete","mobileDeviceId":"dd44ee55ff66aa11bb22cc33dd44ee55","mobileX25519PublicKey":"key==","mobileName":"My iPhone","pairMac":"mac=="}`
 		var msg PairCompleteMessage
 		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
 			t.Fatalf("Unmarshal error: %v", err)
@@ -201,6 +201,9 @@ func TestPairCompleteMessageDeserialization(t *testing.T) {
 		if msg.MobileName != "My iPhone" {
 			t.Errorf("MobileName = %q, want %q", msg.MobileName, "My iPhone")
 		}
+		if msg.PairMac != "mac==" {
+			t.Errorf("PairMac = %q, want %q", msg.PairMac, "mac==")
+		}
 	})
 
 	t.Run("handles missing mobileName", func(t *testing.T) {
@@ -214,6 +217,9 @@ func TestPairCompleteMessageDeserialization(t *testing.T) {
 		}
 		if msg.MobileName != "" {
 			t.Errorf("MobileName = %q, want empty string", msg.MobileName)
+		}
+		if msg.PairMac != "" {
+			t.Errorf("PairMac = %q, want empty string", msg.PairMac)
 		}
 	})
 }
@@ -251,6 +257,7 @@ func TestWaitForPairComplete(t *testing.T) {
 				Type:                  "pair_complete",
 				MobileDeviceID:        "bb22cc33dd44ee55ff66aa11bb22cc33",
 				MobileX25519PublicKey: "mobileX25519Key==",
+				PairMac:               "pairMac==",
 			}
 			data, _ := json.Marshal(pairMsg)
 			conn.WriteMessage(websocket.TextMessage, data)
@@ -269,6 +276,9 @@ func TestWaitForPairComplete(t *testing.T) {
 		}
 		if msg.MobileX25519PublicKey != "mobileX25519Key==" {
 			t.Errorf("mobileX25519PublicKey = %q, want %q", msg.MobileX25519PublicKey, "mobileX25519Key==")
+		}
+		if msg.PairMac != "pairMac==" {
+			t.Errorf("pairMac = %q, want %q", msg.PairMac, "pairMac==")
 		}
 	})
 
