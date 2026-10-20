@@ -240,20 +240,14 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	}
 	defer answerPC.Close()
 
+	// Answer the agent's DTLS-bound key-possession challenge so the agent
+	// authenticates this peer, and verify the agent's auth_confirm.
+	mobile := &testMobileAuth{pc: answerPC, secret: testSharedSecret}
+	confirmed := make(chan bool, 1)
 	dcOpened := make(chan *webrtc.DataChannel, 1)
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
-		// Answer the agent's key-possession challenge (SB-992) so the agent
-		// authenticates this peer and starts processing requests.
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			decoded, err := protocol.Decode(msg.Data)
-			if err != nil {
-				return
-			}
-			if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
-				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
-				data, _ := protocol.Encode(resp)
-				dc.Send(data)
-			}
+			mobile.handle(t, dc, msg.Data, confirmed)
 		})
 		dc.OnOpen(func() {
 			dcOpened <- dc
@@ -341,9 +335,27 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 			t.Errorf("DataChannel label = %q, want %q", dc.Label(), DataChannelLabel)
 		}
 
-		// Allow the challenge/response handshake to complete before sending a
-		// request — pre-auth requests are dropped by the agent.
-		time.Sleep(300 * time.Millisecond)
+		// Wait for the mutual handshake to complete before sending a request —
+		// pre-auth requests are dropped by the agent.
+		select {
+		case ok := <-confirmed:
+			if !ok {
+				t.Fatal("auth_confirm from the agent did not verify on the mobile")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no auth_confirm received from the agent")
+		}
+
+		peer := getPeer(pm, "mobile-dc")
+		if peer == nil {
+			t.Fatal("peer should exist after the handshake")
+		}
+		peer.mu.Lock()
+		authenticated, authConfirmed := peer.authenticated, peer.authConfirmed
+		peer.mu.Unlock()
+		if !authenticated || !authConfirmed {
+			t.Fatalf("after handshake: authenticated = %v, authConfirmed = %v; want both true", authenticated, authConfirmed)
+		}
 
 		// Send a ping message over the DataChannel
 		pingMsg := &protocol.PingRequest{Type: "ping"}
@@ -1536,18 +1548,15 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 	}
 	defer answerPC.Close()
 
+	mobile := &testMobileAuth{pc: answerPC, secret: testSharedSecret}
+	confirmed := make(chan bool, 1)
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			// Answer the key-possession challenge (SB-992) and keep it out of the
+			// Complete the key-possession handshake and keep it out of the
 			// received stream; raw SendRaw payloads aren't valid protocol messages
 			// so they fall through to the channel.
-			if decoded, err := protocol.Decode(msg.Data); err == nil {
-				if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
-					resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
-					out, _ := protocol.Encode(resp)
-					dc.Send(out)
-					return
-				}
+			if mobile.handle(t, dc, msg.Data, confirmed) {
+				return
 			}
 			data := make([]byte, len(msg.Data))
 			copy(data, msg.Data)
@@ -1643,6 +1652,16 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 	}
 	if dc == nil {
 		t.Fatal("DataChannel not established within timeout")
+	}
+
+	// Wait for the mutual handshake so auth_confirm is out of the way.
+	select {
+	case ok := <-confirmed:
+		if !ok {
+			t.Fatal("auth_confirm from the agent did not verify on the mobile")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no auth_confirm received from the agent")
 	}
 
 	// Send data via SendRaw — should succeed immediately (buffer is empty)

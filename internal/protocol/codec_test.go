@@ -185,7 +185,11 @@ func TestRoundTripCreateSession(t *testing.T) {
 }
 
 func TestRoundTripAuthResponse(t *testing.T) {
-	msg := &AuthResponseRequest{Type: "auth_response", Mac: "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}
+	msg := &AuthResponseRequest{
+		Type:  "auth_response",
+		Mac:   "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
+		Nonce: "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw=",
+	}
 	data, err := Encode(msg)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -200,6 +204,9 @@ func TestRoundTripAuthResponse(t *testing.T) {
 	}
 	if got.Mac != msg.Mac {
 		t.Errorf("mac = %q, want %q", got.Mac, msg.Mac)
+	}
+	if got.Nonce != msg.Nonce {
+		t.Errorf("nonce = %q, want %q", got.Nonce, msg.Nonce)
 	}
 }
 
@@ -222,9 +229,59 @@ func TestRoundTripAuthChallenge(t *testing.T) {
 	}
 }
 
-func TestAuthResponseValidateRejectsEmptyMac(t *testing.T) {
-	if err := (&AuthResponseRequest{Type: "auth_response", Mac: ""}).Validate(); err == nil {
-		t.Error("expected validation error for empty mac")
+func TestRoundTripAuthConfirm(t *testing.T) {
+	msg := &AuthConfirmEvent{Type: "auth_confirm", Mac: "7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e3t7e0="}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*AuthConfirmEvent)
+	if !ok {
+		t.Fatalf("expected *AuthConfirmEvent, got %T", decoded)
+	}
+	if got.Mac != msg.Mac {
+		t.Errorf("mac = %q, want %q", got.Mac, msg.Mac)
+	}
+}
+
+func TestAuthResponseValidate(t *testing.T) {
+	const validB64 = "zMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw="
+	tooLong := strings.Repeat("A", MaxAuthBlobLength+1)
+	tests := []struct {
+		name    string
+		mac     string
+		nonce   string
+		wantErr bool
+	}{
+		{name: "valid", mac: validB64, nonce: validB64, wantErr: false},
+		{name: "empty mac", mac: "", nonce: validB64, wantErr: true},
+		{name: "missing nonce", mac: validB64, nonce: "", wantErr: true},
+		{name: "mac too long", mac: tooLong, nonce: validB64, wantErr: true},
+		{name: "nonce too long", mac: validB64, nonce: tooLong, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&AuthResponseRequest{Type: "auth_response", Mac: tt.mac, Nonce: tt.nonce}).Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestDecodeRejectsAuthResponseWithoutNonce asserts a v1-shaped auth_response
+// (mac only) is rejected at decode time, before it reaches the handshake gate.
+func TestDecodeRejectsAuthResponseWithoutNonce(t *testing.T) {
+	data, err := Encode(&AuthResponseRequest{Type: "auth_response", Mac: "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := Decode(data); err == nil {
+		t.Fatal("expected decode error for auth_response without nonce")
 	}
 }
 
@@ -600,6 +657,7 @@ func TestIsEvent(t *testing.T) {
 		&PongEvent{Type: "pong"},
 		&SessionCreatedEvent{Type: "session_created"},
 		&AuthChallengeEvent{Type: "auth_challenge"},
+		&AuthConfirmEvent{Type: "auth_confirm"},
 	}
 	for _, msg := range events {
 		if !IsEvent(msg) {
@@ -682,6 +740,8 @@ type fixtureJSON struct {
 	Code     string          `json:"code,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	Latency  *int            `json:"latency,omitempty"`
+	Mac      string          `json:"mac,omitempty"`
+	Nonce    string          `json:"nonce,omitempty"`
 }
 
 func TestCrossLanguageFixtures(t *testing.T) {
@@ -828,6 +888,24 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 		// Verify session structure was decoded
 		if m.Session.ID == "" {
 			t.Error("session_created: session.id is empty")
+		}
+
+	case *AuthChallengeEvent:
+		if m.Nonce != expected.Nonce {
+			t.Errorf("nonce = %q, want %q", m.Nonce, expected.Nonce)
+		}
+
+	case *AuthResponseRequest:
+		if m.Mac != expected.Mac {
+			t.Errorf("mac = %q, want %q", m.Mac, expected.Mac)
+		}
+		if m.Nonce != expected.Nonce {
+			t.Errorf("nonce = %q, want %q", m.Nonce, expected.Nonce)
+		}
+
+	case *AuthConfirmEvent:
+		if m.Mac != expected.Mac {
+			t.Errorf("mac = %q, want %q", m.Mac, expected.Mac)
 		}
 	}
 }

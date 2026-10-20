@@ -83,6 +83,8 @@ func Decode(data []byte) (Message, error) {
 		msg = &SessionCreatedEvent{}
 	case "auth_challenge":
 		msg = &AuthChallengeEvent{}
+	case "auth_confirm":
+		msg = &AuthConfirmEvent{}
 	case "error":
 		msg = &ErrorEvent{}
 	case "pong":
@@ -128,7 +130,7 @@ func IsEvent(msg Message) bool {
 	switch msg.(type) {
 	case *SessionsEvent, *OutputEvent, *AttachedEvent, *DetachedEvent,
 		*SessionEndedEvent, *PaneClosedEvent, *SessionCreatedEvent, *ErrorEvent, *PongEvent,
-		*AuthChallengeEvent:
+		*AuthChallengeEvent, *AuthConfirmEvent:
 		return true
 	}
 	return false
