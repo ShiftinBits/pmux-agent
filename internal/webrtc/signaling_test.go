@@ -821,6 +821,33 @@ func TestReconnect_IncreasesBackoff(t *testing.T) {
 	}
 }
 
+func TestJitter(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+	}{
+		{"zero", 0},
+		{"initial", initialBackoff},
+		{"max", maxBackoff},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upper := tt.d + tt.d/2
+			seen := make(map[time.Duration]bool)
+			for range 1000 {
+				got := jitter(tt.d)
+				if got < tt.d || got > upper {
+					t.Fatalf("jitter(%v) = %v, want in [%v, %v]", tt.d, got, tt.d, upper)
+				}
+				seen[got] = true
+			}
+			if tt.d > 0 && len(seen) == 1 {
+				t.Errorf("jitter(%v) returned the same value 1000 times; want randomized", tt.d)
+			}
+		})
+	}
+}
+
 func TestSignalingClient_SendWritesJSON(t *testing.T) {
 	id, logger := testSetup(t)
 
