@@ -1155,10 +1155,82 @@ func TestPeerManager_CloseAllCancelsDisconnectTimers(t *testing.T) {
 
 	pm.mu.Lock()
 	timerCountAfter := len(pm.disconnectTimers)
+	watchdogCountAfter := len(pm.iceRestartTimers)
 	pm.mu.Unlock()
 	if timerCountAfter != 0 {
 		t.Errorf("expected 0 disconnect timers after CloseAll, got %d", timerCountAfter)
 	}
+	if watchdogCountAfter != 0 {
+		t.Errorf("expected 0 ICE restart watchdogs after CloseAll, got %d", watchdogCountAfter)
+	}
+}
+
+// SB-1008: the ICE-restart watchdog must live in its own map. A Disconnected
+// transition during a restart must not be mistaken for a running grace timer,
+// and recovery must cancel the watchdog.
+func TestPeerManager_DisconnectDuringICERestartKeepsWatchdog(t *testing.T) {
+	sender := &mockSender{}
+	logger := testLogger()
+
+	api := fastAPI(t)
+	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.API = api
+
+	const id = "mobile-icewd"
+	pm.SetAllowedDeviceID(id)
+	pm.SharedSecretFn = testSharedSecretFn
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: id})
+	time.Sleep(500 * time.Millisecond)
+
+	offers := sender.messagesOfType("sdp_offer")
+	if len(offers) == 0 {
+		t.Fatal("no initial SDP offer sent")
+	}
+
+	// Complete the SDP exchange so an ICE restart offer can be created.
+	answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create answer PC: %v", err)
+	}
+	defer answerPC.Close()
+	if err := answerPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+		t.Fatalf("set remote desc: %v", err)
+	}
+	answer, err := answerPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	if err := answerPC.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set local desc: %v", err)
+	}
+	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, SDP: answer.SDP})
+	time.Sleep(200 * time.Millisecond)
+
+	pm.attemptICERestart(id)
+
+	timers := func() (grace, watchdog bool) {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+		_, grace = pm.disconnectTimers[id]
+		_, watchdog = pm.iceRestartTimers[id]
+		return
+	}
+
+	if grace, watchdog := timers(); grace || !watchdog {
+		t.Fatalf("after ICE restart: grace=%v watchdog=%v, want grace=false watchdog=true", grace, watchdog)
+	}
+
+	pm.handlePeerStateChange(getPeer(pm, id), webrtc.PeerConnectionStateDisconnected)
+	if grace, watchdog := timers(); grace || !watchdog {
+		t.Errorf("after Disconnected during restart: grace=%v watchdog=%v, want grace=false watchdog=true", grace, watchdog)
+	}
+
+	pm.handlePeerStateChange(getPeer(pm, id), webrtc.PeerConnectionStateConnected)
+	if _, watchdog := timers(); watchdog {
+		t.Error("expected ICE restart watchdog to be cancelled on Connected")
+	}
+
+	pm.CloseAll()
 }
 
 func TestPeerManager_PeerStates(t *testing.T) {
