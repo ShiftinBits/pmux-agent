@@ -222,6 +222,51 @@ func TestRoundTripAuthChallenge(t *testing.T) {
 	}
 }
 
+func TestRoundTripAuthProof(t *testing.T) {
+	msg := &AuthProofEvent{Type: "auth_proof", Mac: "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="}
+	data, err := Encode(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := decoded.(*AuthProofEvent)
+	if !ok {
+		t.Fatalf("expected *AuthProofEvent, got %T", decoded)
+	}
+	if got.Mac != msg.Mac {
+		t.Errorf("mac = %q, want %q", got.Mac, msg.Mac)
+	}
+	if got.MessageType() != "auth_proof" {
+		t.Errorf("MessageType() = %q, want auth_proof", got.MessageType())
+	}
+}
+
+func TestAuthProofClassification(t *testing.T) {
+	tests := []struct {
+		name        string
+		msg         Message
+		wantEvent   bool
+		wantRequest bool
+	}{
+		{"auth_proof", &AuthProofEvent{Type: "auth_proof"}, true, false},
+		{"auth_challenge", &AuthChallengeEvent{Type: "auth_challenge"}, true, false},
+		{"auth_response", &AuthResponseRequest{Type: "auth_response"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsEvent(tt.msg); got != tt.wantEvent {
+				t.Errorf("IsEvent = %v, want %v", got, tt.wantEvent)
+			}
+			if got := IsRequest(tt.msg); got != tt.wantRequest {
+				t.Errorf("IsRequest = %v, want %v", got, tt.wantRequest)
+			}
+		})
+	}
+}
+
 func TestAuthResponseValidateRejectsEmptyMac(t *testing.T) {
 	if err := (&AuthResponseRequest{Type: "auth_response", Mac: ""}).Validate(); err == nil {
 		t.Error("expected validation error for empty mac")
@@ -600,6 +645,7 @@ func TestIsEvent(t *testing.T) {
 		&PongEvent{Type: "pong"},
 		&SessionCreatedEvent{Type: "session_created"},
 		&AuthChallengeEvent{Type: "auth_challenge"},
+		&AuthProofEvent{Type: "auth_proof"},
 	}
 	for _, msg := range events {
 		if !IsEvent(msg) {
@@ -682,6 +728,7 @@ type fixtureJSON struct {
 	Code     string          `json:"code,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	Latency  *int            `json:"latency,omitempty"`
+	Mac      string          `json:"mac,omitempty"`
 }
 
 func TestCrossLanguageFixtures(t *testing.T) {
@@ -806,6 +853,11 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 	case *PaneClosedEvent:
 		if m.PaneID != expected.PaneID {
 			t.Errorf("paneId = %q, want %q", m.PaneID, expected.PaneID)
+		}
+
+	case *AuthProofEvent:
+		if m.Mac != expected.Mac {
+			t.Errorf("mac = %q, want %q", m.Mac, expected.Mac)
 		}
 
 	case *ErrorEvent:

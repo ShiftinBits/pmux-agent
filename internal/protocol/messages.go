@@ -178,6 +178,26 @@ type AuthChallengeEvent struct {
 
 func (m *AuthChallengeEvent) MessageType() string { return "auth_challenge" }
 
+// AuthProofEvent is the host-to-mobile proof sent right after the host verifies
+// the mobile's AuthResponseRequest. The mobile must not treat the connection as
+// usable until it verifies this proof.
+//
+// Mac = base64(HMAC-SHA256(sharedSecret, input)), where input is the plain byte
+// concatenation (no separators, no length prefixes) of, in this order:
+//  1. label: the ASCII bytes of "pmux-host-proof-v1"
+//  2. nonce: the base64-decoded bytes of AuthChallengeEvent.Nonce
+//  3. responseMAC: the base64-decoded 32 bytes of AuthResponseRequest.Mac
+//  4. offerFP: the 32 raw bytes of the sha-256 DTLS fingerprint from the SDP offer
+//  5. answerFP: the 32 raw bytes of the sha-256 DTLS fingerprint from the SDP answer
+//
+// Fingerprints are the raw digest bytes, not the colon-separated hex text.
+type AuthProofEvent struct {
+	Type string `msgpack:"type"`
+	Mac  string `msgpack:"mac"` // base64-encoded HMAC-SHA256 host proof
+}
+
+func (m *AuthProofEvent) MessageType() string { return "auth_proof" }
+
 // --- tmux Data Types ---
 
 // TmuxSession represents a tmux session with its window tree.
