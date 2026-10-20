@@ -37,6 +37,18 @@ func (f *TitleFilter) Reset() {
 	f.titleBuf = f.titleBuf[:0]
 }
 
+// appendTitle buffers b as title content. If the buffer then exceeds
+// maxTitleLen, the safety valve flushes it to the output and returns the
+// filter to passthrough, overriding any state set by the caller.
+func (f *TitleFilter) appendTitle(b byte) {
+	f.titleBuf = append(f.titleBuf, b)
+	if len(f.titleBuf) > maxTitleLen {
+		f.out = append(f.out, f.titleBuf...)
+		f.titleBuf = f.titleBuf[:0]
+		f.state = tfPassthrough
+	}
+}
+
 // Filter processes a chunk of terminal output, stripping ESC k ... ESC \
 // title sequences. Returns filtered data.
 //
@@ -85,16 +97,10 @@ func (f *TitleFilter) Filter(data []byte) []byte {
 		case tfInTitle:
 			b := data[i]
 			i++
-			f.titleBuf = append(f.titleBuf, b)
 			if b == 0x1b {
 				f.state = tfSawEscInTitle
 			}
-			// Safety valve
-			if len(f.titleBuf) > maxTitleLen {
-				f.out = append(f.out, f.titleBuf...)
-				f.titleBuf = f.titleBuf[:0]
-				f.state = tfPassthrough
-			}
+			f.appendTitle(b)
 
 		case tfSawEscInTitle:
 			b := data[i]
@@ -106,18 +112,11 @@ func (f *TitleFilter) Filter(data []byte) []byte {
 			} else if b == 0x1b {
 				// Another ESC — the previous ESC was content in the title,
 				// this new ESC might be the start of ST.
-				f.titleBuf = append(f.titleBuf, b)
-				// stay in tfSawEscInTitle
+				f.appendTitle(b) // stays in tfSawEscInTitle unless the cap is hit
 			} else {
 				// Not ST — keep buffering
-				f.titleBuf = append(f.titleBuf, b)
 				f.state = tfInTitle
-				// Safety valve
-				if len(f.titleBuf) > maxTitleLen {
-					f.out = append(f.out, f.titleBuf...)
-					f.titleBuf = f.titleBuf[:0]
-					f.state = tfPassthrough
-				}
+				f.appendTitle(b)
 			}
 		}
 	}
