@@ -31,7 +31,7 @@ func TestConnectDisconnect_50Cycles(t *testing.T) {
 
 	tc := tmux.NewClient(connectSocket)
 	catcher := &messageCatcher{}
-	h := agent.NewHandler(tc, catcher.Send, newTestLogger())
+	h := agent.NewHandler(tc, catcher.Send, newTestLogger(), "test", "")
 
 	// Create an anchor session so the tmux server stays alive throughout
 	_, err := tc.CreateSession("stress-anchor", "")
