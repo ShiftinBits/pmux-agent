@@ -350,9 +350,17 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 		if peer == nil {
 			t.Fatal("peer should exist after the handshake")
 		}
-		peer.mu.Lock()
-		authenticated, authConfirmed := peer.authenticated, peer.authConfirmed
-		peer.mu.Unlock()
+		// The agent sets authConfirmed after its send returns, which can race the
+		// mobile receiving auth_confirm, so poll briefly.
+		var authenticated, authConfirmed bool
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			peer.mu.Lock()
+			authenticated, authConfirmed = peer.authenticated, peer.authConfirmed
+			peer.mu.Unlock()
+			if authenticated && authConfirmed {
+				break
+			}
+		}
 		if !authenticated || !authConfirmed {
 			t.Fatalf("after handshake: authenticated = %v, authConfirmed = %v; want both true", authenticated, authConfirmed)
 		}
