@@ -1,7 +1,10 @@
 package webrtc
 
 import (
+	"crypto/hmac"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +61,28 @@ var testSharedSecret = func() []byte {
 }()
 
 func testSharedSecretFn(string) ([]byte, error) { return testSharedSecret, nil }
+
+// verifyHostProof checks an auth_proof MAC the way the mobile does, using the
+// DTLS fingerprints from the answerer's own descriptions (offer = remote,
+// answer = local) and the raw nonce and response MAC from its handshake.
+func verifyHostProof(answerPC *webrtc.PeerConnection, nonce, responseMAC []byte, macB64 string) error {
+	offerFP, err := sdpSHA256Fingerprint(answerPC.RemoteDescription().SDP)
+	if err != nil {
+		return fmt.Errorf("parse offer fingerprint: %w", err)
+	}
+	answerFP, err := sdpSHA256Fingerprint(answerPC.LocalDescription().SDP)
+	if err != nil {
+		return fmt.Errorf("parse answer fingerprint: %w", err)
+	}
+	got, err := base64.StdEncoding.DecodeString(macB64)
+	if err != nil {
+		return fmt.Errorf("decode auth_proof MAC: %w", err)
+	}
+	if !hmac.Equal(got, hostProofMAC(testSharedSecret, nonce, responseMAC, offerFP, answerFP)) {
+		return fmt.Errorf("auth_proof MAC mismatch")
+	}
+	return nil
+}
 
 // getPeer retrieves a peer from the PeerManager by device ID (test helper).
 func getPeer(pm *PeerManager, deviceID string) *Peer {
@@ -240,19 +265,37 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	}
 	defer answerPC.Close()
 
+	// Host proof bookkeeping: every auth_proof received and whether it verified.
+	var proofMu sync.Mutex
+	var proofCount int
+	var proofErr error
+	var authNonce, authRespMAC []byte
+
 	dcOpened := make(chan *webrtc.DataChannel, 1)
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
-		// Answer the agent's key-possession challenge (SB-992) so the agent
-		// authenticates this peer and starts processing requests.
+		// Answer the agent's key-possession challenge so the agent
+		// authenticates this peer and starts processing requests, then verify
+		// the host proof it sends back, as the mobile does.
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			decoded, err := protocol.Decode(msg.Data)
 			if err != nil {
 				return
 			}
-			if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
-				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
+			switch m := decoded.(type) {
+			case *protocol.AuthChallengeEvent:
+				respB64 := authResponseForChallenge(testSharedSecret, m.Nonce)
+				proofMu.Lock()
+				authNonce, _ = base64.StdEncoding.DecodeString(m.Nonce)
+				authRespMAC, _ = base64.StdEncoding.DecodeString(respB64)
+				proofMu.Unlock()
+				resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: respB64}
 				data, _ := protocol.Encode(resp)
 				dc.Send(data)
+			case *protocol.AuthProofEvent:
+				proofMu.Lock()
+				defer proofMu.Unlock()
+				proofCount++
+				proofErr = verifyHostProof(answerPC, authNonce, authRespMAC, m.Mac)
 			}
 		})
 		dc.OnOpen(func() {
@@ -363,6 +406,15 @@ func TestPeerManager_DataChannelProtocol(t *testing.T) {
 		if !found {
 			t.Error("handler did not receive ping message")
 		}
+
+		proofMu.Lock()
+		if proofCount != 1 {
+			t.Errorf("received %d auth_proof messages, want exactly 1", proofCount)
+		}
+		if proofErr != nil {
+			t.Errorf("auth_proof did not verify: %v", proofErr)
+		}
+		proofMu.Unlock()
 
 	case <-time.After(15 * time.Second):
 		t.Fatal("DataChannel did not open within timeout")
@@ -1538,14 +1590,17 @@ func TestPeer_SendRaw_SucceedsWithLowBuffer(t *testing.T) {
 
 	answerPC.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			// Answer the key-possession challenge (SB-992) and keep it out of the
-			// received stream; raw SendRaw payloads aren't valid protocol messages
-			// so they fall through to the channel.
+			// Answer the key-possession challenge and keep it and the
+			// host's auth_proof out of the received stream; raw SendRaw payloads
+			// aren't valid protocol messages so they fall through to the channel.
 			if decoded, err := protocol.Decode(msg.Data); err == nil {
 				if ch, ok := decoded.(*protocol.AuthChallengeEvent); ok {
 					resp := &protocol.AuthResponseRequest{Type: "auth_response", Mac: authResponseForChallenge(testSharedSecret, ch.Nonce)}
 					out, _ := protocol.Encode(resp)
 					dc.Send(out)
+					return
+				}
+				if _, ok := decoded.(*protocol.AuthProofEvent); ok {
 					return
 				}
 			}
