@@ -52,9 +52,13 @@ func TestInitiatePairing(t *testing.T) {
 				X25519PubKey     string `json:"x25519PublicKey"`
 				Nonce            string `json:"nonce"`
 				Signature        string `json:"signature"`
+				PairConfirm      bool   `json:"pairConfirm"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode request body: %v", err)
+			}
+			if !body.PairConfirm {
+				t.Error("pairConfirm = false, want true")
 			}
 			if body.DeviceID != id.DeviceID {
 				t.Errorf("deviceId = %q, want %q", body.DeviceID, id.DeviceID)
@@ -277,10 +281,12 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
+		sess, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err != nil {
 			t.Fatalf("WaitForPairComplete() error: %v", err)
 		}
+		defer sess.Close()
+		msg := sess.Message
 		if msg.MobileDeviceID != "bb22cc33dd44ee55ff66aa11bb22cc33" {
 			t.Errorf("mobileDeviceId = %q, want %q", msg.MobileDeviceID, "bb22cc33dd44ee55ff66aa11bb22cc33")
 		}
@@ -316,10 +322,12 @@ func TestWaitForPairComplete(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		msg, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
+		sess, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
 		if err != nil {
 			t.Fatalf("WaitForPairComplete() error: %v", err)
 		}
+		defer sess.Close()
+		msg := sess.Message
 		if msg.MobileDeviceID != "cc33dd44ee55ff66aa11bb22cc33dd44" {
 			t.Errorf("mobileDeviceId = %q, want %q", msg.MobileDeviceID, "cc33dd44ee55ff66aa11bb22cc33dd44")
 		}
@@ -455,5 +463,141 @@ func TestWaitForPairComplete(t *testing.T) {
 		if strings.ContainsAny(err.Error(), "\x1b\x07") {
 			t.Errorf("error %q contains control characters", err.Error())
 		}
+	})
+}
+
+func TestPairSession(t *testing.T) {
+	const mobileID = "bb22cc33dd44ee55ff66aa11bb22cc33"
+
+	// open runs a server that delivers pair_complete, forwards the host's next
+	// frame on decisions, hands the connection to respond, and holds it until
+	// the client hangs up.
+	open := func(t *testing.T, respond func(*websocket.Conn)) (*PairSession, <-chan []byte) {
+		t.Helper()
+		decisions := make(chan []byte, 1)
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.ReadMessage() // auth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_ok"}`))
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pair_complete","mobileDeviceId":"`+mobileID+`","mobileX25519PublicKey":"key=="}`))
+			_, decision, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			decisions <- decision
+			respond(conn)
+			conn.ReadMessage() // hold the connection until the client hangs up
+		}))
+		t.Cleanup(server.Close)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sess, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
+		if err != nil {
+			t.Fatalf("WaitForPairComplete() error: %v", err)
+		}
+		t.Cleanup(func() { sess.Close() })
+		return sess, decisions
+	}
+
+	// assertDecision checks the host's frame is exactly {type, mobileDeviceId}.
+	assertDecision := func(t *testing.T, decisions <-chan []byte, wantType string) {
+		t.Helper()
+		var data []byte
+		select {
+		case data = <-decisions:
+		case <-time.After(5 * time.Second):
+			t.Fatal("server received no decision frame")
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("decision frame %q is not JSON: %v", data, err)
+		}
+		want := map[string]any{"type": wantType, "mobileDeviceId": mobileID}
+		if len(got) != len(want) || got["type"] != want["type"] || got["mobileDeviceId"] != want["mobileDeviceId"] {
+			t.Errorf("decision frame = %s, want %v", data, want)
+		}
+	}
+
+	send := func(frames ...string) func(*websocket.Conn) {
+		return func(conn *websocket.Conn) {
+			for _, f := range frames {
+				conn.WriteMessage(websocket.TextMessage, []byte(f))
+			}
+		}
+	}
+
+	acceptTests := []struct {
+		name    string
+		respond func(*websocket.Conn)
+		timeout time.Duration
+		wantErr string // "" means Accept succeeds
+	}{
+		{
+			name:    "confirmed",
+			respond: send(`{"type":"pair_result","mobileDeviceId":"` + mobileID + `","ok":true}`),
+		},
+		{
+			name: "skips unrelated frames",
+			respond: send(
+				`{"type":"presence_ack"}`,
+				`not json`,
+				`{"type":"pair_result","mobileDeviceId":"cc33dd44ee55ff66aa11bb22cc33dd44","ok":false}`,
+				`{"type":"pair_result","mobileDeviceId":"`+mobileID+`","ok":true}`,
+			),
+		},
+		{
+			name:    "not committed",
+			respond: send(`{"type":"pair_result","mobileDeviceId":"` + mobileID + `","ok":false}`),
+			wantErr: "server did not confirm the pairing (the mobile may have timed out)",
+		},
+		{
+			name:    "server without confirmed pairing",
+			respond: send(`{"type":"error","error":"Unknown message type: pair_accept\u001b]0;pwn\u0007"}`),
+			wantErr: "server does not support confirmed pairing; it may need updating: Unknown message type: pair_accept",
+		},
+		{
+			name:    "no answer",
+			respond: func(*websocket.Conn) {},
+			timeout: 200 * time.Millisecond,
+			wantErr: "wait for pair_result",
+		},
+	}
+	for _, tt := range acceptTests {
+		t.Run("Accept "+tt.name, func(t *testing.T) {
+			sess, decisions := open(t, tt.respond)
+			timeout := tt.timeout
+			if timeout == 0 {
+				timeout = 5 * time.Second
+			}
+
+			err := sess.Accept(timeout)
+			assertDecision(t, decisions, "pair_accept")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Accept() error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Accept() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if strings.ContainsAny(err.Error(), "\x1b\x07") {
+				t.Errorf("error %q contains control characters", err.Error())
+			}
+		})
+	}
+
+	t.Run("Reject", func(t *testing.T) {
+		sess, decisions := open(t, func(*websocket.Conn) {})
+		if err := sess.Reject(); err != nil {
+			t.Fatalf("Reject() error: %v", err)
+		}
+		assertDecision(t, decisions, "pair_reject")
 	})
 }

@@ -104,10 +104,8 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 			fmt.Fprintln(w, "Pairing cancelled.")
 			return nil
 		}
-
-		if err := auth.RemovePairedDevice(paths.PairedDevices, existingDevice.DeviceID, store); err != nil {
-			return fmt.Errorf("Failed to remove paired device: %w", err)
-		}
+		// The old device is removed only once the server confirms the new
+		// pairing, so a failed or rejected re-pair leaves it in place.
 	}
 
 	// Generate X25519 ephemeral keypair for key exchange
@@ -187,9 +185,19 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	ctx, cancel := context.WithTimeout(context.Background(), auth.PairTimeout)
 	defer cancel()
 
-	pairComplete, err := auth.WaitForPairComplete(ctx, apiBaseURL, jwt, hmacSecret)
+	sess, err := auth.WaitForPairComplete(ctx, apiBaseURL, jwt, hmacSecret)
 	if err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
+	}
+	defer sess.Close()
+	pairComplete := sess.Message
+
+	// The server holds the pairing until we answer, so reject anything we
+	// can't use and nothing is committed on either side.
+	reject := func() {
+		if err := sess.Reject(); err != nil {
+			fmt.Fprintf(w, "warning: failed to reject pairing on server: %s\n", auth.SanitizeDisplayString(err.Error()))
+		}
 	}
 
 	// Verify the mobile proved knowledge of the QR-only secret before using
@@ -200,11 +208,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 		pairComplete.PairMac,
 	); err != nil {
-		// The server committed the pairing before we could check the MAC.
-		// Remove it so it doesn't point at a mobile we never stored.
-		if delErr := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); delErr != nil {
-			fmt.Fprintf(w, "warning: failed to remove rejected pairing from server: %s\n", auth.SanitizeDisplayString(delErr.Error()))
-		}
+		reject()
 		return fmt.Errorf("%w: %w", errPairMACRejected, err)
 	}
 
@@ -216,12 +220,27 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 	)
 	if err != nil {
+		reject()
 		return fmt.Errorf("key exchange failed: %w", err)
 	}
 
-	// Store paired device
 	if err := paths.EnsureDirs(); err != nil {
+		reject()
 		return fmt.Errorf("%w", err)
+	}
+
+	// Persist nothing until the server confirms it committed the pairing.
+	if err := sess.Accept(auth.PairAcceptTimeout); err != nil {
+		return fmt.Errorf("pairing failed: %w", err)
+	}
+
+	// ponytail: a local store failure after the server committed leaves a
+	// server-only pairing; the error tells the user to pair again, which
+	// replaces it.
+	if existingDevice != nil {
+		if err := auth.RemovePairedDevice(paths.PairedDevices, existingDevice.DeviceID, store); err != nil {
+			return fmt.Errorf("failed to remove previously paired device (run 'pmux pair' again): %w", err)
+		}
 	}
 
 	mobileName := auth.TruncateMobileName(pairComplete.MobileName)
@@ -232,7 +251,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		PairedAt:     time.Now(),
 	}, store)
 	if err != nil {
-		return fmt.Errorf("failed to save paired device: %w", err)
+		return fmt.Errorf("failed to save paired device (run 'pmux pair' again): %w", err)
 	}
 
 	displayName := mobileName

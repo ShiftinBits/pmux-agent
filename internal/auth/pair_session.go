@@ -88,6 +88,9 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 		Name             string `json:"name,omitempty"`
 		Nonce            string `json:"nonce"`
 		Signature        string `json:"signature"`
+		// PairConfirm asks the server to hold the pairing until this host
+		// answers pair_complete with pair_accept or pair_reject.
+		PairConfirm bool `json:"pairConfirm"`
 	}{
 		DeviceID:         id.DeviceID,
 		Ed25519PublicKey: id.Ed25519PublicKeyBase64(),
@@ -95,6 +98,7 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 		Name:             name,
 		Nonce:            nonce,
 		Signature:        signature,
+		PairConfirm:      true,
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -141,10 +145,104 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 	return &result, nil
 }
 
+// pairDecisionMessage is the host's pair_accept or pair_reject answer to
+// pair_complete.
+type pairDecisionMessage struct {
+	Type           string `json:"type"`
+	MobileDeviceID string `json:"mobileDeviceId"`
+}
+
+// pairResultMessage is the server's confirmation of a pair_accept: OK is true
+// only once the server has committed the pairing.
+type pairResultMessage struct {
+	Type           string `json:"type"`
+	MobileDeviceID string `json:"mobileDeviceId"`
+	OK             bool   `json:"ok"`
+	Error          string `json:"error,omitempty"`
+}
+
+// pairWriteTimeout bounds each write on the pairing WebSocket.
+const pairWriteTimeout = 5 * time.Second
+
+// PairAcceptTimeout is how long Accept waits for the server's pair_result.
+const PairAcceptTimeout = 10 * time.Second
+
+// PairSession is an open pairing WebSocket on which pair_complete has been
+// received. The server holds the pairing until the host answers with Accept
+// or Reject. Callers must Close it.
+type PairSession struct {
+	Message *PairCompleteMessage
+	conn    *websocket.Conn
+}
+
+// Reject tells the server not to commit the pairing.
+func (s *PairSession) Reject() error {
+	return s.sendDecision("pair_reject")
+}
+
+// Accept tells the server to commit the pairing and waits up to timeout for
+// its pair_result. It returns nil only if the server confirmed the commit.
+func (s *PairSession) Accept(timeout time.Duration) error {
+	if err := s.sendDecision("pair_accept"); err != nil {
+		return err
+	}
+
+	s.conn.SetReadDeadline(time.Now().Add(timeout))
+	defer s.conn.SetReadDeadline(time.Time{})
+	for {
+		_, data, err := s.conn.ReadMessage()
+		if err != nil {
+			// Close errors carry the server's close-reason text; sanitize it.
+			return fmt.Errorf("wait for pair_result: %s", SanitizeDisplayString(err.Error()))
+		}
+
+		var msg pairResultMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue // skip malformed messages
+		}
+		switch msg.Type {
+		case "pair_result":
+			if msg.MobileDeviceID != s.Message.MobileDeviceID {
+				continue
+			}
+			if !msg.OK {
+				return errors.New("server did not confirm the pairing (the mobile may have timed out)")
+			}
+			return nil
+		case "error":
+			// A server without confirmed pairing answers pair_accept as an
+			// unknown message type.
+			return fmt.Errorf("server does not support confirmed pairing; it may need updating: %s", SanitizeDisplayString(msg.Error))
+		}
+	}
+}
+
+// Close closes the pairing WebSocket.
+func (s *PairSession) Close() error {
+	s.conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(pairWriteTimeout))
+	return s.conn.Close()
+}
+
+func (s *PairSession) sendDecision(decision string) error {
+	data, err := json.Marshal(pairDecisionMessage{Type: decision, MobileDeviceID: s.Message.MobileDeviceID})
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", decision, err)
+	}
+	s.conn.SetWriteDeadline(time.Now().Add(pairWriteTimeout))
+	defer s.conn.SetWriteDeadline(time.Time{})
+	if err := s.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		return fmt.Errorf("send %s: %w", decision, err)
+	}
+	return nil
+}
+
 // WaitForPairComplete connects to the server WebSocket, authenticates, and waits
-// for the pair_complete message. Returns the mobile's X25519 public key and device ID.
+// for the pair_complete message. On success the connection stays open in the
+// returned PairSession so the host can answer it; every error closes it.
 // The context can be used for timeout/cancellation.
-func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmacSecret string) (*PairCompleteMessage, error) {
+func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmacSecret string) (*PairSession, error) {
 	// Convert HTTP URL to WebSocket URL
 	wsURL := strings.TrimRight(serverURL, "/") + "/ws"
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
@@ -162,7 +260,12 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 		}
 		return nil, fmt.Errorf("connect to signaling server: %s", connError(err))
 	}
-	defer conn.Close()
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			conn.Close()
+		}
+	}()
 	// gorilla's default read limit is unlimited; a hostile server could
 	// otherwise stream one huge frame into memory.
 	conn.SetReadLimit(maxPairMessageSize)
@@ -222,7 +325,10 @@ func WaitForPairComplete(ctx context.Context, serverURL string, jwt string, hmac
 
 	select {
 	case msg := <-resultCh:
-		return msg, nil
+		// The reader goroutine has returned, so the session is the
+		// connection's only reader from here on.
+		keepOpen = true
+		return &PairSession{Message: msg, conn: conn}, nil
 	case err := <-errCh:
 		return nil, err
 	case <-ctx.Done():
