@@ -222,9 +222,12 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	// server-side, so drop it locally; and if the new device isn't stored,
 	// remove the server's pairing so it doesn't point at a mobile we never
 	// stored.
-	var received, stored bool
+	var (
+		pairComplete *auth.PairCompleteMessage
+		stored       bool
+	)
 	defer func() {
-		if confirmed || !received {
+		if confirmed || pairComplete == nil {
 			return
 		}
 		if !stored {
@@ -232,7 +235,9 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 				fmt.Fprintf(w, "warning: failed to remove the unverified pairing from the server: %s\n", auth.SanitizeDisplayString(err.Error()))
 			}
 		}
-		if existingDevice == nil {
+		// A stored re-pair of the same device replaced it rather than
+		// unpairing it.
+		if existingDevice == nil || (stored && existingDevice.DeviceID == pairComplete.MobileDeviceID) {
 			return
 		}
 		// On success AddPairedDevice already replaced the old device.
@@ -244,8 +249,8 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		fmt.Fprintf(w, "The server unpaired the previous device '%s'.\n", auth.SanitizeDisplayString(pairedDeviceLabel(existingDevice)))
 	}()
 
-	pairComplete, err := sess.WaitForPairComplete(ctx)
-	received = pairComplete != nil
+	// pairComplete is non-nil whenever one was received, even on error.
+	pairComplete, err = sess.WaitForPairComplete(ctx)
 	if err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
 	}

@@ -989,8 +989,11 @@ func TestRunPair_LegacyServerRepair_RemovesOldDevice(t *testing.T) {
 			var out bytes.Buffer
 			err := RunPair(paths, cfg, store, "", strings.NewReader("y\n"), &out)
 			assertFrames(t, srv)
-			if !strings.Contains(out.String(), "The server unpaired the previous device 'Old Phone'.") {
-				t.Errorf("expected the previous-device notice, got output: %s", out.String())
+			// A stored re-pair of the same device replaced it, so only a
+			// different or unstored device was unpaired.
+			wantNotice := !tt.wantPaired || tt.oldDeviceID != mobileDeviceID
+			if got := strings.Contains(out.String(), "The server unpaired the previous device 'Old Phone'."); got != wantNotice {
+				t.Errorf("previous-device notice shown = %t, want %t; output: %s", got, wantNotice, out.String())
 			}
 
 			devices, loadErr := auth.LoadPairedDevices(paths.PairedDevices, store)
