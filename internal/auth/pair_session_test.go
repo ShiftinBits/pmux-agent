@@ -441,6 +441,37 @@ func TestWaitForPairComplete(t *testing.T) {
 		})
 	}
 
+	t.Run("returns an invalid pair_complete alongside the error", func(t *testing.T) {
+		for _, frames := range [][]string{
+			{authOK, `{"type":"pair_complete","mobileDeviceId":"INVALID-ID!","mobileX25519PublicKey":"key=="}`},
+			{`{"type":"pair_complete","mobileDeviceId":"INVALID-ID!","mobileX25519PublicKey":"key=="}`, authOK},
+		} {
+			msg, err := dialAndWait(t, pairServer(t, sendFrames(frames...)), 5*time.Second)
+			if err == nil || !strings.Contains(err.Error(), "invalid device ID") {
+				t.Fatalf("error = %v, want an invalid device ID error", err)
+			}
+			if msg == nil || msg.MobileDeviceID != "INVALID-ID!" {
+				t.Errorf("message = %+v, want the received pair_complete", msg)
+			}
+		}
+	})
+
+	t.Run("may be called only once", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sess, err := DialPairSession(ctx, pairServer(t, sendFrames(authOK, pairComplete)).URL, "test-jwt", "", true)
+		if err != nil {
+			t.Fatalf("DialPairSession() error: %v", err)
+		}
+		defer sess.Close()
+		if _, err := sess.WaitForPairComplete(ctx); err != nil {
+			t.Fatalf("first WaitForPairComplete() error: %v", err)
+		}
+		if msg, err := sess.WaitForPairComplete(ctx); err == nil || msg != nil {
+			t.Errorf("second WaitForPairComplete() = %+v, %v, want nil and an error", msg, err)
+		}
+	})
+
 	t.Run("sends presence while waiting", func(t *testing.T) {
 		server := pairServer(t, func(conn *websocket.Conn) {
 			conn.WriteMessage(websocket.TextMessage, []byte(authOK))

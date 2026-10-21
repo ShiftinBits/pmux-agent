@@ -553,6 +553,9 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 			if !strings.Contains(out.String(), "Manual pairing code: ABC234-ABCD-EFGH-JKLM-NPQR") {
 				t.Errorf("expected manual code with secret in output, got: %s", out.String())
 			}
+			if strings.Contains(out.String(), legacyWarning) {
+				t.Errorf("a confirming server should not trigger the legacy-server warning, got: %s", out.String())
+			}
 			if !restarted.Load() {
 				t.Error("agent stopped for pairing should be restarted")
 			}
@@ -852,6 +855,24 @@ func TestRunPair_RepairAccepted_ReplacesOldDevice(t *testing.T) {
 	}
 }
 
+// legacyWarning is the start of the warning RunPair prints when the server
+// does not confirm support for host-confirmed pairing.
+const legacyWarning = "warning: the signaling server did not confirm support for host-confirmed pairing"
+
+// pairCompleteLowOrderKey returns a pair_complete builder whose mobile key is
+// a low-order X25519 point: its pairMac is valid, but ECDH fails.
+func pairCompleteLowOrderKey(secret, mobileDeviceID string) func(hostPub []byte, hostDeviceID string) auth.PairCompleteMessage {
+	lowOrderPub := make([]byte, 32)
+	return func(hostPub []byte, hostDeviceID string) auth.PairCompleteMessage {
+		return auth.PairCompleteMessage{
+			Type:                  "pair_complete",
+			MobileDeviceID:        mobileDeviceID,
+			MobileX25519PublicKey: base64.StdEncoding.EncodeToString(lowOrderPub),
+			PairMac:               pairMacForTest(secret, lowOrderPub, mobileDeviceID),
+		}
+	}
+}
+
 func TestRunPair_LegacyServer(t *testing.T) {
 	const (
 		testSecret     = "ABCDEFGHJKLMNPQR"
@@ -859,13 +880,33 @@ func TestRunPair_LegacyServer(t *testing.T) {
 	)
 
 	tests := []struct {
-		name        string
-		pairSecret  string // secret the mobile keys its pairMac with
-		wantPaired  bool
-		wantDeletes int32
+		name         string
+		pairComplete func(hostPub []byte, hostDeviceID string) auth.PairCompleteMessage
+		wantErr      string // empty means the device is stored
+		wantDeletes  int32
 	}{
-		{"valid pairMac stores device", testSecret, true, 0},
-		{"bad pairMac deletes server pairing", "ZZZZZZZZZZZZZZZZ", false, 1},
+		{
+			name:         "valid pairMac stores device",
+			pairComplete: pairCompleteFromNewMobile(t, testSecret, mobileDeviceID),
+		},
+		{
+			name:         "bad pairMac deletes server pairing",
+			pairComplete: pairCompleteFromNewMobile(t, "ZZZZZZZZZZZZZZZZ", mobileDeviceID),
+			wantErr:      errPairMACRejected.Error(),
+			wantDeletes:  1,
+		},
+		{
+			name:         "low-order mobile key deletes server pairing",
+			pairComplete: pairCompleteLowOrderKey(testSecret, mobileDeviceID),
+			wantErr:      "key exchange failed",
+			wantDeletes:  1,
+		},
+		{
+			name:         "invalid mobile device ID deletes server pairing",
+			pairComplete: pairCompleteFromNewMobile(t, testSecret, "NOT-A-VALID-ID"),
+			wantErr:      "invalid device ID",
+			wantDeletes:  1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -873,7 +914,7 @@ func TestRunPair_LegacyServer(t *testing.T) {
 			paths, store := newPairHost(t, testSecret)
 
 			srv := newFakePairServer(t, fakePairConfig{
-				pairComplete: pairCompleteFromNewMobile(t, tt.pairSecret, mobileDeviceID),
+				pairComplete: tt.pairComplete,
 				legacy:       true,
 			})
 			cfg := config.Defaults()
@@ -887,14 +928,17 @@ func TestRunPair_LegacyServer(t *testing.T) {
 			if got := srv.deletes.Load(); got != tt.wantDeletes {
 				t.Errorf("DELETE /v1/auth/pairing calls = %d, want %d", got, tt.wantDeletes)
 			}
+			if !strings.Contains(out.String(), legacyWarning) {
+				t.Errorf("expected the legacy-server warning, got output: %s", out.String())
+			}
 
 			device, loadErr := auth.LoadPairedDevice(paths.PairedDevices, store)
 			if loadErr != nil {
 				t.Fatalf("LoadPairedDevice: %v", loadErr)
 			}
-			if !tt.wantPaired {
-				if !errors.Is(err, errPairMACRejected) {
-					t.Errorf("RunPair error = %v, want errPairMACRejected", err)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("RunPair error = %v, want it to contain %q", err, tt.wantErr)
 				}
 				if device != nil {
 					t.Errorf("no device should be saved, got %+v", device)
@@ -906,6 +950,124 @@ func TestRunPair_LegacyServer(t *testing.T) {
 			}
 			if device == nil || device.DeviceID != mobileDeviceID || device.SharedSecret == "" {
 				t.Fatalf("paired device = %+v, want %s with a shared secret", device, mobileDeviceID)
+			}
+		})
+	}
+}
+
+func TestRunPair_LegacyServerRepair_RemovesOldDevice(t *testing.T) {
+	const (
+		testSecret     = "ABCDEFGHJKLMNPQR"
+		oldDeviceID    = "abc123def456abc123def456abc123de"
+		mobileDeviceID = "fedcba9876543210fedcba9876543210"
+	)
+
+	tests := []struct {
+		name        string
+		oldDeviceID string
+		pairSecret  string // secret the mobile keys its pairMac with
+		wantPaired  bool
+	}{
+		{"success with a different device", oldDeviceID, testSecret, true},
+		{"success with the same device", mobileDeviceID, testSecret, true},
+		{"bad pairMac", oldDeviceID, "ZZZZZZZZZZZZZZZZ", false},
+		{"bad pairMac from the same device", mobileDeviceID, "ZZZZZZZZZZZZZZZZ", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths, store := newPairHost(t, testSecret)
+			oldSecret := storeOldDevice(t, paths, store, tt.oldDeviceID)
+
+			srv := newFakePairServer(t, fakePairConfig{
+				pairComplete: pairCompleteFromNewMobile(t, tt.pairSecret, mobileDeviceID),
+				legacy:       true,
+			})
+			cfg := config.Defaults()
+			cfg.Server.URL = srv.URL
+
+			var out bytes.Buffer
+			err := RunPair(paths, cfg, store, "", strings.NewReader("y\n"), &out)
+			assertFrames(t, srv)
+			if !strings.Contains(out.String(), "The server unpaired the previous device 'Old Phone'.") {
+				t.Errorf("expected the previous-device notice, got output: %s", out.String())
+			}
+
+			devices, loadErr := auth.LoadPairedDevices(paths.PairedDevices, store)
+			if loadErr != nil {
+				t.Fatalf("LoadPairedDevices: %v", loadErr)
+			}
+
+			if !tt.wantPaired {
+				if !errors.Is(err, errPairMACRejected) {
+					t.Errorf("RunPair error = %v, want errPairMACRejected", err)
+				}
+				if got := srv.deletes.Load(); got != 1 {
+					t.Errorf("DELETE /v1/auth/pairing calls = %d, want 1", got)
+				}
+				if len(devices) != 0 {
+					t.Errorf("paired devices = %+v, want none", devices)
+				}
+				if _, err := store.Get(auth.SharedSecretKey(tt.oldDeviceID)); !errors.Is(err, auth.ErrSecretNotFound) {
+					t.Errorf("old device's shared secret should be deleted, Get error = %v", err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("RunPair: %v", err)
+			}
+			if got := srv.deletes.Load(); got != 0 {
+				t.Errorf("DELETE /v1/auth/pairing calls = %d, want 0", got)
+			}
+			if len(devices) != 1 || devices[0].DeviceID != mobileDeviceID {
+				t.Fatalf("paired devices = %+v, want only %s", devices, mobileDeviceID)
+			}
+			if devices[0].SharedSecret == "" || devices[0].SharedSecret == oldSecret {
+				t.Error("the new pairing's shared secret should be stored")
+			}
+			if tt.oldDeviceID != mobileDeviceID {
+				if _, err := store.Get(auth.SharedSecretKey(tt.oldDeviceID)); !errors.Is(err, auth.ErrSecretNotFound) {
+					t.Errorf("old device's shared secret should be deleted, Get error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunPair_ExistingPairing_PromptLabel(t *testing.T) {
+	tests := []struct {
+		name      string
+		deviceID  string
+		wantLabel string
+	}{
+		{"short device ID", "abc", "abc"},
+		{"12-character device ID", "abc123def456", "abc123def456"},
+		{"long device ID", "abc123def456abc123def456abc123de", "abc123def456..."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := testPaths(t)
+			store := auth.NewMemorySecretStore()
+			if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
+				t.Fatalf("GenerateIdentity: %v", err)
+			}
+			// SavePairedDevices skips AddPairedDevice's ID validation, so a
+			// malformed file can hold any ID.
+			if err := auth.SavePairedDevices(paths.PairedDevices, []auth.PairedDevice{{
+				DeviceID: tt.deviceID,
+				PairedAt: time.Now(),
+			}}); err != nil {
+				t.Fatalf("SavePairedDevices: %v", err)
+			}
+
+			var out bytes.Buffer
+			if err := RunPair(paths, config.Defaults(), store, "", strings.NewReader("n\n"), &out); err != nil {
+				t.Fatalf("RunPair should return nil on decline, got: %v", err)
+			}
+			if !strings.Contains(out.String(), "A device is already paired: "+tt.wantLabel+" (paired ") {
+				t.Errorf("expected label %q in prompt, got: %s", tt.wantLabel, out.String())
 			}
 		})
 	}

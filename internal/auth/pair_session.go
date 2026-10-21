@@ -196,11 +196,12 @@ type PairSession struct {
 	confirm bool
 	// keepaliveInterval is how often WaitForPairComplete sends presence.
 	keepaliveInterval time.Duration
-	// early is a pair_complete that arrived before the auth reply.
-	early *PairCompleteMessage
-	// received is the pair_complete taken off the wire, valid or not. It is
-	// the one Accept, Reject and Close answer.
+	// received is the pair_complete taken off the wire, valid or not,
+	// including one that arrived before the auth reply. It is the one
+	// Accept, Reject and Close answer.
 	received *PairCompleteMessage
+	// waited is set once WaitForPairComplete has run.
+	waited bool
 	// decided is set once pair_accept or pair_reject has been attempted.
 	decided bool
 }
@@ -275,10 +276,10 @@ func (s *PairSession) authenticate(ctx context.Context, jwt string) error {
 		case "error":
 			return fmt.Errorf("WebSocket auth failed: %s", SanitizeDisplayString(msg.Error))
 		case "pair_complete":
-			if s.early == nil {
+			if s.received == nil {
 				var pc PairCompleteMessage
 				if err := json.Unmarshal(data, &pc); err == nil {
-					s.early = &pc
+					s.received = &pc
 				}
 			}
 		}
@@ -287,19 +288,24 @@ func (s *PairSession) authenticate(ctx context.Context, jwt string) error {
 
 // WaitForPairComplete waits until the mobile's pair_complete arrives or ctx
 // ends, sending presence every keepaliveInterval and ignoring other frames.
-// A pair_complete with an invalid mobileDeviceId is an error, but Close still
-// rejects it in confirmed mode.
+// It may be called once. A pair_complete with an invalid mobileDeviceId is an
+// error, but Close still rejects it in confirmed mode.
+//
+// Whenever a pair_complete was received, including alongside an error (an
+// invalid mobileDeviceId, or one that raced the ctx deadline), the returned
+// message is non-nil, so the caller knows the mobile completed pairing.
 func (s *PairSession) WaitForPairComplete(ctx context.Context) (*PairCompleteMessage, error) {
-	if s.received != nil {
-		return nil, errors.New("pair_complete was already received")
+	if s.waited {
+		return nil, errors.New("WaitForPairComplete was already called")
 	}
-	if s.early != nil {
-		s.received, s.early = s.early, nil
-	} else if err := s.readPairComplete(ctx); err != nil {
-		return nil, err
+	s.waited = true
+	if s.received == nil {
+		if err := s.readPairComplete(ctx); err != nil {
+			return s.received, err
+		}
 	}
 	if err := ValidateDeviceID(s.received.MobileDeviceID); err != nil {
-		return nil, fmt.Errorf("pair_complete: %w", err)
+		return s.received, fmt.Errorf("pair_complete: %w", err)
 	}
 	return s.received, nil
 }
@@ -442,12 +448,8 @@ func (s *PairSession) checkDecidable() error {
 // error from sending that rejection.
 func (s *PairSession) Close() error {
 	var err error
-	msg := s.received
-	if msg == nil {
-		msg = s.early
-	}
-	if s.confirm && msg != nil && !s.decided {
-		err = s.sendDecision("pair_reject", msg.MobileDeviceID)
+	if s.confirm && s.received != nil && !s.decided {
+		err = s.Reject()
 	}
 	s.conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),

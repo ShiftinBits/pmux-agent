@@ -56,6 +56,18 @@ func checkServerTransport(serverURL string) error {
 	return fmt.Errorf("refusing to pair over unencrypted %s:// with non-local server %q; use https://", u.Scheme, host)
 }
 
+// pairedDeviceLabel names a paired device for the terminal: its name, or else
+// a prefix of its device ID.
+func pairedDeviceLabel(d *auth.PairedDevice) string {
+	if d.Name != "" {
+		return d.Name
+	}
+	if len(d.DeviceID) > 12 {
+		return d.DeviceID[:12] + "..."
+	}
+	return d.DeviceID
+}
+
 // RunPair pairs this host with a mobile device via the signaling server.
 // It displays a QR code for scanning, waits for the mobile to complete
 // the pairing handshake, and stores the resulting shared secret locally.
@@ -90,12 +102,8 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	}
 
 	if existingDevice != nil {
-		name := existingDevice.Name
-		if name == "" {
-			name = existingDevice.DeviceID[:12] + "..."
-		}
 		pairedDate := existingDevice.PairedAt.Format("2006-01-02")
-		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", auth.SanitizeDisplayString(name), pairedDate)
+		fmt.Fprintf(w, "A device is already paired: %s (paired %s). Replace it? [y/N] ", auth.SanitizeDisplayString(pairedDeviceLabel(existingDevice)), pairedDate)
 
 		reader := bufio.NewReader(r)
 		answer, _ := reader.ReadString('\n')
@@ -104,8 +112,12 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 			fmt.Fprintln(w, "Pairing cancelled.")
 			return nil
 		}
-		// The old device is replaced only once the new pairing is stored, so
-		// a failed or rejected re-pair leaves it in place.
+		// With a server that confirms pairing, the old device is replaced
+		// only once the new pairing is stored, so a failed or rejected
+		// re-pair leaves it in place. A legacy server replaces the old
+		// mobile as soon as the new one completes pairing, so from then on
+		// the old device is removed here too, whether or not the new
+		// pairing is stored.
 	}
 
 	// Generate X25519 ephemeral keypair for key exchange
@@ -137,6 +149,9 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	// most 30s, for our answer to pair_complete. An older server has already
 	// committed the pairing by the time pair_complete arrives.
 	confirmed := pairResp.PairConfirm
+	if !confirmed {
+		fmt.Fprintln(w, "warning: the signaling server did not confirm support for host-confirmed pairing, so it will commit the pairing before this host verifies the mobile. Update the server.")
+	}
 
 	// Build the QR code now, but show it only once the WebSocket is ready to
 	// receive pair_complete. BuildQRPayload uses the bare server URL so the
@@ -201,7 +216,36 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.SanitizeDisplayString(auth.FormatManualCode(pairResp.PairingCode, pairingSecret)))
 	fmt.Fprintln(w, "Waiting for mobile device to complete pairing...")
 
+	// A legacy server committed the pairing, replacing the old mobile and
+	// sending it device_unpaired, as soon as the mobile completed pairing,
+	// before this host could verify it. From then on the old device is gone
+	// server-side, so drop it locally; and if the new device isn't stored,
+	// remove the server's pairing so it doesn't point at a mobile we never
+	// stored.
+	var received, stored bool
+	defer func() {
+		if confirmed || !received {
+			return
+		}
+		if !stored {
+			if err := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); err != nil {
+				fmt.Fprintf(w, "warning: failed to remove the unverified pairing from the server: %s\n", auth.SanitizeDisplayString(err.Error()))
+			}
+		}
+		if existingDevice == nil {
+			return
+		}
+		// On success AddPairedDevice already replaced the old device.
+		if !stored {
+			if err := auth.RemovePairedDevice(paths.PairedDevices, existingDevice.DeviceID, store); err != nil {
+				fmt.Fprintf(w, "warning: failed to remove the previous device: %v\n", err)
+			}
+		}
+		fmt.Fprintf(w, "The server unpaired the previous device '%s'.\n", auth.SanitizeDisplayString(pairedDeviceLabel(existingDevice)))
+	}()
+
 	pairComplete, err := sess.WaitForPairComplete(ctx)
+	received = pairComplete != nil
 	if err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
 	}
@@ -214,13 +258,6 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 		pairComplete.PairMac,
 	); err != nil {
-		if !confirmed {
-			// The server committed the pairing before we could check the
-			// MAC. Remove it so it doesn't point at a mobile we never stored.
-			if delErr := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); delErr != nil {
-				fmt.Fprintf(w, "warning: failed to remove rejected pairing from server: %s\n", auth.SanitizeDisplayString(delErr.Error()))
-			}
-		}
 		return fmt.Errorf("%w: %w", errPairMACRejected, err)
 	}
 
@@ -248,9 +285,9 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		}
 	}
 
-	// ponytail: a local store failure after the server committed leaves a
-	// server-only pairing; the error tells the user to pair again, which
-	// replaces it.
+	// ponytail: with a confirming server, a local store failure after the
+	// commit leaves a server-only pairing; the error tells the user to pair
+	// again, which replaces it. A legacy server's pairing is removed instead.
 	mobileName := auth.TruncateMobileName(pairComplete.MobileName)
 	err = auth.AddPairedDevice(paths.PairedDevices, auth.PairedDevice{
 		DeviceID:     pairComplete.MobileDeviceID,
@@ -261,6 +298,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if err != nil {
 		return fmt.Errorf("failed to save paired device (run 'pmux pair' again): %w", err)
 	}
+	stored = true
 
 	// AddPairedDevice replaced the device list, so only the old device's
 	// secret is left. Failing to delete it leaves an unused secret behind
