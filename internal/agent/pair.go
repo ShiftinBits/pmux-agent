@@ -104,8 +104,8 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 			fmt.Fprintln(w, "Pairing cancelled.")
 			return nil
 		}
-		// The old device is removed only once the server confirms the new
-		// pairing, so a failed or rejected re-pair leaves it in place.
+		// The old device is replaced only once the new pairing is stored, so
+		// a failed or rejected re-pair leaves it in place.
 	}
 
 	// Generate X25519 ephemeral keypair for key exchange
@@ -133,10 +133,15 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if err != nil {
 		return fmt.Errorf("failed to initiate pairing: %w", err)
 	}
+	// A server that echoes pairConfirm holds the mobile's request, for at
+	// most 30s, for our answer to pair_complete. An older server has already
+	// committed the pairing by the time pair_complete arrives.
+	confirmed := pairResp.PairConfirm
 
-	// Build and display QR code. BuildQRPayload uses the bare server URL so
-	// the mobile client stores a versionless host address; the mobile app
-	// adds its own API version prefix when it opens connections.
+	// Build the QR code now, but show it only once the WebSocket is ready to
+	// receive pair_complete. BuildQRPayload uses the bare server URL so the
+	// mobile client stores a versionless host address; the mobile app adds
+	// its own API version prefix when it opens connections.
 	qrData, err := auth.BuildQRPayload(
 		pairResp.PairingCode,
 		x25519kp.PublicKeyBase64(),
@@ -152,12 +157,6 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if err != nil {
 		return fmt.Errorf("failed to generate QR code: %w", err)
 	}
-
-	fmt.Fprintln(w, "\nScan this QR code with Pocketmux on your mobile device:")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, qr.ToSmallString(false))
-	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.SanitizeDisplayString(auth.FormatManualCode(pairResp.PairingCode, pairingSecret)))
-	fmt.Fprintln(w, "Waiting for mobile device to complete pairing...")
 
 	// Stop the background agent if running. During pairing, the pair CLI
 	// opens its own WebSocket to receive pair_complete. A competing agent
@@ -181,23 +180,30 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
 
-	// Wait for mobile to complete pairing via WebSocket
 	ctx, cancel := context.WithTimeout(context.Background(), auth.PairTimeout)
 	defer cancel()
 
-	sess, err := auth.WaitForPairComplete(ctx, apiBaseURL, jwt, hmacSecret)
+	sess, err := auth.DialPairSession(ctx, apiBaseURL, jwt, hmacSecret, confirmed)
 	if err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
 	}
-	defer sess.Close()
-	pairComplete := sess.Message
-
-	// The server holds the pairing until we answer, so reject anything we
-	// can't use and nothing is committed on either side.
-	reject := func() {
-		if err := sess.Reject(); err != nil {
+	// In confirmed mode, Close rejects a pair_complete we didn't accept, so
+	// every early return below leaves nothing committed on the server.
+	defer func() {
+		if err := sess.Close(); err != nil {
 			fmt.Fprintf(w, "warning: failed to reject pairing on server: %s\n", auth.SanitizeDisplayString(err.Error()))
 		}
+	}()
+
+	fmt.Fprintln(w, "\nScan this QR code with Pocketmux on your mobile device:")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, qr.ToSmallString(false))
+	fmt.Fprintf(w, "Manual pairing code: %s\n\n", auth.SanitizeDisplayString(auth.FormatManualCode(pairResp.PairingCode, pairingSecret)))
+	fmt.Fprintln(w, "Waiting for mobile device to complete pairing...")
+
+	pairComplete, err := sess.WaitForPairComplete(ctx)
+	if err != nil {
+		return fmt.Errorf("pairing failed: %w", err)
 	}
 
 	// Verify the mobile proved knowledge of the QR-only secret before using
@@ -208,7 +214,13 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 		pairComplete.PairMac,
 	); err != nil {
-		reject()
+		if !confirmed {
+			// The server committed the pairing before we could check the
+			// MAC. Remove it so it doesn't point at a mobile we never stored.
+			if delErr := auth.DeletePairing(id, apiBaseURL, httpClient, hmacSecret); delErr != nil {
+				fmt.Fprintf(w, "warning: failed to remove rejected pairing from server: %s\n", auth.SanitizeDisplayString(delErr.Error()))
+			}
+		}
 		return fmt.Errorf("%w: %w", errPairMACRejected, err)
 	}
 
@@ -220,29 +232,25 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 		pairComplete.MobileDeviceID,
 	)
 	if err != nil {
-		reject()
 		return fmt.Errorf("key exchange failed: %w", err)
 	}
 
 	if err := paths.EnsureDirs(); err != nil {
-		reject()
 		return fmt.Errorf("%w", err)
 	}
 
 	// Persist nothing until the server confirms it committed the pairing.
-	if err := sess.Accept(auth.PairAcceptTimeout); err != nil {
-		return fmt.Errorf("pairing failed: %w", err)
+	// The server holds the mobile's request for at most 30s from when the
+	// mobile sent it, so nothing slow may run before Accept.
+	if confirmed {
+		if err := sess.Accept(auth.PairAcceptTimeout); err != nil {
+			return fmt.Errorf("pairing failed: %w", err)
+		}
 	}
 
 	// ponytail: a local store failure after the server committed leaves a
 	// server-only pairing; the error tells the user to pair again, which
 	// replaces it.
-	if existingDevice != nil {
-		if err := auth.RemovePairedDevice(paths.PairedDevices, existingDevice.DeviceID, store); err != nil {
-			return fmt.Errorf("failed to remove previously paired device (run 'pmux pair' again): %w", err)
-		}
-	}
-
 	mobileName := auth.TruncateMobileName(pairComplete.MobileName)
 	err = auth.AddPairedDevice(paths.PairedDevices, auth.PairedDevice{
 		DeviceID:     pairComplete.MobileDeviceID,
@@ -252,6 +260,16 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	}, store)
 	if err != nil {
 		return fmt.Errorf("failed to save paired device (run 'pmux pair' again): %w", err)
+	}
+
+	// AddPairedDevice replaced the device list, so only the old device's
+	// secret is left. Failing to delete it leaves an unused secret behind
+	// rather than failing a pairing the server has committed. A re-pair of
+	// the same device already overwrote it.
+	if existingDevice != nil && existingDevice.DeviceID != pairComplete.MobileDeviceID {
+		if err := store.Delete(auth.SharedSecretKey(existingDevice.DeviceID)); err != nil {
+			fmt.Fprintf(w, "warning: failed to delete the previous device's secret: %v\n", err)
+		}
 	}
 
 	displayName := mobileName
