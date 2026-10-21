@@ -130,6 +130,8 @@ func TestCheckServerTransport(t *testing.T) {
 		{"wss://signal.example.com", false},
 		{"http://localhost:8787", false},
 		{"http://127.0.0.1:1", false},
+		{"http://127.0.0.2:8787", false},
+		{"http://[::ffff:127.0.0.1]:8787", false},
 		{"ws://[::1]:8787", false},
 		{"http://10.0.0.5:8787", false},
 		{"http://172.16.0.1", false},
@@ -447,8 +449,8 @@ func TestRunPair_PairCompleteMAC(t *testing.T) {
 				if device != nil {
 					t.Errorf("no device should be saved, got %+v", device)
 				}
-				if restarted.Load() {
-					t.Error("agent should not be restarted after a rejected pairing")
+				if !restarted.Load() {
+					t.Error("agent stopped for pairing should be restarted after a rejected pairing")
 				}
 				if !srv.pairingDeleted.Load() {
 					t.Error("rejected pairing should be removed from the server")
@@ -527,6 +529,10 @@ func TestRunPair_SanitizesServerErrors(t *testing.T) {
 			if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
 				t.Fatalf("GenerateIdentity: %v", err)
 			}
+			// Failures after the agent is stopped restart it; don't spawn one from the test.
+			origEnsure := ensureAgentRunning
+			t.Cleanup(func() { ensureAgentRunning = origEnsure })
+			ensureAgentRunning = func(config.Paths, auth.SecretStore) error { return nil }
 
 			upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 			fail := func(w http.ResponseWriter) {

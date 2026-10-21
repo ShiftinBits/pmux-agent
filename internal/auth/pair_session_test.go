@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,7 +87,7 @@ func TestInitiatePairing(t *testing.T) {
 			}
 
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"pairingCode":"ABC123"}`))
+			w.Write([]byte(`{"pairingCode":"ABC234"}`))
 		}))
 		defer server.Close()
 
@@ -94,8 +95,8 @@ func TestInitiatePairing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("InitiatePairing() error: %v", err)
 		}
-		if resp.PairingCode != "ABC123" {
-			t.Errorf("pairingCode = %q, want %q", resp.PairingCode, "ABC123")
+		if resp.PairingCode != "ABC234" {
+			t.Errorf("pairingCode = %q, want %q", resp.PairingCode, "ABC234")
 		}
 	})
 
@@ -107,7 +108,7 @@ func TestInitiatePairing(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"pairingCode":"ABC123"}`))
+			w.Write([]byte(`{"pairingCode":"ABC234"}`))
 		}))
 		defer server.Close()
 
@@ -136,21 +137,30 @@ func TestInitiatePairing(t *testing.T) {
 		}
 	})
 
-	t.Run("server returns empty pairing code", func(t *testing.T) {
-		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"pairingCode":""}`))
-		}))
-		defer server.Close()
+	for _, tc := range []struct{ name, code string }{
+		{"empty", ""},
+		{"too short", "ABC23"},
+		{"too long", "ABC2345"},
+		{"QR delimiter", "ABC|23"},
+		{"manual-code delimiter", "ABC-23"},
+		{"outside alphabet", "ABC123"},
+	} {
+		t.Run("server returns invalid pairing code: "+tc.name, func(t *testing.T) {
+			server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"pairingCode":%q}`, tc.code)
+			}))
+			defer server.Close()
 
-		_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), "empty pairing code") {
-			t.Errorf("error = %q, want substring %q", err.Error(), "empty pairing code")
-		}
-	})
+			_, err := InitiatePairing(id, "x25519key==", server.URL, server.Client(), "test-host", "")
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "invalid pairing code") {
+				t.Errorf("error = %q, want substring %q", err.Error(), "invalid pairing code")
+			}
+		})
+	}
 
 	t.Run("oversized response body is truncated", func(t *testing.T) {
 		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +409,51 @@ func TestWaitForPairComplete(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "WebSocket auth failed") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "WebSocket auth failed")
+		}
+	})
+
+	// afterAuth runs a server that accepts the auth message and then hands the
+	// connection to send.
+	afterAuth := func(t *testing.T, send func(*websocket.Conn)) error {
+		t.Helper()
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.ReadMessage() // auth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_ok"}`))
+			send(conn)
+			conn.ReadMessage() // hold the connection until the client hangs up
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := WaitForPairComplete(ctx, server.URL, "test-jwt", "")
+		return err
+	}
+
+	t.Run("rejects oversized message", func(t *testing.T) {
+		err := afterAuth(t, func(conn *websocket.Conn) {
+			conn.WriteMessage(websocket.TextMessage, make([]byte, maxPairMessageSize+1))
+		})
+		if err == nil || !strings.Contains(err.Error(), "read limit") {
+			t.Errorf("error = %v, want a read limit error", err)
+		}
+	})
+
+	t.Run("sanitizes server close reason", func(t *testing.T) {
+		err := afterAuth(t, func(conn *websocket.Conn) {
+			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "bad\x1b]0;pwn\x07"))
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if strings.ContainsAny(err.Error(), "\x1b\x07") {
+			t.Errorf("error %q contains control characters", err.Error())
 		}
 	})
 }

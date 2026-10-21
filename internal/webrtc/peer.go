@@ -162,6 +162,10 @@ type Peer struct {
 // second even over a TURN relay.
 const authChallengeTimeout = 10 * time.Second
 
+// replacementTeardownTimeout bounds how long a reconnect waits for the old
+// session's handler teardown before continuing the new peer's negotiation.
+const replacementTeardownTimeout = 3 * time.Second
+
 // authNonceSize is the length in bytes of the per-connection challenge nonce,
 // and of the mobile's nonce in auth_response.
 const authNonceSize = 32
@@ -181,6 +185,10 @@ const dtlsFingerprintAlgorithm = "sha-256"
 // auth transcript. It is a package-level var only so tests can exercise the
 // handshake verifier without a connected PeerConnection.
 var peerDTLSFingerprints = (*Peer).dtlsFingerprints
+
+// peerSendAuthConfirm sends auth_confirm. It is a package-level var only so
+// tests can complete the handshake without an open DataChannel.
+var peerSendAuthConfirm = (*Peer).SendMessage
 
 // SetAllowedDeviceID updates the allowed device ID under the mutex.
 // Safe to call from any goroutine (e.g., SIGUSR2 handler).
@@ -508,9 +516,26 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		// stream) synchronously, before the new peer is inserted. Handler state
 		// is keyed by device ID, so a teardown that ran after the insert would
 		// destroy the new peer's session instead (see scheduleCleanup). Called
-		// without pm.mu held; the handler's teardown is bounded local tmux work.
+		// without pm.mu held.
+		//
+		// ponytail: the wait is bounded so a wedged tmux can't freeze this
+		// signaling readLoop. Past the bound the teardown finishes in the
+		// background and can still hit the new session's device-keyed state;
+		// keying handler state by peer identity would remove that ceiling.
 		if pm.OnPeerDisconnect != nil {
-			pm.OnPeerDisconnect(mobileDeviceID)
+			torn := make(chan struct{})
+			pm.cleanupWg.Add(1)
+			go func() {
+				defer pm.cleanupWg.Done()
+				defer close(torn)
+				pm.OnPeerDisconnect(mobileDeviceID)
+			}()
+			select {
+			case <-torn:
+			case <-time.After(replacementTeardownTimeout):
+				pm.logger.Warn("old session teardown still running; continuing reconnect",
+					"mobile", mobileDeviceID, "waited", replacementTeardownTimeout)
+			}
 		}
 
 		oldState := oldPeer.conn.ConnectionState().String()
@@ -1146,9 +1171,19 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 			}
 		}()
 
+		p.mu.Lock()
+		authed := p.authenticated
+		p.mu.Unlock()
+
 		decoded, err := protocol.Decode(msg.Data)
 		if err != nil {
 			p.logger.Debug("failed to decode DataChannel message", "error", err)
+			if !authed {
+				// A pre-auth message that doesn't decode (e.g. an outdated
+				// app's v1 auth_response) can never authenticate: free the
+				// peer slot now instead of at the auth timeout.
+				p.failAuth("undecodable message before authentication")
+			}
 			return
 		}
 
@@ -1156,9 +1191,6 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 		// pairing shared secret, the only message accepted is the auth
 		// response. This authenticates the peer independently of the
 		// (untrusted) signaling server.
-		p.mu.Lock()
-		authed := p.authenticated
-		p.mu.Unlock()
 		if !authed {
 			p.verifyAuthResponse(decoded)
 			return
@@ -1295,16 +1327,15 @@ func (p *Peer) verifyAuthResponse(decoded protocol.Message) {
 		Type: "auth_confirm",
 		Mac:  base64.StdEncoding.EncodeToString(authMAC(secret, authLabelHostToMobile, hostNonce, mobileNonce, hostFp, mobileFp)),
 	}
-	if err := p.SendMessage(confirm); err != nil {
-		// failAuth is a no-op once auth has resolved, so close directly. As in
-		// failAuth, close on a goroutine (we may be inside a Pion callback) and
-		// only if we are still the current peer for this device.
+	if err := peerSendAuthConfirm(p, confirm); err != nil {
+		// failAuth is a no-op once auth has resolved. Revoke authenticated so
+		// no further request reaches the handler, then tear down through the
+		// manager so any handler state a request created meanwhile is detached.
+		p.mu.Lock()
+		p.authenticated = false
+		p.mu.Unlock()
 		p.logger.Warn("closing peer: failed to send auth confirm", "error", err, "mobile", p.DeviceID)
-		if p.pm != nil {
-			go p.pm.ClosePeerIfCurrent(p.DeviceID, p)
-		} else {
-			go p.Close()
-		}
+		p.closeViaManager()
 		return
 	}
 	p.mu.Lock()
@@ -1401,6 +1432,13 @@ func (p *Peer) failAuth(reason string) {
 	p.mu.Unlock()
 
 	p.logger.Warn("closing peer: authentication failed", "reason", reason, "mobile", p.DeviceID)
+	p.closeViaManager()
+}
+
+// closeViaManager tears the peer down through the manager's tracked cleanup
+// (OnPeerDisconnect, then close), or closes it directly when there is no
+// manager or CloseAll has started. Caller must not hold p.mu.
+func (p *Peer) closeViaManager() {
 	if p.pm == nil {
 		go p.Close()
 		return
@@ -1519,6 +1557,11 @@ func (p *Peer) SendRaw(data []byte) error {
 	if p.dc == nil {
 		p.mu.Unlock()
 		return fmt.Errorf("data channel not established")
+	}
+	// Same outbound gate as SendMessage; raw bytes are never auth handshake messages.
+	if !p.authConfirmed {
+		p.mu.Unlock()
+		return fmt.Errorf("peer not authenticated: refusing raw send")
 	}
 	dc := p.dc
 	p.mu.Unlock()

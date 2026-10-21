@@ -372,6 +372,15 @@ func useFakeDTLSFingerprints(t *testing.T, hostFp, mobileFp []byte, err error) {
 	t.Cleanup(func() { peerDTLSFingerprints = orig })
 }
 
+// useSucceedingConfirmSend makes auth_confirm sends succeed without a
+// DataChannel, so a valid response completes the handshake.
+func useSucceedingConfirmSend(t *testing.T) {
+	t.Helper()
+	orig := peerSendAuthConfirm
+	peerSendAuthConfirm = func(*Peer, protocol.Message) error { return nil }
+	t.Cleanup(func() { peerSendAuthConfirm = orig })
+}
+
 // validAuthResponse builds an auth_response that verifies against the fixed
 // transcript inputs.
 func validAuthResponse() *protocol.AuthResponseRequest {
@@ -492,6 +501,7 @@ func TestPeer_VerifyAuthResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			useFakeDTLSFingerprints(t, testHostFp, testMobileFp, tt.fpErr)
+			useSucceedingConfirmSend(t)
 			p := newAuthTestPeer(testHostNonce)
 
 			p.verifyAuthResponse(tt.msg)
@@ -510,7 +520,8 @@ func TestPeer_VerifyAuthResponse(t *testing.T) {
 
 // TestPeer_VerifyAuthResponse_ConfirmSendFailureClosesPeer covers a peer that
 // authenticates but cannot be sent auth_confirm (here: no DataChannel). It must
-// not be marked confirmed and must be torn down, since failAuth no longer
+// not be marked confirmed, must have authenticated revoked so no further
+// request reaches the handler, and must be torn down, since failAuth no longer
 // applies once auth has resolved.
 func TestPeer_VerifyAuthResponse_ConfirmSendFailureClosesPeer(t *testing.T) {
 	useFakeDTLSFingerprints(t, testHostFp, testMobileFp, nil)
@@ -525,8 +536,8 @@ func TestPeer_VerifyAuthResponse_ConfirmSendFailureClosesPeer(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.authenticated {
-		t.Error("peer with a valid response should be authenticated")
+	if p.authenticated {
+		t.Error("authenticated must be revoked when auth_confirm was not sent")
 	}
 	if p.authConfirmed {
 		t.Error("authConfirmed must stay false when auth_confirm was not sent")
@@ -535,6 +546,7 @@ func TestPeer_VerifyAuthResponse_ConfirmSendFailureClosesPeer(t *testing.T) {
 
 func TestPeer_FailAuthNoOpAfterSuccess(t *testing.T) {
 	useFakeDTLSFingerprints(t, testHostFp, testMobileFp, nil)
+	useSucceedingConfirmSend(t)
 	p := newAuthTestPeer(testHostNonce)
 
 	p.verifyAuthResponse(validAuthResponse())
@@ -720,6 +732,42 @@ func TestPeer_SendMessageAuthGate(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("SendRaw before confirm is refused", func(t *testing.T) {
+		p := newAuthTestPeer(nil)
+		p.dc = dc
+		if err := p.SendRaw([]byte("x")); err == nil || !strings.Contains(err.Error(), "peer not authenticated") {
+			t.Errorf("SendRaw err = %v, want a peer not authenticated error", err)
+		}
+	})
+}
+
+// TestPeerManager_UndecodableMessageBeforeAuthClosesPeer checks that a pre-auth
+// message that fails to decode frees the single peer slot immediately rather
+// than at authChallengeTimeout.
+func TestPeerManager_UndecodableMessageBeforeAuthClosesPeer(t *testing.T) {
+	const deviceID = "mobile-undecodable"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	defer pm.CloseAll()
+
+	m := connectTestMobile(t, pm, sender, deviceID, false)
+	select {
+	case <-m.challenges:
+	case <-time.After(15 * time.Second):
+		t.Fatal("no auth_challenge received")
+	}
+
+	m.mu.Lock()
+	dc := m.dc
+	m.mu.Unlock()
+	if err := dc.Send([]byte{0xc1}); err != nil { // 0xc1 is never valid MessagePack
+		t.Fatalf("send: %v", err)
+	}
+
+	waitUntil(t, authChallengeTimeout/2, "peer to be removed", func() bool {
+		return getPeer(pm, deviceID) == nil
+	})
 }
 
 // TestPeerManager_SendToRefusedUntilAuthConfirmed holds the mobile's

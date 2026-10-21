@@ -47,10 +47,10 @@ func checkServerTransport(serverURL string) error {
 		return nil
 	}
 	host := u.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+	if host == "localhost" {
 		return nil
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && ip.IsPrivate() {
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || (ip.To4() != nil && ip.IsPrivate())) {
 		return nil
 	}
 	return fmt.Errorf("refusing to pair over unencrypted %s:// with non-local server %q; use https://", u.Scheme, host)
@@ -169,6 +169,13 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	if err := StopRunning(paths); err != nil {
 		fmt.Fprintf(w, "warning: failed to stop agent for pairing: %v\n", err)
 	}
+	// Restart the agent on every exit from here on, including failed or
+	// rejected pairings, so the host never stays unreachable.
+	defer func() {
+		if err := ensureAgentRunning(paths, store); err != nil {
+			fmt.Fprintf(w, "warning: failed to restart agent: %v\n", err)
+		}
+	}()
 
 	// Get JWT for WebSocket auth
 	jwt, err := auth.ExchangeToken(id, apiBaseURL, httpClient, hmacSecret)
@@ -239,11 +246,6 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	pidFile := PIDFilePath(paths)
 	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
 		signalReloadPairing(pid)
-	}
-
-	// Restart the background agent (stopped earlier to avoid WebSocket race).
-	if err := ensureAgentRunning(paths, store); err != nil {
-		fmt.Fprintf(w, "warning: failed to restart agent: %v\n", err)
 	}
 
 	return nil

@@ -37,11 +37,12 @@ func SanitizeDisplayString(s string) string {
 	}, s)
 }
 
-// TruncateMobileName sanitizes a mobile device name with SanitizeDisplayString
-// and then truncates it to MaxMobileNameLen runes. It operates on Unicode code
-// points to avoid splitting multi-byte characters.
+// TruncateMobileName truncates a mobile device name to MaxMobileNameLen runes.
+// It operates on Unicode code points to avoid splitting multi-byte characters.
+// It does not sanitize: names are stored as sent (so emoji ZWJ sequences
+// survive) and sanitized with SanitizeDisplayString where they are printed.
 func TruncateMobileName(name string) string {
-	runes := []rune(SanitizeDisplayString(name))
+	runes := []rune(name)
 	if len(runes) > MaxMobileNameLen {
 		return string(runes[:MaxMobileNameLen])
 	}

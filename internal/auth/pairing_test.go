@@ -677,10 +677,11 @@ func TestSanitizeDisplayString(t *testing.T) {
 	}
 }
 
-func TestTruncateMobileName_SanitizesBeforeTruncating(t *testing.T) {
-	in := strings.Repeat("\x1b", 100) + strings.Repeat("a", MaxMobileNameLen+5)
-	got := TruncateMobileName(in)
-	if want := strings.Repeat("a", MaxMobileNameLen); got != want {
-		t.Errorf("TruncateMobileName = %q, want %d 'a' runes", got, MaxMobileNameLen)
+// Names are stored as sent; sanitizing at store time would split emoji ZWJ
+// sequences. Display sites sanitize instead.
+func TestTruncateMobileName_KeepsZWJSequences(t *testing.T) {
+	const name = "Pixel 🏳️‍🌈 👨‍👩‍👧"
+	if got := TruncateMobileName(name); got != name {
+		t.Errorf("TruncateMobileName = %q, want %q unchanged", got, name)
 	}
 }
