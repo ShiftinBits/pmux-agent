@@ -53,6 +53,10 @@ const (
 	connectCycleTimeout = 20 * time.Second
 )
 
+// errAuthRejected marks a WebSocket auth the server explicitly refused (an
+// error reply or a 4001 close), as opposed to a timeout or transport failure.
+var errAuthRejected = errors.New("auth failed")
+
 // jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
 // after a shared server outage don't reconnect in lockstep. The result is
 // deliberately not capped at maxBackoff: capping would re-synchronize every
@@ -217,6 +221,13 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-sc.activitySignal:
+				// Like any wake, resume grants a fresh retry window: failures
+				// from before the sleep must not send the first probe after
+				// it (often while the network is still coming up) to dormancy.
+				sc.mu.Lock()
+				sc.failureStart = time.Time{}
+				sc.mu.Unlock()
+				backoff = startBackoff
 			}
 			continue
 		}
@@ -411,14 +422,22 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		sc.mu.Unlock()
 	}()
 
-	// Authenticate before exposing conn to Send()/Close().
-	if err := sc.authenticate(conn, deadline); err != nil {
-		// Invalidate cached JWT so the next reconnect attempt forces a
-		// fresh token exchange instead of reusing a rejected token.
-		sc.mu.Lock()
-		sc.jwtExpiry = time.Time{}
-		sc.mu.Unlock()
-		return false, err
+	// Authenticate before exposing conn to Send()/Close(). conn isn't reachable
+	// by Close/Suspend yet, so close it on cancel to unblock the auth read.
+	stopAuthWatch := context.AfterFunc(ctx, func() { conn.Close() })
+	authErr := sc.authenticate(conn, deadline)
+	stopAuthWatch()
+	if authErr != nil {
+		// Invalidate the cached JWT only when the server rejected it, so the
+		// next attempt exchanges a fresh one. A timeout or transport error
+		// keeps it: re-exchanging on a slow link would just eat the next
+		// cycle's budget too.
+		if errors.Is(authErr, errAuthRejected) {
+			sc.mu.Lock()
+			sc.jwtExpiry = time.Time{}
+			sc.mu.Unlock()
+		}
+		return false, authErr
 	}
 
 	// Now authenticated — make visible to other goroutines.
@@ -461,7 +480,8 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		if ctx.Err() != nil {
 			// Shutdown: send a close frame so the server sees a clean 1000
 			// close (and reports host_offline) rather than an abnormal drop.
-			// WriteControl is safe alongside presenceLoop's unlocked writes.
+			// WriteControl may run concurrently with the writes presenceLoop
+			// and Send make under sc.mu, so no lock is needed here.
 			_ = conn.WriteControl(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 				time.Now().Add(2*time.Second))
@@ -499,6 +519,9 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn, deadline time.Time
 	conn.SetReadDeadline(time.Time{}) // clear deadline
 
 	if err != nil {
+		if websocket.IsCloseError(err, 4001) {
+			return fmt.Errorf("%w: %v", errAuthRejected, err)
+		}
 		return fmt.Errorf("read auth response: %w", err)
 	}
 
@@ -508,7 +531,7 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn, deadline time.Time
 	}
 
 	if resp.Type == "error" {
-		return fmt.Errorf("auth failed: %s", resp.Error)
+		return fmt.Errorf("%w: %s", errAuthRejected, resp.Error)
 	}
 
 	return nil

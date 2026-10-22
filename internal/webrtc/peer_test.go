@@ -2587,6 +2587,7 @@ func TestPeerManager_HandlePeerUnavailable(t *testing.T) {
 			}
 
 			pm.HandleSignalingMessage(SignalingMessage{Type: "peer_unavailable", DeviceID: tt.signalID})
+			pm.cleanupWg.Wait() // the close runs in the background
 
 			if inMap := getPeer(pm, deviceID) != nil; inMap != tt.wantInMap {
 				t.Errorf("peer in map = %v, want %v", inMap, tt.wantInMap)

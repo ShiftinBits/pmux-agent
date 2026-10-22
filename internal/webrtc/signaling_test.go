@@ -1200,7 +1200,12 @@ func TestSignalingClient_ShutdownSendsNormalCloseFrame(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	// Cancel only once authenticated (conn published), not after a fixed sleep.
+	waitUntil(t, 5*time.Second, "signaling authenticated", func() bool {
+		sc.mu.Lock()
+		defer sc.mu.Unlock()
+		return sc.conn != nil
+	})
 	cancel()
 
 	select {
@@ -1328,6 +1333,94 @@ func TestSignalActivity_WakeGrantsFreshRetryWindow(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestResume_GrantsFreshRetryWindow(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var attempts atomic.Int32
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		attempts.Add(1)
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":"unauthorized"}`))
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	// Suspended while already failing for longer than the dormancy window.
+	sc.mu.Lock()
+	sc.suspended = true
+	sc.failureStart = time.Now().Add(-DormancyTimeout - time.Second)
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	sc.Resume()
+
+	waitUntil(t, 3*time.Second, "retries after resume", func() bool { return attempts.Load() > 1 })
+	sc.mu.Lock()
+	dormant := sc.dormant
+	sc.mu.Unlock()
+	if dormant {
+		t.Error("expected a fresh retry window after resume, not dormancy after the first failed probe")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestSignalingClient_AuthTimeoutKeepsJWT(t *testing.T) {
+	id, logger := testSetup(t)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth, never answered
+		time.Sleep(2 * time.Second)
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sc.ensureToken(ctx); err != nil {
+		t.Fatalf("ensureToken: %v", err)
+	}
+	sc.mu.Lock()
+	expiry := sc.jwtExpiry
+	sc.mu.Unlock()
+
+	// Cancel mid-auth: the read is unblocked promptly and the JWT is kept.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if _, err := sc.connectAndServe(ctx); err == nil {
+		t.Fatal("connectAndServe succeeded without an auth reply")
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("auth wait took %v after cancel, want prompt return", elapsed)
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if !sc.jwtExpiry.Equal(expiry) {
+		t.Error("JWT was invalidated by a canceled auth, want it kept")
 	}
 }
 

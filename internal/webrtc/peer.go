@@ -269,8 +269,10 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 }
 
 // handlePeerUnavailable tears down a half-built peer after the server reports
-// the mobile is gone. A peer whose DataChannel is already open is left alone so
-// a live session is never killed by a late or stale notification.
+// the mobile is gone. A peer that is connecting or connected is left alone: the
+// server also sends peer_unavailable when relaying a single trickled candidate
+// fails (e.g. the mobile closes its signaling socket once ICE connects), and a
+// late or stale notice must never kill a live session.
 func (pm *PeerManager) handlePeerUnavailable(deviceID string) {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
@@ -281,15 +283,22 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID string) {
 	}
 
 	peer.mu.Lock()
-	connected := peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
+	dcOpen := peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
 	peer.mu.Unlock()
-	if connected {
-		pm.logger.Info("ignoring peer_unavailable for connected peer", "mobile", deviceID)
+	pcState := peer.conn.ConnectionState()
+	if dcOpen || pcState == webrtc.PeerConnectionStateConnecting || pcState == webrtc.PeerConnectionStateConnected {
+		pm.logger.Info("ignoring peer_unavailable for live peer", "mobile", deviceID, "pcState", pcState.String())
 		return
 	}
 
+	// Close off the signaling read loop: a Pion close can stall, and the
+	// mobile's retry is about to arrive on this same loop.
 	pm.logger.Info("closing half-built peer after peer_unavailable", "mobile", deviceID)
-	pm.ClosePeerIfCurrent(deviceID, peer)
+	pm.cleanupWg.Add(1)
+	go func() {
+		defer pm.cleanupWg.Done()
+		pm.ClosePeerIfCurrent(deviceID, peer)
+	}()
 }
 
 // ClosePeer closes a specific peer connection.
