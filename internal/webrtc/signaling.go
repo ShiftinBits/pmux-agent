@@ -49,7 +49,7 @@ const (
 	DormancyTimeout = 5 * time.Minute
 
 	// connectCycleTimeout bounds one connection attempt: token exchange, WebSocket
-	// dial and authentication.
+	// dial and authentication share this single budget.
 	connectCycleTimeout = 20 * time.Second
 )
 
@@ -198,6 +198,7 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			case <-sc.activitySignal:
 				sc.mu.Lock()
 				sc.dormant = false
+				sc.failureStart = time.Time{}
 				sc.mu.Unlock()
 				backoff = startBackoff
 				sc.logger.Info("activity signal received, resuming reconnection")
@@ -267,10 +268,12 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-sc.activitySignal:
 			// Activity signal received during backoff — reset and try immediately.
-			// failureStart is kept so a persistent failure returns to dormancy
-			// after this one probe instead of starting a new window.
+			// A wake grants a fresh retry window, so one failed probe while the
+			// network is still coming up does not send the client straight back
+			// to dormancy.
 			sc.mu.Lock()
 			sc.dormant = false
+			sc.failureStart = time.Time{}
 			sc.mu.Unlock()
 			backoff = startBackoff
 			sc.logger.Info("activity signal received during backoff, reconnecting immediately")
@@ -370,9 +373,12 @@ func (sc *SignalingClient) Close() {
 // Returns (true, err) if auth succeeded before the error, (false, err) otherwise.
 func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool, err error) {
 	deadline := time.Now().Add(connectCycleTimeout)
+	cycleCtx, cancelCycle := context.WithDeadline(ctx, deadline)
+	defer cancelCycle()
 
-	// Ensure we have a valid JWT
-	if err := sc.ensureToken(); err != nil {
+	// Ensure we have a valid JWT. The exchange shares the cycle budget with the
+	// dial and authentication below.
+	if err := sc.ensureToken(cycleCtx); err != nil {
 		return false, fmt.Errorf("obtain JWT: %w", err)
 	}
 
@@ -382,12 +388,9 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 
 	dialer := &websocket.Dialer{
-		HandshakeTimeout: 15 * time.Second,
-		Proxy:            http.ProxyFromEnvironment,
+		Proxy: http.ProxyFromEnvironment,
 	}
-	dialCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	conn, resp, err := dialer.DialContext(dialCtx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
+	conn, resp, err := dialer.DialContext(cycleCtx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -444,8 +447,17 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	// Close conn when context is canceled (or connection ends) to unblock readLoop.
 	// Uses presenceCtx so this goroutine exits when connectAndServe returns,
 	// preventing a goroutine leak if ctx outlives this connection.
+	readDone := make(chan struct{})
 	go func() {
 		<-presenceCtx.Done()
+		select {
+		case <-readDone:
+			// The read loop already failed, so the connection is dead or
+			// half-open; a close frame would only wait out its write deadline.
+			conn.Close()
+			return
+		default:
+		}
 		if ctx.Err() != nil {
 			// Shutdown: send a close frame so the server sees a clean 1000
 			// close (and reports host_offline) rather than an abnormal drop.
@@ -458,7 +470,9 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	}()
 
 	// Read messages
-	return true, sc.readLoop(conn)
+	err = sc.readLoop(conn)
+	close(readDone)
+	return true, err
 }
 
 // authenticate sends the JWT auth message and waits for confirmation.
@@ -520,22 +534,26 @@ func parseJWTExpiry(token string) time.Time {
 	return time.Unix(claims.Exp, 0)
 }
 
-// ensureToken obtains or refreshes the JWT if needed.
-func (sc *SignalingClient) ensureToken() error {
+// ensureToken obtains or refreshes the JWT if needed. The exchange is bound to
+// ctx and runs without sc.mu held, so a slow token endpoint never blocks Send,
+// Suspend or Close.
+func (sc *SignalingClient) ensureToken(ctx context.Context) error {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
 	if sc.jwt != "" && time.Until(sc.jwtExpiry) > TokenRefreshMargin {
 		sc.logger.Debug("using cached JWT", "expiresIn", time.Until(sc.jwtExpiry).Round(time.Second))
+		sc.mu.Unlock()
 		return nil
 	}
+	sc.mu.Unlock()
 
 	sc.logger.Info("exchanging new JWT")
-	token, err := auth.ExchangeToken(sc.identity, sc.serverURL, sc.HTTPClient, sc.hmacSecret)
+	token, err := auth.ExchangeTokenContext(ctx, sc.identity, sc.serverURL, sc.HTTPClient, sc.hmacSecret)
 	if err != nil {
 		return err
 	}
 
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	sc.jwt = token
 	if exp := parseJWTExpiry(token); !exp.IsZero() {
 		sc.jwtExpiry = exp
@@ -626,7 +644,7 @@ func (sc *SignalingClient) tokenRefreshLoop(ctx context.Context) {
 			continue
 		}
 
-		if err := sc.ensureToken(); err != nil {
+		if err := sc.ensureToken(ctx); err != nil {
 			sc.logger.Warn("failed to refresh JWT", "error", err)
 			lastFailure = time.Now()
 			if failBackoff == 0 {

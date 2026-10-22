@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,11 @@ type tokenResponse struct {
 // fetchChallenge requests a single-use nonce from the server for challenge signing.
 // The nonce is used in place of a timestamp to prevent JWT replay attacks.
 func fetchChallenge(deviceID, serverURL string, client *http.Client, hmacSecret string) (string, error) {
+	return fetchChallengeContext(context.Background(), deviceID, serverURL, client, hmacSecret)
+}
+
+// fetchChallengeContext is fetchChallenge bound to ctx.
+func fetchChallengeContext(ctx context.Context, deviceID, serverURL string, client *http.Client, hmacSecret string) (string, error) {
 	reqBody := struct {
 		DeviceID string `json:"deviceId"`
 	}{DeviceID: deviceID}
@@ -29,7 +35,7 @@ func fetchChallenge(deviceID, serverURL string, client *http.Client, hmacSecret 
 	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/challenge"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create challenge request: %w", err)
 	}
@@ -72,7 +78,13 @@ func fetchChallenge(deviceID, serverURL string, client *http.Client, hmacSecret 
 // key, and exchanges it for a JWT.
 // serverURL should be the base URL of the signaling server (e.g., "https://signal.pmux.io").
 func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecret string) (string, error) {
-	nonce, err := fetchChallenge(id.DeviceID, serverURL, client, hmacSecret)
+	return ExchangeTokenContext(context.Background(), id, serverURL, client, hmacSecret)
+}
+
+// ExchangeTokenContext is ExchangeToken bound to ctx: canceling ctx or hitting
+// its deadline aborts the in-flight challenge or token request.
+func ExchangeTokenContext(ctx context.Context, id *Identity, serverURL string, client *http.Client, hmacSecret string) (string, error) {
+	nonce, err := fetchChallengeContext(ctx, id.DeviceID, serverURL, client, hmacSecret)
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +105,7 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecr
 	}
 
 	url := strings.TrimRight(serverURL, "/") + "/auth/token"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create token request: %w", err)
 	}

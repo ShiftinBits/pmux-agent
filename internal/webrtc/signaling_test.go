@@ -662,7 +662,7 @@ func TestTokenRefreshLoop_RefreshesToken(t *testing.T) {
 	// Instead, directly call ensureToken() to simulate what the loop does —
 	// this proves the refresh path works and increments the server counter.
 	initialCount := tokenCallCount.Load()
-	if err := sc.ensureToken(); err != nil {
+	if err := sc.ensureToken(context.Background()); err != nil {
 		t.Fatalf("ensureToken() after forcing expiry: %v", err)
 	}
 
@@ -735,7 +735,7 @@ func TestTokenRefreshLoop_ServerError(t *testing.T) {
 	sc.jwtExpiry = time.Now().Add(-time.Hour)
 	sc.mu.Unlock()
 
-	err := sc.ensureToken()
+	err := sc.ensureToken(context.Background())
 	if err == nil {
 		t.Error("expected error from ensureToken() when server returns 500, got nil")
 	}
@@ -1270,7 +1270,7 @@ func TestSignalingClient_ServerDropSendsNoCloseFrame(t *testing.T) {
 	}
 }
 
-func TestSignalActivity_SpuriousWakeReturnsToDormancyAfterOneProbe(t *testing.T) {
+func TestSignalActivity_WakeGrantsFreshRetryWindow(t *testing.T) {
 	id, logger := testSetup(t)
 
 	var attempts atomic.Int32
@@ -1307,23 +1307,20 @@ func TestSignalActivity_SpuriousWakeReturnsToDormancyAfterOneProbe(t *testing.T)
 		sc.mu.Lock()
 		dormant := sc.dormant
 		sc.mu.Unlock()
-		if dormant && attempts.Load() > 0 {
+		if !dormant && attempts.Load() > 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Allow time for any extra (unwanted) attempts from a fresh failure window.
-	time.Sleep(300 * time.Millisecond)
-
 	sc.mu.Lock()
 	dormant := sc.dormant
 	sc.mu.Unlock()
-	if !dormant {
-		t.Error("expected client to return to dormancy after one probe")
+	if dormant {
+		t.Error("expected client to keep retrying after a wake, not return to dormancy after one failed probe")
 	}
-	if got := attempts.Load(); got != 1 {
-		t.Errorf("attempts = %d, want 1", got)
+	if got := attempts.Load(); got < 2 {
+		t.Errorf("attempts = %d, want at least 2", got)
 	}
 
 	cancel()
@@ -1331,5 +1328,33 @@ func TestSignalActivity_SpuriousWakeReturnsToDormancyAfterOneProbe(t *testing.T)
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestEnsureToken_HonorsContext(t *testing.T) {
+	id, logger := testSetup(t)
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if err := sc.ensureToken(ctx); err == nil {
+		t.Fatal("ensureToken() succeeded against a hung server, want context error")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("ensureToken() took %v, want it bound by the context", elapsed)
 	}
 }
