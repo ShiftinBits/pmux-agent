@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1027,6 +1028,40 @@ func TestParseJWTExpiry(t *testing.T) {
 	}
 	if !parseJWTExpiry("a.!!!invalid-base64!!!.c").IsZero() {
 		t.Error("expected zero time for invalid base64")
+	}
+}
+
+func TestSignalingMessage_DecodesAttemptID(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "present", raw: `{"type":"peer_unavailable","deviceId":"x","attemptId":"` + testAttemptA + `"}`, want: testAttemptA},
+		{name: "absent", raw: `{"type":"peer_unavailable","deviceId":"x"}`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msg SignalingMessage
+			if err := json.Unmarshal([]byte(tt.raw), &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if msg.AttemptID != tt.want {
+				t.Errorf("AttemptID = %q, want %q", msg.AttemptID, tt.want)
+			}
+		})
+	}
+}
+
+// TestSignalingMessage_EncodesAttemptIDKey pins the exact wire key: decoding
+// matches keys case-insensitively, so only encoding catches a mis-cased tag.
+func TestSignalingMessage_EncodesAttemptIDKey(t *testing.T) {
+	b, err := json.Marshal(SignalingMessage{Type: "sdp_offer", AttemptID: testAttemptA})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if want := `"attemptId":"` + testAttemptA + `"`; !strings.Contains(string(b), want) {
+		t.Errorf("encoded %s, want it to contain %s", b, want)
 	}
 }
 

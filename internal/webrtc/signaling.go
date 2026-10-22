@@ -75,6 +75,7 @@ type SignalingMessage struct {
 	Reason         string `json:"reason,omitempty"`
 	TargetDeviceID string `json:"targetDeviceId,omitempty"`
 	DeviceID       string `json:"deviceId,omitempty"`
+	AttemptID      string `json:"attemptId,omitempty"`
 
 	// SDP fields
 	SDP string `json:"sdp,omitempty"`
