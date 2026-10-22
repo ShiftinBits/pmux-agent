@@ -1030,6 +1030,28 @@ func TestParseJWTExpiry(t *testing.T) {
 	}
 }
 
+func TestSignalingMessage_DecodesAttemptID(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "present", raw: `{"type":"peer_unavailable","deviceId":"x","attemptId":"ab"}`, want: "ab"},
+		{name: "absent", raw: `{"type":"peer_unavailable","deviceId":"x"}`, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msg SignalingMessage
+			if err := json.Unmarshal([]byte(tt.raw), &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if msg.AttemptID != tt.want {
+				t.Errorf("AttemptID = %q, want %q", msg.AttemptID, tt.want)
+			}
+		})
+	}
+}
+
 func TestSuspendResume_ToggleStateAndSignal(t *testing.T) {
 	id, logger := testSetup(t)
 	// No live connection needed; Suspend with a nil conn just sets the flag.

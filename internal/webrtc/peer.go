@@ -150,6 +150,7 @@ type Peer struct {
 	// guarded by mu.
 	pm            *PeerManager // back-reference, used to close on auth failure
 	sharedSecret  []byte       // pairing secret; set once at creation, never mutated
+	attemptID     string       // mobile's connect attempt ID ("" from older mobiles/servers); set once at creation, never mutated
 	authenticated bool         // true once the peer proved key possession; gates inbound requests
 	authConfirmed bool         // true once auth_confirm was sent to the peer; gates outbound messages
 	authResolved  bool         // true once auth concluded (success or failure); makes verify and the timeout mutually exclusive
@@ -253,14 +254,14 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 	switch msg.Type {
 	case "connect_request":
-		pm.handleConnectRequest(msg.TargetDeviceID)
+		pm.handleConnectRequest(msg.TargetDeviceID, msg.AttemptID)
 	case "sdp_answer":
 		pm.handleSDPAnswer(msg.TargetDeviceID, msg.SDP)
 	case "ice_candidate":
 		pm.handleICECandidate(msg.TargetDeviceID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
 	case "peer_unavailable":
 		// The server reports the mobile's deviceId (not targetDeviceId).
-		pm.handlePeerUnavailable(msg.DeviceID)
+		pm.handlePeerUnavailable(msg.DeviceID, msg.AttemptID)
 	case "presence_ack":
 		// Server acknowledgement of our presence heartbeat; nothing to do.
 	default:
@@ -272,13 +273,22 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 // the mobile is gone. A peer that is connecting or connected is left alone: the
 // server also sends peer_unavailable when relaying a single trickled candidate
 // fails (e.g. the mobile closes its signaling socket once ICE connects), and a
-// late or stale notice must never kill a live session.
-func (pm *PeerManager) handlePeerUnavailable(deviceID string) {
+// late or stale notice must never kill a live session. Peers are keyed by
+// device ID, so a notice whose attempt ID differs from the current peer's is
+// for a replaced attempt and is ignored; when either side lacks an attempt ID
+// (older mobile or server) the notice applies to the current peer.
+func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
 	pm.mu.Unlock()
 	if !ok {
 		pm.logger.Debug("peer_unavailable for unknown peer", "mobile", deviceID)
+		return
+	}
+
+	if attemptID != "" && peer.attemptID != "" && attemptID != peer.attemptID {
+		pm.logger.Info("ignoring peer_unavailable for previous attempt",
+			"mobile", deviceID, "attempt", attemptID, "currentAttempt", peer.attemptID)
 		return
 	}
 
@@ -470,9 +480,9 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 }
 
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
-func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
+func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	requestStart := time.Now()
-	pm.logger.Info("connect_request received", "mobile", mobileDeviceID)
+	pm.logger.Info("connect_request received", "mobile", mobileDeviceID, "attempt", attemptID)
 
 	// Validate device is the paired device. Fail closed: an empty allowedID
 	// (e.g. an unpaired agent) rejects all connections rather than accepting any.
@@ -648,6 +658,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 		forceRelay:   pm.ForceRelay,
 		pm:           pm,
 		sharedSecret: sharedSecret,
+		attemptID:    attemptID,
 	}
 
 	pm.mu.Lock()
@@ -708,6 +719,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID string) {
 	if err := pm.signaling.Send(SignalingMessage{
 		Type:           "sdp_offer",
 		TargetDeviceID: mobileDeviceID,
+		AttemptID:      peer.attemptID,
 		SDP:            offer.SDP,
 	}); err != nil {
 		pm.logger.Error("failed to send SDP offer", "error", err)
@@ -1033,6 +1045,7 @@ func (pm *PeerManager) attemptICERestart(deviceID string) {
 	if err := pm.signaling.Send(SignalingMessage{
 		Type:           "sdp_offer",
 		TargetDeviceID: deviceID,
+		AttemptID:      peer.attemptID,
 		SDP:            offer.SDP,
 	}); err != nil {
 		pm.logger.Error("ICE restart: failed to send SDP offer", "error", err, "mobile", deviceID)
@@ -1156,6 +1169,7 @@ func (p *Peer) sendICECandidate(c *webrtc.ICECandidate) {
 	if err := p.signaling.Send(SignalingMessage{
 		Type:           "ice_candidate",
 		TargetDeviceID: p.DeviceID,
+		AttemptID:      p.attemptID,
 		Candidate:      init.Candidate,
 		SDPMid:         sdpMid,
 		SDPMLineIndex:  mLineIndex,

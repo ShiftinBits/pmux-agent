@@ -128,8 +128,15 @@ type testMobile struct {
 // is used, so it also works for a reconnect that replaces an existing peer.
 func connectTestMobile(t *testing.T, pm *PeerManager, sender *mockSender, deviceID string, autoRespond bool) *testMobile {
 	t.Helper()
+	return connectTestMobileAttempt(t, pm, sender, deviceID, "", autoRespond)
+}
+
+// connectTestMobileAttempt is connectTestMobile with the connect attempt ID the
+// server forwards on connect_request.
+func connectTestMobileAttempt(t *testing.T, pm *PeerManager, sender *mockSender, deviceID, attemptID string, autoRespond bool) *testMobile {
+	t.Helper()
 	mark := sender.mark()
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: attemptID})
 	offers := sender.messagesOfTypeSince("sdp_offer", mark)
 	if len(offers) == 0 {
 		t.Fatalf("no SDP offer sent to %s", deviceID)
