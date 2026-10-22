@@ -2544,3 +2544,60 @@ func TestPeerManager_ICECandidateBufferCapped(t *testing.T) {
 		t.Errorf("buffered %d candidates, want %d", n, maxBufferedICECandidates)
 	}
 }
+
+func TestPeerManager_HandlePeerUnavailable(t *testing.T) {
+	const deviceID = "mobile-unavail"
+	tests := []struct {
+		name      string
+		connect   bool // complete the WebRTC exchange so the DataChannel opens
+		pending   bool // only send connect_request
+		signalID  string
+		wantInMap bool
+	}{
+		{name: "pending peer is closed and removed", pending: true, signalID: deviceID},
+		{name: "connected peer is ignored", connect: true, signalID: deviceID, wantInMap: true},
+		{name: "unknown device is a no-op", pending: true, signalID: "someone-else", wantInMap: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := &mockSender{}
+			pm := newAuthTestManager(t, sender, deviceID, nil)
+			defer pm.CloseAll()
+
+			if tt.connect {
+				connectTestMobile(t, pm, sender, deviceID, true)
+				peer := getPeer(pm, deviceID)
+				if peer == nil {
+					t.Fatal("peer not installed")
+				}
+				waitUntil(t, 15*time.Second, "data channel open", func() bool {
+					peer.mu.Lock()
+					defer peer.mu.Unlock()
+					return peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
+				})
+			} else {
+				pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+				if len(sender.messagesOfType("sdp_offer")) == 0 {
+					t.Fatal("no SDP offer sent")
+				}
+			}
+			peer := getPeer(pm, deviceID)
+			if peer == nil {
+				t.Fatal("peer not installed")
+			}
+
+			pm.HandleSignalingMessage(SignalingMessage{Type: "peer_unavailable", DeviceID: tt.signalID})
+			pm.cleanupWg.Wait() // the close runs in the background
+
+			if inMap := getPeer(pm, deviceID) != nil; inMap != tt.wantInMap {
+				t.Errorf("peer in map = %v, want %v", inMap, tt.wantInMap)
+			}
+			peer.mu.Lock()
+			closed := peer.closed
+			peer.mu.Unlock()
+			if closed == tt.wantInMap {
+				t.Errorf("peer closed = %v, want %v", closed, !tt.wantInMap)
+			}
+		})
+	}
+}

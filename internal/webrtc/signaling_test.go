@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -660,7 +662,7 @@ func TestTokenRefreshLoop_RefreshesToken(t *testing.T) {
 	// Instead, directly call ensureToken() to simulate what the loop does —
 	// this proves the refresh path works and increments the server counter.
 	initialCount := tokenCallCount.Load()
-	if err := sc.ensureToken(); err != nil {
+	if err := sc.ensureToken(context.Background()); err != nil {
 		t.Fatalf("ensureToken() after forcing expiry: %v", err)
 	}
 
@@ -733,7 +735,7 @@ func TestTokenRefreshLoop_ServerError(t *testing.T) {
 	sc.jwtExpiry = time.Now().Add(-time.Hour)
 	sc.mu.Unlock()
 
-	err := sc.ensureToken()
+	err := sc.ensureToken(context.Background())
 	if err == nil {
 		t.Error("expected error from ensureToken() when server returns 500, got nil")
 	}
@@ -1167,5 +1169,285 @@ func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 				t.Errorf("connected = %v, want %v", connected, tt.authenticate)
 			}
 		})
+	}
+}
+
+func TestSignalingClient_ShutdownSendsNormalCloseFrame(t *testing.T) {
+	id, logger := testSetup(t)
+
+	readErr := make(chan error, 1)
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				readErr <- err
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	// Cancel only once authenticated (conn published), not after a fixed sleep.
+	waitUntil(t, 5*time.Second, "signaling authenticated", func() bool {
+		sc.mu.Lock()
+		defer sc.mu.Unlock()
+		return sc.conn != nil
+	})
+	cancel()
+
+	select {
+	case err := <-readErr:
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) {
+			t.Fatalf("server read error = %v, want *websocket.CloseError", err)
+		}
+		if closeErr.Code != websocket.CloseNormalClosure {
+			t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseNormalClosure)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not observe a close")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}
+
+func TestSignalingClient_ServerDropSendsNoCloseFrame(t *testing.T) {
+	id, logger := testSetup(t)
+
+	trailing := make(chan []byte, 1)
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		tcp, ok := conn.UnderlyingConn().(*net.TCPConn)
+		if !ok {
+			trailing <- []byte("not a TCP conn")
+			return
+		}
+		// Half-close: the client sees EOF, while we can still observe
+		// anything the client writes back during its teardown.
+		tcp.CloseWrite()
+		tcp.SetReadDeadline(time.Now().Add(1 * time.Second))
+		data, _ := io.ReadAll(tcp)
+		trailing <- data
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case data := <-trailing:
+		if len(data) != 0 {
+			t.Errorf("client wrote %d bytes after server drop, want none: %x", len(data), data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handler did not finish")
+	}
+}
+
+func TestSignalActivity_WakeGrantsFreshRetryWindow(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var attempts atomic.Int32
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		attempts.Add(1)
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":"unauthorized"}`))
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	// Dormant after a failure window that has already elapsed.
+	sc.mu.Lock()
+	sc.dormant = true
+	sc.failureStart = time.Now().Add(-DormancyTimeout - time.Second)
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	sc.SignalActivity()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		sc.mu.Lock()
+		dormant := sc.dormant
+		sc.mu.Unlock()
+		if !dormant && attempts.Load() > 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	sc.mu.Lock()
+	dormant := sc.dormant
+	sc.mu.Unlock()
+	if dormant {
+		t.Error("expected client to keep retrying after a wake, not return to dormancy after one failed probe")
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Errorf("attempts = %d, want at least 2", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestResume_GrantsFreshRetryWindow(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var attempts atomic.Int32
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		attempts.Add(1)
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":"unauthorized"}`))
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	// Suspended while already failing for longer than the dormancy window.
+	sc.mu.Lock()
+	sc.suspended = true
+	sc.failureStart = time.Now().Add(-DormancyTimeout - time.Second)
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	sc.Resume()
+
+	waitUntil(t, 3*time.Second, "retries after resume", func() bool { return attempts.Load() > 1 })
+	sc.mu.Lock()
+	dormant := sc.dormant
+	sc.mu.Unlock()
+	if dormant {
+		t.Error("expected a fresh retry window after resume, not dormancy after the first failed probe")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after context cancel")
+	}
+}
+
+func TestSignalingClient_AuthTimeoutKeepsJWT(t *testing.T) {
+	id, logger := testSetup(t)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth, never answered
+		time.Sleep(2 * time.Second)
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sc.ensureToken(ctx); err != nil {
+		t.Fatalf("ensureToken: %v", err)
+	}
+	sc.mu.Lock()
+	expiry := sc.jwtExpiry
+	sc.mu.Unlock()
+
+	// Cancel mid-auth: the read is unblocked promptly and the JWT is kept.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if _, err := sc.connectAndServe(ctx); err == nil {
+		t.Fatal("connectAndServe succeeded without an auth reply")
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Errorf("auth wait took %v after cancel, want prompt return", elapsed)
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if !sc.jwtExpiry.Equal(expiry) {
+		t.Error("JWT was invalidated by a canceled auth, want it kept")
+	}
+}
+
+func TestEnsureToken_HonorsContext(t *testing.T) {
+	id, logger := testSetup(t)
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if err := sc.ensureToken(ctx); err == nil {
+		t.Fatal("ensureToken() succeeded against a hung server, want context error")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("ensureToken() took %v, want it bound by the context", elapsed)
 	}
 }

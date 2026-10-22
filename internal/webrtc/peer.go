@@ -77,6 +77,9 @@ type PeerManager struct {
 	handler    ProtocolHandler
 	hmacSecret string
 
+	// httpClient is reused for TURN credential requests.
+	httpClient *http.Client
+
 	// API is the Pion WebRTC API used to create peer connections.
 	// If nil, the default API is used. Set this for testing with custom settings.
 	API *webrtc.API
@@ -236,6 +239,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		jwt:              jwtFn,
 		handler:          handler,
 		hmacSecret:       hmacSecret,
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
@@ -244,7 +248,8 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 	}
 }
 
-// HandleSignalingMessage processes an incoming signaling message (connect_request, sdp_answer, ice_candidate).
+// HandleSignalingMessage processes an incoming signaling message (connect_request,
+// sdp_answer, ice_candidate, peer_unavailable).
 func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 	switch msg.Type {
 	case "connect_request":
@@ -253,11 +258,47 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 		pm.handleSDPAnswer(msg.TargetDeviceID, msg.SDP)
 	case "ice_candidate":
 		pm.handleICECandidate(msg.TargetDeviceID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
+	case "peer_unavailable":
+		// The server reports the mobile's deviceId (not targetDeviceId).
+		pm.handlePeerUnavailable(msg.DeviceID)
 	case "presence_ack":
 		// Server acknowledgement of our presence heartbeat; nothing to do.
 	default:
 		pm.logger.Debug("unhandled signaling message type", "type", msg.Type)
 	}
+}
+
+// handlePeerUnavailable tears down a half-built peer after the server reports
+// the mobile is gone. A peer that is connecting or connected is left alone: the
+// server also sends peer_unavailable when relaying a single trickled candidate
+// fails (e.g. the mobile closes its signaling socket once ICE connects), and a
+// late or stale notice must never kill a live session.
+func (pm *PeerManager) handlePeerUnavailable(deviceID string) {
+	pm.mu.Lock()
+	peer, ok := pm.peers[deviceID]
+	pm.mu.Unlock()
+	if !ok {
+		pm.logger.Debug("peer_unavailable for unknown peer", "mobile", deviceID)
+		return
+	}
+
+	peer.mu.Lock()
+	dcOpen := peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
+	peer.mu.Unlock()
+	pcState := peer.conn.ConnectionState()
+	if dcOpen || pcState == webrtc.PeerConnectionStateConnecting || pcState == webrtc.PeerConnectionStateConnected {
+		pm.logger.Info("ignoring peer_unavailable for live peer", "mobile", deviceID, "pcState", pcState.String())
+		return
+	}
+
+	// Close off the signaling read loop: a Pion close can stall, and the
+	// mobile's retry is about to arrive on this same loop.
+	pm.logger.Info("closing half-built peer after peer_unavailable", "mobile", deviceID)
+	pm.cleanupWg.Add(1)
+	go func() {
+		defer pm.cleanupWg.Done()
+		pm.ClosePeerIfCurrent(deviceID, peer)
+	}()
 }
 
 // ClosePeer closes a specific peer connection.
@@ -789,8 +830,7 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 	req.Header.Set("Authorization", "Bearer "+pm.jwt())
 	auth.SignRequest(req, pm.hmacSecret)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := pm.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("TURN credentials request: %w", err)
 	}
