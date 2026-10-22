@@ -244,7 +244,8 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 	}
 }
 
-// HandleSignalingMessage processes an incoming signaling message (connect_request, sdp_answer, ice_candidate).
+// HandleSignalingMessage processes an incoming signaling message (connect_request,
+// sdp_answer, ice_candidate, peer_unavailable).
 func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 	switch msg.Type {
 	case "connect_request":
@@ -253,11 +254,38 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 		pm.handleSDPAnswer(msg.TargetDeviceID, msg.SDP)
 	case "ice_candidate":
 		pm.handleICECandidate(msg.TargetDeviceID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
+	case "peer_unavailable":
+		// The server reports the mobile's deviceId (not targetDeviceId).
+		pm.handlePeerUnavailable(msg.DeviceID)
 	case "presence_ack":
 		// Server acknowledgement of our presence heartbeat; nothing to do.
 	default:
 		pm.logger.Debug("unhandled signaling message type", "type", msg.Type)
 	}
+}
+
+// handlePeerUnavailable tears down a half-built peer after the server reports
+// the mobile is gone. A peer whose DataChannel is already open is left alone so
+// a live session is never killed by a late or stale notification.
+func (pm *PeerManager) handlePeerUnavailable(deviceID string) {
+	pm.mu.Lock()
+	peer, ok := pm.peers[deviceID]
+	pm.mu.Unlock()
+	if !ok {
+		pm.logger.Debug("peer_unavailable for unknown peer", "mobile", deviceID)
+		return
+	}
+
+	peer.mu.Lock()
+	connected := peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
+	peer.mu.Unlock()
+	if connected {
+		pm.logger.Info("ignoring peer_unavailable for connected peer", "mobile", deviceID)
+		return
+	}
+
+	pm.logger.Info("closing half-built peer after peer_unavailable", "mobile", deviceID)
+	pm.ClosePeerIfCurrent(deviceID, peer)
 }
 
 // ClosePeer closes a specific peer connection.
