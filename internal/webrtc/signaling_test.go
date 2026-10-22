@@ -1269,3 +1269,67 @@ func TestSignalingClient_ServerDropSendsNoCloseFrame(t *testing.T) {
 		t.Fatal("server handler did not finish")
 	}
 }
+
+func TestSignalActivity_SpuriousWakeReturnsToDormancyAfterOneProbe(t *testing.T) {
+	id, logger := testSetup(t)
+
+	var attempts atomic.Int32
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		attempts.Add(1)
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":"unauthorized"}`))
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	// Dormant after a failure window that has already elapsed.
+	sc.mu.Lock()
+	sc.dormant = true
+	sc.failureStart = time.Now().Add(-DormancyTimeout - time.Second)
+	sc.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	sc.SignalActivity()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		sc.mu.Lock()
+		dormant := sc.dormant
+		sc.mu.Unlock()
+		if dormant && attempts.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Allow time for any extra (unwanted) attempts from a fresh failure window.
+	time.Sleep(300 * time.Millisecond)
+
+	sc.mu.Lock()
+	dormant := sc.dormant
+	sc.mu.Unlock()
+	if !dormant {
+		t.Error("expected client to return to dormancy after one probe")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after context cancel")
+	}
+}

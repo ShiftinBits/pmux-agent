@@ -77,6 +77,9 @@ type PeerManager struct {
 	handler    ProtocolHandler
 	hmacSecret string
 
+	// httpClient is reused for TURN credential requests.
+	httpClient *http.Client
+
 	// API is the Pion WebRTC API used to create peer connections.
 	// If nil, the default API is used. Set this for testing with custom settings.
 	API *webrtc.API
@@ -236,6 +239,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		jwt:              jwtFn,
 		handler:          handler,
 		hmacSecret:       hmacSecret,
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
@@ -817,8 +821,7 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 	req.Header.Set("Authorization", "Bearer "+pm.jwt())
 	auth.SignRequest(req, pm.hmacSecret)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := pm.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("TURN credentials request: %w", err)
 	}

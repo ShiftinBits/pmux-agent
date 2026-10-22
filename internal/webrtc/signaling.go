@@ -47,6 +47,10 @@ const (
 	// DormancyTimeout is how long continuous reconnection failures must persist
 	// before the signaling client enters dormancy (stops retrying).
 	DormancyTimeout = 5 * time.Minute
+
+	// connectCycleTimeout bounds one connection attempt: token exchange, WebSocket
+	// dial and authentication.
+	connectCycleTimeout = 20 * time.Second
 )
 
 // jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
@@ -194,7 +198,6 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			case <-sc.activitySignal:
 				sc.mu.Lock()
 				sc.dormant = false
-				sc.failureStart = time.Time{}
 				sc.mu.Unlock()
 				backoff = startBackoff
 				sc.logger.Info("activity signal received, resuming reconnection")
@@ -263,9 +266,10 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-sc.activitySignal:
-			// Activity signal received during backoff — reset and try immediately
+			// Activity signal received during backoff — reset and try immediately.
+			// failureStart is kept so a persistent failure returns to dormancy
+			// after this one probe instead of starting a new window.
 			sc.mu.Lock()
-			sc.failureStart = time.Time{}
 			sc.dormant = false
 			sc.mu.Unlock()
 			backoff = startBackoff
@@ -365,6 +369,8 @@ func (sc *SignalingClient) Close() {
 // connectAndServe establishes one WebSocket connection and runs until disconnect.
 // Returns (true, err) if auth succeeded before the error, (false, err) otherwise.
 func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool, err error) {
+	deadline := time.Now().Add(connectCycleTimeout)
+
 	// Ensure we have a valid JWT
 	if err := sc.ensureToken(); err != nil {
 		return false, fmt.Errorf("obtain JWT: %w", err)
@@ -379,7 +385,9 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		HandshakeTimeout: 15 * time.Second,
 		Proxy:            http.ProxyFromEnvironment,
 	}
-	conn, resp, err := dialer.DialContext(ctx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
+	dialCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	conn, resp, err := dialer.DialContext(dialCtx, wsURL, auth.SignWebSocketHeaders(wsURL, sc.hmacSecret))
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -401,7 +409,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	}()
 
 	// Authenticate before exposing conn to Send()/Close().
-	if err := sc.authenticate(conn); err != nil {
+	if err := sc.authenticate(conn, deadline); err != nil {
 		// Invalidate cached JWT so the next reconnect attempt forces a
 		// fresh token exchange instead of reusing a rejected token.
 		sc.mu.Lock()
@@ -454,7 +462,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 }
 
 // authenticate sends the JWT auth message and waits for confirmation.
-func (sc *SignalingClient) authenticate(conn *websocket.Conn) error {
+func (sc *SignalingClient) authenticate(conn *websocket.Conn, deadline time.Time) error {
 	sc.mu.Lock()
 	jwt := sc.jwt
 	sc.mu.Unlock()
@@ -465,14 +473,14 @@ func (sc *SignalingClient) authenticate(conn *websocket.Conn) error {
 		return fmt.Errorf("marshal auth message: %w", err)
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	conn.SetWriteDeadline(deadline)
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		return fmt.Errorf("send auth message: %w", err)
 	}
 	conn.SetWriteDeadline(time.Time{}) // clear deadline
 
 	// Wait for auth response
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	conn.SetReadDeadline(deadline)
 	_, respData, err := conn.ReadMessage()
 	conn.SetReadDeadline(time.Time{}) // clear deadline
 
