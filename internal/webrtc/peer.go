@@ -11,8 +11,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,17 @@ import (
 // maxBufferedICECandidates caps candidates buffered before the remote
 // description is set, bounding memory from a flooding signaling peer.
 const maxBufferedICECandidates = 64
+
+// attemptIDPattern is the shape of a connect attempt ID (16 random bytes, hex).
+// Anything else from the signaling server is discarded rather than trusted.
+var attemptIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// maxReplacedAttempts bounds how many replaced connect attempt IDs a
+// PeerManager remembers for matching late peer_unavailable notices.
+//
+// ponytail: 8 covers a burst of mobile retries; a notice for an attempt that
+// has aged out of the record is treated as unknown and can close a pending peer.
+const maxReplacedAttempts = 8
 
 // DataChannelLabel is the name of the WebRTC DataChannel used for terminal protocol.
 const DataChannelLabel = "terminal"
@@ -122,6 +135,7 @@ type PeerManager struct {
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
 	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
 	closed           bool                   // true after CloseAll() returns
+	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
 	turnCache        []webrtc.ICEServer     // cached TURN credentials
 	turnCacheTime    time.Time              // when turnCache was last populated
 }
@@ -250,15 +264,20 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 }
 
 // HandleSignalingMessage processes an incoming signaling message (connect_request,
-// sdp_answer, ice_candidate, peer_unavailable).
+// sdp_answer, ice_candidate, peer_unavailable). A malformed attempt ID is
+// blanked, so it is treated like one from an older mobile or server.
 func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
+	if msg.AttemptID != "" && !attemptIDPattern.MatchString(msg.AttemptID) {
+		pm.logger.Warn("discarding malformed attempt ID", "type", msg.Type, "length", len(msg.AttemptID))
+		msg.AttemptID = ""
+	}
 	switch msg.Type {
 	case "connect_request":
 		pm.handleConnectRequest(msg.TargetDeviceID, msg.AttemptID)
 	case "sdp_answer":
-		pm.handleSDPAnswer(msg.TargetDeviceID, msg.SDP)
+		pm.handleSDPAnswer(msg.TargetDeviceID, msg.AttemptID, msg.SDP)
 	case "ice_candidate":
-		pm.handleICECandidate(msg.TargetDeviceID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
+		pm.handleICECandidate(msg.TargetDeviceID, msg.AttemptID, msg.Candidate, msg.SDPMid, msg.SDPMLineIndex)
 	case "peer_unavailable":
 		// The server reports the mobile's deviceId (not targetDeviceId).
 		pm.handlePeerUnavailable(msg.DeviceID, msg.AttemptID)
@@ -274,20 +293,22 @@ func (pm *PeerManager) HandleSignalingMessage(msg SignalingMessage) {
 // server also sends peer_unavailable when relaying a single trickled candidate
 // fails (e.g. the mobile closes its signaling socket once ICE connects), and a
 // late or stale notice must never kill a live session. Peers are keyed by
-// device ID, so a notice whose attempt ID differs from the current peer's is
-// for a replaced attempt and is ignored; when either side lacks an attempt ID
-// (older mobile or server) the notice applies to the current peer.
+// device ID, so a notice for an attempt this manager has since replaced is
+// ignored. Any other notice (matching, unknown, or without an attempt ID from
+// an older mobile or server) applies to the current peer: the server's expiry
+// notice names the latest attempt it relayed, which may never have arrived.
 func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
+	replaced := ok && attemptID != peer.attemptID && slices.Contains(pm.replacedAttempts, attemptID)
 	pm.mu.Unlock()
 	if !ok {
 		pm.logger.Debug("peer_unavailable for unknown peer", "mobile", deviceID)
 		return
 	}
 
-	if attemptID != "" && peer.attemptID != "" && attemptID != peer.attemptID {
-		pm.logger.Info("ignoring peer_unavailable for previous attempt",
+	if replaced {
+		pm.logger.Info("ignoring peer_unavailable for replaced attempt",
 			"mobile", deviceID, "attempt", attemptID, "currentAttempt", peer.attemptID)
 		return
 	}
@@ -558,6 +579,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		// peer's negotiation. Silencing here closes that window (SB-1007).
 		oldPeer.silence()
 		delete(pm.peers, mobileDeviceID)
+		pm.recordReplacedAttemptLocked(oldPeer.attemptID)
 	}
 	pm.stopTimersLocked(mobileDeviceID)
 	pm.mu.Unlock()
@@ -728,8 +750,28 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	pm.logger.Info("SDP offer sent", "mobile", mobileDeviceID, "elapsed", time.Since(requestStart).Round(time.Millisecond))
 }
 
+// recordReplacedAttemptLocked remembers the attempt ID of a peer replaced by a
+// reconnect, dropping the oldest past maxReplacedAttempts. Caller holds pm.mu.
+func (pm *PeerManager) recordReplacedAttemptLocked(attemptID string) {
+	if attemptID == "" {
+		return
+	}
+	pm.replacedAttempts = append(pm.replacedAttempts, attemptID)
+	if len(pm.replacedAttempts) > maxReplacedAttempts {
+		pm.replacedAttempts = pm.replacedAttempts[1:]
+	}
+}
+
+// isOtherAttempt reports whether a mobile message belongs to a different
+// connect attempt than peer. When either side lacks an attempt ID (older
+// mobile or server) the message is taken to be for the current peer.
+func isOtherAttempt(peer *Peer, attemptID string) bool {
+	return attemptID != "" && peer.attemptID != "" && attemptID != peer.attemptID
+}
+
 // handleSDPAnswer sets the remote description from the mobile's SDP answer.
-func (pm *PeerManager) handleSDPAnswer(mobileDeviceID string, sdp string) {
+// An answer for another connect attempt is ignored.
+func (pm *PeerManager) handleSDPAnswer(mobileDeviceID, attemptID, sdp string) {
 	// Basic SDP validation — reject obviously malformed or oversized payloads.
 	if len(sdp) == 0 {
 		pm.logger.Warn("empty SDP answer", "mobile", mobileDeviceID)
@@ -746,6 +788,10 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID string, sdp string) {
 
 	if !ok {
 		pm.logger.Warn("sdp_answer for unknown peer", "mobile", mobileDeviceID)
+		return
+	}
+	if isOtherAttempt(peer, attemptID) {
+		pm.logger.Info("ignoring sdp_answer for another attempt", "mobile", mobileDeviceID, "attempt", attemptID)
 		return
 	}
 
@@ -776,8 +822,9 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID string, sdp string) {
 	pm.logger.Info("SDP answer applied", "mobile", mobileDeviceID, "bufferedCandidates", len(buffered))
 }
 
-// handleICECandidate adds an ICE candidate from the mobile peer.
-func (pm *PeerManager) handleICECandidate(mobileDeviceID string, candidate string, sdpMid string, sdpMLineIndex *int) {
+// handleICECandidate adds an ICE candidate from the mobile peer. A candidate
+// for another connect attempt is ignored.
+func (pm *PeerManager) handleICECandidate(mobileDeviceID, attemptID, candidate, sdpMid string, sdpMLineIndex *int) {
 	pm.logger.Debug("ICE candidate received from mobile", "mobile", mobileDeviceID, "candidate", candidate)
 
 	pm.mu.Lock()
@@ -786,6 +833,10 @@ func (pm *PeerManager) handleICECandidate(mobileDeviceID string, candidate strin
 
 	if !ok {
 		pm.logger.Warn("ice_candidate for unknown peer", "mobile", mobileDeviceID)
+		return
+	}
+	if isOtherAttempt(peer, attemptID) {
+		pm.logger.Info("ignoring ice_candidate for another attempt", "mobile", mobileDeviceID, "attempt", attemptID)
 		return
 	}
 

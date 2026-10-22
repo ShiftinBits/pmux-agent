@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1036,7 +1037,7 @@ func TestSignalingMessage_DecodesAttemptID(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "present", raw: `{"type":"peer_unavailable","deviceId":"x","attemptId":"ab"}`, want: "ab"},
+		{name: "present", raw: `{"type":"peer_unavailable","deviceId":"x","attemptId":"` + testAttemptA + `"}`, want: testAttemptA},
 		{name: "absent", raw: `{"type":"peer_unavailable","deviceId":"x"}`, want: ""},
 	}
 	for _, tt := range tests {
@@ -1049,6 +1050,18 @@ func TestSignalingMessage_DecodesAttemptID(t *testing.T) {
 				t.Errorf("AttemptID = %q, want %q", msg.AttemptID, tt.want)
 			}
 		})
+	}
+}
+
+// TestSignalingMessage_EncodesAttemptIDKey pins the exact wire key: decoding
+// matches keys case-insensitively, so only encoding catches a mis-cased tag.
+func TestSignalingMessage_EncodesAttemptIDKey(t *testing.T) {
+	b, err := json.Marshal(SignalingMessage{Type: "sdp_offer", AttemptID: testAttemptA})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if want := `"attemptId":"` + testAttemptA + `"`; !strings.Contains(string(b), want) {
+		t.Errorf("encoded %s, want it to contain %s", b, want)
 	}
 }
 

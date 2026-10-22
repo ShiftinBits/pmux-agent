@@ -132,7 +132,7 @@ func connectTestMobile(t *testing.T, pm *PeerManager, sender *mockSender, device
 }
 
 // connectTestMobileAttempt is connectTestMobile with the connect attempt ID the
-// server forwards on connect_request.
+// server forwards on connect_request, echoed on the mobile's sdp_answer.
 func connectTestMobileAttempt(t *testing.T, pm *PeerManager, sender *mockSender, deviceID, attemptID string, autoRespond bool) *testMobile {
 	t.Helper()
 	mark := sender.mark()
@@ -178,7 +178,7 @@ func connectTestMobileAttempt(t *testing.T, pm *PeerManager, sender *mockSender,
 	}
 	<-gathered
 	// The gathered answer carries the mobile's candidates in its SDP.
-	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: deviceID, SDP: pc.LocalDescription().SDP})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: deviceID, AttemptID: attemptID, SDP: pc.LocalDescription().SDP})
 
 	// Trickle the agent's candidates to the mobile until the test ends.
 	stop := make(chan struct{})

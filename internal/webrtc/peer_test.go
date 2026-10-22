@@ -74,6 +74,13 @@ var testSharedSecret = func() []byte {
 
 func testSharedSecretFn(string) ([]byte, error) { return testSharedSecret, nil }
 
+// Connect attempt IDs in the 32-hex shape the agent accepts.
+const (
+	testAttemptA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testAttemptB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testAttemptC = "cccccccccccccccccccccccccccccccc"
+)
+
 // getPeer retrieves a peer from the PeerManager by device ID (test helper).
 func getPeer(pm *PeerManager, deviceID string) *Peer {
 	pm.mu.Lock()
@@ -1095,7 +1102,7 @@ func TestPeerManager_ICERestartSendsOffer(t *testing.T) {
 
 	pm.SetAllowedDeviceID("mobile-iceoff")
 	pm.SharedSecretFn = testSharedSecretFn
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-iceoff", AttemptID: "aa"})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-iceoff", AttemptID: testAttemptA})
 	time.Sleep(500 * time.Millisecond)
 
 	offers := sender.messagesOfType("sdp_offer")
@@ -1153,8 +1160,8 @@ func TestPeerManager_ICERestartSendsOffer(t *testing.T) {
 	if initialSDP == restartSDP {
 		t.Error("ICE restart offer SDP should differ from initial offer SDP")
 	}
-	if got := allOffers[len(allOffers)-1].AttemptID; got != "aa" {
-		t.Errorf("ICE restart offer attemptId = %q, want %q", got, "aa")
+	if got := allOffers[len(allOffers)-1].AttemptID; got != testAttemptA {
+		t.Errorf("ICE restart offer attemptId = %q, want %q", got, testAttemptA)
 	}
 
 	pm.CloseAll()
@@ -2405,7 +2412,7 @@ func TestPeer_ICECandidateCarriesAttemptID(t *testing.T) {
 		signaling: sender,
 		sendReady: make(chan struct{}, 1),
 		done:      make(chan struct{}),
-		attemptID: "aa",
+		attemptID: testAttemptA,
 	}
 
 	p.sendICECandidate(&webrtc.ICECandidate{Foundation: "1", Protocol: webrtc.ICEProtocolUDP, Address: "127.0.0.1", Port: 5000, Typ: webrtc.ICECandidateTypeHost})
@@ -2413,8 +2420,8 @@ func TestPeer_ICECandidateCarriesAttemptID(t *testing.T) {
 	if len(cands) != 1 {
 		t.Fatalf("expected 1 ice_candidate, got %d", len(cands))
 	}
-	if cands[0].AttemptID != "aa" {
-		t.Errorf("ice_candidate attemptId = %q, want %q", cands[0].AttemptID, "aa")
+	if cands[0].AttemptID != testAttemptA {
+		t.Errorf("ice_candidate attemptId = %q, want %q", cands[0].AttemptID, testAttemptA)
 	}
 }
 
@@ -2575,8 +2582,9 @@ func TestPeerManager_HandlePeerUnavailable(t *testing.T) {
 	const deviceID = "mobile-unavail"
 	tests := []struct {
 		name           string
-		connect        bool // complete the WebRTC exchange so the DataChannel opens
-		pending        bool // only send connect_request
+		connect        bool   // complete the WebRTC exchange so the DataChannel opens
+		pending        bool   // only send connect_request
+		priorAttempt   string // when set, an earlier connect_request the current one replaces
 		connectAttempt string
 		signalID       string
 		signalAttempt  string
@@ -2585,11 +2593,12 @@ func TestPeerManager_HandlePeerUnavailable(t *testing.T) {
 		{name: "pending peer is closed and removed", pending: true, signalID: deviceID},
 		{name: "connected peer is ignored", connect: true, signalID: deviceID, wantInMap: true},
 		{name: "unknown device is a no-op", pending: true, signalID: "someone-else", wantInMap: true},
-		{name: "matching attempt closes pending peer", pending: true, connectAttempt: "aa", signalID: deviceID, signalAttempt: "aa"},
-		{name: "previous attempt is ignored", pending: true, connectAttempt: "bb", signalID: deviceID, signalAttempt: "aa", wantInMap: true},
-		{name: "peer without attempt is closed", pending: true, signalID: deviceID, signalAttempt: "aa"},
-		{name: "notice without attempt is closed", pending: true, connectAttempt: "aa", signalID: deviceID},
-		{name: "connected peer with matching attempt is ignored", connect: true, connectAttempt: "aa", signalID: deviceID, signalAttempt: "aa", wantInMap: true},
+		{name: "matching attempt closes pending peer", pending: true, connectAttempt: testAttemptA, signalID: deviceID, signalAttempt: testAttemptA},
+		{name: "replaced attempt is ignored", pending: true, priorAttempt: testAttemptA, connectAttempt: testAttemptB, signalID: deviceID, signalAttempt: testAttemptA, wantInMap: true},
+		{name: "unknown attempt closes pending peer", pending: true, connectAttempt: testAttemptB, signalID: deviceID, signalAttempt: testAttemptC},
+		{name: "peer without attempt is closed", pending: true, signalID: deviceID, signalAttempt: testAttemptA},
+		{name: "notice without attempt is closed", pending: true, connectAttempt: testAttemptA, signalID: deviceID},
+		{name: "connected peer with matching attempt is ignored", connect: true, connectAttempt: testAttemptA, signalID: deviceID, signalAttempt: testAttemptA, wantInMap: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2609,6 +2618,9 @@ func TestPeerManager_HandlePeerUnavailable(t *testing.T) {
 					return peer.dc != nil && peer.dc.ReadyState() == webrtc.DataChannelStateOpen
 				})
 			} else {
+				if tt.priorAttempt != "" {
+					pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: tt.priorAttempt})
+				}
 				pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: tt.connectAttempt})
 				if len(sender.messagesOfType("sdp_offer")) == 0 {
 					t.Fatal("no SDP offer sent")
@@ -2644,8 +2656,8 @@ func TestPeerManager_PeerUnavailableForReplacedAttempt(t *testing.T) {
 	pm := newAuthTestManager(t, sender, deviceID, nil)
 	defer pm.CloseAll()
 
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: "aa"})
-	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: "bb"})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: testAttemptA})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: testAttemptB})
 	peerB := getPeer(pm, deviceID)
 	if peerB == nil {
 		t.Fatal("peer not installed")
@@ -2655,11 +2667,11 @@ func TestPeerManager_PeerUnavailableForReplacedAttempt(t *testing.T) {
 	if len(offers) != 2 {
 		t.Fatalf("got %d SDP offers, want 2", len(offers))
 	}
-	if offers[0].AttemptID != "aa" || offers[1].AttemptID != "bb" {
-		t.Errorf("offer attempt IDs = %q, %q; want %q, %q", offers[0].AttemptID, offers[1].AttemptID, "aa", "bb")
+	if offers[0].AttemptID != testAttemptA || offers[1].AttemptID != testAttemptB {
+		t.Errorf("offer attempt IDs = %q, %q; want %q, %q", offers[0].AttemptID, offers[1].AttemptID, testAttemptA, testAttemptB)
 	}
 
-	pm.HandleSignalingMessage(SignalingMessage{Type: "peer_unavailable", DeviceID: deviceID, AttemptID: "aa"})
+	pm.HandleSignalingMessage(SignalingMessage{Type: "peer_unavailable", DeviceID: deviceID, AttemptID: testAttemptA})
 	pm.cleanupWg.Wait()
 
 	if got := getPeer(pm, deviceID); got != peerB {
@@ -2670,5 +2682,164 @@ func TestPeerManager_PeerUnavailableForReplacedAttempt(t *testing.T) {
 	peerB.mu.Unlock()
 	if closed {
 		t.Error("current attempt's peer was closed")
+	}
+}
+
+// TestPeerManager_ReplacedAttemptsCapped verifies the replaced attempt record
+// keeps only the newest maxReplacedAttempts IDs and skips empty ones.
+func TestPeerManager_ReplacedAttemptsCapped(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+
+	pm.mu.Lock()
+	pm.recordReplacedAttemptLocked("")
+	for i := range maxReplacedAttempts + 1 {
+		pm.recordReplacedAttemptLocked(fmt.Sprintf("%032x", i))
+	}
+	got := slices.Clone(pm.replacedAttempts)
+	pm.mu.Unlock()
+
+	if len(got) != maxReplacedAttempts {
+		t.Fatalf("recorded %d attempts, want %d", len(got), maxReplacedAttempts)
+	}
+	if want := fmt.Sprintf("%032x", 1); got[0] != want {
+		t.Errorf("oldest kept attempt = %q, want %q", got[0], want)
+	}
+	if want := fmt.Sprintf("%032x", maxReplacedAttempts); got[len(got)-1] != want {
+		t.Errorf("newest attempt = %q, want %q", got[len(got)-1], want)
+	}
+}
+
+// TestPeerManager_MobileSignalingAttemptMatching verifies an sdp_answer or
+// ice_candidate for another connect attempt is never applied to the current
+// peer, while a matching one, or one where either side lacks an attempt ID
+// (older mobile or server), is.
+func TestPeerManager_MobileSignalingAttemptMatching(t *testing.T) {
+	const deviceID = "mobile-attempt-match"
+	tests := []struct {
+		name        string
+		msgType     string
+		peerAttempt string
+		msgAttempt  string
+		wantApplied bool
+	}{
+		{name: "matching answer applies", msgType: "sdp_answer", peerAttempt: testAttemptA, msgAttempt: testAttemptA, wantApplied: true},
+		{name: "answer for another attempt is ignored", msgType: "sdp_answer", peerAttempt: testAttemptA, msgAttempt: testAttemptB},
+		{name: "answer without attempt applies", msgType: "sdp_answer", peerAttempt: testAttemptA, wantApplied: true},
+		{name: "answer to peer without attempt applies", msgType: "sdp_answer", msgAttempt: testAttemptB, wantApplied: true},
+		{name: "matching candidate is added", msgType: "ice_candidate", peerAttempt: testAttemptA, msgAttempt: testAttemptA, wantApplied: true},
+		{name: "candidate for another attempt is ignored", msgType: "ice_candidate", peerAttempt: testAttemptA, msgAttempt: testAttemptB},
+		{name: "candidate without attempt is added", msgType: "ice_candidate", peerAttempt: testAttemptA, wantApplied: true},
+		{name: "candidate to peer without attempt is added", msgType: "ice_candidate", msgAttempt: testAttemptB, wantApplied: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := &mockSender{}
+			pm := newAuthTestManager(t, sender, deviceID, nil)
+			defer pm.CloseAll()
+
+			pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: tt.peerAttempt})
+			offers := sender.messagesOfType("sdp_offer")
+			if len(offers) != 1 {
+				t.Fatalf("got %d SDP offers, want 1", len(offers))
+			}
+			peer := getPeer(pm, deviceID)
+			if peer == nil {
+				t.Fatal("peer not installed")
+			}
+
+			var applied bool
+			switch tt.msgType {
+			case "sdp_answer":
+				mobile, err := pm.API.NewPeerConnection(webrtc.Configuration{})
+				if err != nil {
+					t.Fatalf("create mobile PC: %v", err)
+				}
+				t.Cleanup(func() { mobile.Close() })
+				if err := mobile.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+					t.Fatalf("set remote offer: %v", err)
+				}
+				answer, err := mobile.CreateAnswer(nil)
+				if err != nil {
+					t.Fatalf("create answer: %v", err)
+				}
+				if err := mobile.SetLocalDescription(answer); err != nil {
+					t.Fatalf("set local answer: %v", err)
+				}
+				pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: deviceID, AttemptID: tt.msgAttempt, SDP: answer.SDP})
+				peer.mu.Lock()
+				applied = peer.remoteDescSet
+				peer.mu.Unlock()
+				if !applied && peer.conn.SignalingState() != webrtc.SignalingStateHaveLocalOffer {
+					t.Errorf("signaling state = %s, want %s", peer.conn.SignalingState(), webrtc.SignalingStateHaveLocalOffer)
+				}
+			case "ice_candidate":
+				mLineIdx := 0
+				pm.HandleSignalingMessage(SignalingMessage{
+					Type:           "ice_candidate",
+					TargetDeviceID: deviceID,
+					AttemptID:      tt.msgAttempt,
+					Candidate:      "candidate:1 1 UDP 2130706431 192.168.1.1 12345 typ host",
+					SDPMid:         "0",
+					SDPMLineIndex:  &mLineIdx,
+				})
+				peer.mu.Lock()
+				applied = len(peer.iceCandidates) == 1
+				peer.mu.Unlock()
+			}
+
+			if applied != tt.wantApplied {
+				t.Errorf("applied = %v, want %v", applied, tt.wantApplied)
+			}
+			if getPeer(pm, deviceID) != peer {
+				t.Error("current peer was removed or replaced")
+			}
+			peer.mu.Lock()
+			closed := peer.closed
+			peer.mu.Unlock()
+			if closed {
+				t.Error("current peer was closed")
+			}
+		})
+	}
+}
+
+// TestPeerManager_ConnectRequestAttemptIDValidation verifies a malformed
+// attempt ID from the signaling server is discarded rather than stored and
+// echoed back on the SDP offer.
+func TestPeerManager_ConnectRequestAttemptIDValidation(t *testing.T) {
+	const deviceID = "mobile-attempt-validate"
+	tests := []struct {
+		name    string
+		attempt string
+		want    string
+	}{
+		{name: "valid ID is kept", attempt: testAttemptA, want: testAttemptA},
+		{name: "over-long ID is dropped", attempt: testAttemptA + "a", want: ""},
+		{name: "short ID is dropped", attempt: "aa", want: ""},
+		{name: "non-hex ID is dropped", attempt: strings.Repeat("zz", 16), want: ""},
+		{name: "uppercase hex ID is dropped", attempt: strings.ToUpper(testAttemptA), want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender := &mockSender{}
+			pm := newAuthTestManager(t, sender, deviceID, nil)
+			defer pm.CloseAll()
+
+			pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID, AttemptID: tt.attempt})
+			peer := getPeer(pm, deviceID)
+			if peer == nil {
+				t.Fatal("peer not installed")
+			}
+			if peer.attemptID != tt.want {
+				t.Errorf("stored attemptID = %q, want %q", peer.attemptID, tt.want)
+			}
+			offers := sender.messagesOfType("sdp_offer")
+			if len(offers) != 1 {
+				t.Fatalf("got %d SDP offers, want 1", len(offers))
+			}
+			if offers[0].AttemptID != tt.want {
+				t.Errorf("sdp_offer attemptId = %q, want %q", offers[0].AttemptID, tt.want)
+			}
+		})
 	}
 }
