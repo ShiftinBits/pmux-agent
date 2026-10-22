@@ -355,8 +355,9 @@ func (sc *SignalingClient) Close() {
 	sc.closed = true
 
 	if sc.conn != nil {
-		sc.conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = sc.conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(2*time.Second))
 		sc.conn.Close()
 	}
 }
@@ -437,6 +438,14 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	// preventing a goroutine leak if ctx outlives this connection.
 	go func() {
 		<-presenceCtx.Done()
+		if ctx.Err() != nil {
+			// Shutdown: send a close frame so the server sees a clean 1000
+			// close (and reports host_offline) rather than an abnormal drop.
+			// WriteControl is safe alongside presenceLoop's unlocked writes.
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(2*time.Second))
+		}
 		conn.Close()
 	}()
 

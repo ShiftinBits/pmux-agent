@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1167,5 +1169,103 @@ func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 				t.Errorf("connected = %v, want %v", connected, tt.authenticate)
 			}
 		})
+	}
+}
+
+func TestSignalingClient_ShutdownSendsNormalCloseFrame(t *testing.T) {
+	id, logger := testSetup(t)
+
+	readErr := make(chan error, 1)
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				readErr <- err
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-readErr:
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) {
+			t.Fatalf("server read error = %v, want *websocket.CloseError", err)
+		}
+		if closeErr.Code != websocket.CloseNormalClosure {
+			t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseNormalClosure)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not observe a close")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}
+
+func TestSignalingClient_ServerDropSendsNoCloseFrame(t *testing.T) {
+	id, logger := testSetup(t)
+
+	trailing := make(chan []byte, 1)
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		tcp, ok := conn.UnderlyingConn().(*net.TCPConn)
+		if !ok {
+			trailing <- []byte("not a TCP conn")
+			return
+		}
+		// Half-close: the client sees EOF, while we can still observe
+		// anything the client writes back during its teardown.
+		tcp.CloseWrite()
+		tcp.SetReadDeadline(time.Now().Add(1 * time.Second))
+		data, _ := io.ReadAll(tcp)
+		trailing <- data
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case data := <-trailing:
+		if len(data) != 0 {
+			t.Errorf("client wrote %d bytes after server drop, want none: %x", len(data), data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handler did not finish")
 	}
 }
