@@ -777,6 +777,26 @@ func TestPeerManager_UndecodableMessageBeforeAuthClosesPeer(t *testing.T) {
 	})
 }
 
+// TestPeerManager_AuthChallengeAdvertisesVersion checks that the challenge on
+// the DataChannel carries v: 2, which the mobile uses to choose the handshake.
+func TestPeerManager_AuthChallengeAdvertisesVersion(t *testing.T) {
+	const deviceID = "mobile-version"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	defer pm.CloseAll()
+
+	m := connectTestMobile(t, pm, sender, deviceID, false)
+
+	select {
+	case ch := <-m.challenges:
+		if ch.V != 2 {
+			t.Errorf("auth_challenge v = %d, want 2", ch.V)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("no auth_challenge received")
+	}
+}
+
 // TestPeerManager_SendToRefusedUntilAuthConfirmed holds the mobile's
 // auth_response so the pre-auth window is deterministic: the challenge still
 // goes out, any other message is refused without reaching the DataChannel, and

@@ -188,6 +188,10 @@ const replacementTeardownTimeout = 3 * time.Second
 // and of the mobile's nonce in auth_response.
 const authNonceSize = 32
 
+// authProtocolVersion is advertised as `v` in auth_challenge so the mobile can
+// tell this mutual DTLS-bound handshake from the one pmux <=0.5.5 hosts ran.
+const authProtocolVersion = 2
+
 // Direction labels for the AUTH V2 key-possession MACs. Distinct labels stop a
 // MAC computed for one direction from being reflected back as the other.
 const (
@@ -1336,7 +1340,11 @@ func (p *Peer) sendAuthChallenge() {
 	})
 	p.mu.Unlock()
 
-	challenge := &protocol.AuthChallengeEvent{Type: "auth_challenge", Nonce: base64.StdEncoding.EncodeToString(nonce)}
+	challenge := &protocol.AuthChallengeEvent{
+		Type:  "auth_challenge",
+		Nonce: base64.StdEncoding.EncodeToString(nonce),
+		V:     authProtocolVersion,
+	}
 	if err := p.SendMessage(challenge); err != nil {
 		p.logger.Warn("failed to send auth challenge", "error", err)
 		p.failAuth("challenge send failed")
