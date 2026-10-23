@@ -211,21 +211,46 @@ func TestRoundTripAuthResponse(t *testing.T) {
 }
 
 func TestRoundTripAuthChallenge(t *testing.T) {
-	msg := &AuthChallengeEvent{Type: "auth_challenge", Nonce: "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo="}
-	data, err := Encode(msg)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
+	tests := []struct {
+		name  string
+		v     int
+		wantV bool // whether the "v" key is on the wire
+	}{
+		{name: "v2", v: 2, wantV: true},
+		{name: "unversioned", v: 0, wantV: false},
 	}
-	decoded, err := Decode(data)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	got, ok := decoded.(*AuthChallengeEvent)
-	if !ok {
-		t.Fatalf("expected *AuthChallengeEvent, got %T", decoded)
-	}
-	if got.Nonce != msg.Nonce {
-		t.Errorf("nonce = %q, want %q", got.Nonce, msg.Nonce)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &AuthChallengeEvent{Type: "auth_challenge", Nonce: "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo=", V: tt.v}
+			data, err := Encode(msg)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			decoded, err := Decode(data)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			got, ok := decoded.(*AuthChallengeEvent)
+			if !ok {
+				t.Fatalf("expected *AuthChallengeEvent, got %T", decoded)
+			}
+			if got.Nonce != msg.Nonce {
+				t.Errorf("nonce = %q, want %q", got.Nonce, msg.Nonce)
+			}
+			if got.V != msg.V {
+				t.Errorf("v = %d, want %d", got.V, msg.V)
+			}
+
+			// The mobile keys on the presence of "v", so an unversioned
+			// challenge must omit it rather than send v: 0.
+			var raw map[string]interface{}
+			if err := msgpack.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("unmarshal to raw map: %v", err)
+			}
+			if _, ok := raw["v"]; ok != tt.wantV {
+				t.Errorf("\"v\" on the wire = %v, want %v (raw %v)", ok, tt.wantV, raw)
+			}
+		})
 	}
 }
 
@@ -742,6 +767,7 @@ type fixtureJSON struct {
 	Latency  *int            `json:"latency,omitempty"`
 	Mac      string          `json:"mac,omitempty"`
 	Nonce    string          `json:"nonce,omitempty"`
+	V        *int            `json:"v,omitempty"`
 }
 
 func TestCrossLanguageFixtures(t *testing.T) {
@@ -893,6 +919,14 @@ func verifyFixtureFields(t *testing.T, msg Message, expected fixtureJSON) {
 	case *AuthChallengeEvent:
 		if m.Nonce != expected.Nonce {
 			t.Errorf("nonce = %q, want %q", m.Nonce, expected.Nonce)
+		}
+		// An unversioned fixture must decode to V == 0.
+		wantV := 0
+		if expected.V != nil {
+			wantV = *expected.V
+		}
+		if m.V != wantV {
+			t.Errorf("v = %d, want %d", m.V, wantV)
 		}
 
 	case *AuthResponseRequest:
