@@ -22,8 +22,8 @@ func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) erro
 		return nil
 	}
 
-	if !auth.HasIdentity(paths.KeysDir, store) {
-		return errNoIdentity
+	if err := checkIdentity(paths, store); err != nil {
+		return err
 	}
 
 	if err := EnsureRunning(paths, store); err != nil {
@@ -31,4 +31,17 @@ func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) erro
 	}
 	fmt.Fprintln(w, "Agent started")
 	return nil
+}
+
+// checkIdentity returns errNoIdentity when no identity exists, and the
+// underlying error when the secret store fails for any other reason (e.g. a
+// locked keychain), so a valid identity is never mistaken for a missing one.
+func checkIdentity(paths config.Paths, store auth.SecretStore) error {
+	if auth.HasIdentity(paths.KeysDir, store) {
+		return nil
+	}
+	if _, err := store.Get(auth.SecretKeyEd25519Private); err != nil && !errors.Is(err, auth.ErrSecretNotFound) {
+		return fmt.Errorf("read identity from secret store: %w", err)
+	}
+	return errNoIdentity
 }

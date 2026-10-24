@@ -501,8 +501,12 @@ func (c *Config) Validate() error {
 	}
 
 	// Durations must parse
-	if _, err := time.ParseDuration(c.Connection.ReconnectInterval); err != nil {
+	rd, err := time.ParseDuration(c.Connection.ReconnectInterval)
+	if err != nil {
 		return fmt.Errorf("connection.reconnect_interval: %w", err)
+	}
+	if rd <= 0 {
+		return fmt.Errorf("connection.reconnect_interval: must be positive, got %q", c.Connection.ReconnectInterval)
 	}
 	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
 	if err != nil {
@@ -549,10 +553,10 @@ func (c *Config) Validate() error {
 }
 
 // ReconnectInterval returns the parsed reconnect interval duration.
-// Falls back to 5s if parsing fails.
+// Falls back to 5s if parsing fails or the value is non-positive.
 func (c *Config) ReconnectInterval() time.Duration {
 	d, err := time.ParseDuration(c.Connection.ReconnectInterval)
-	if err != nil {
+	if err != nil || d <= 0 {
 		return 5 * time.Second
 	}
 	return d

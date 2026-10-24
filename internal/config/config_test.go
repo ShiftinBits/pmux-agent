@@ -392,6 +392,8 @@ func TestReconnectInterval(t *testing.T) {
 		{"1m", "1m", 1 * time.Minute},
 		{"500ms", "500ms", 500 * time.Millisecond},
 		{"invalid_fallback", "bad", 5 * time.Second},
+		{"zero_fallback", "0s", 5 * time.Second},
+		{"negative_fallback", "-5s", 5 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -483,6 +485,24 @@ func TestValidate_UpdateCheckInterval(t *testing.T) {
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() with check_interval=%q: err=%v, wantErr=%v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ReconnectIntervalNonPositive(t *testing.T) {
+	for _, value := range []string{"0s", "-5s"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Connection.ReconnectInterval = value
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() with reconnect_interval=%q: want error, got nil", value)
+			}
+			for _, want := range []string{"connection.reconnect_interval", "must be positive"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate() error %q does not contain %q", err, want)
+				}
 			}
 		})
 	}

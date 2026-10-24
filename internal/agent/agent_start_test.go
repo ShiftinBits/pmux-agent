@@ -49,3 +49,16 @@ func TestRunAgentStart_NoIdentity(t *testing.T) {
 		t.Errorf("must not report 'Agent started', got: %q", buf.String())
 	}
 }
+
+func TestRunAgentStart_StoreError(t *testing.T) {
+	paths := testPaths(t)
+	if _, err := auth.GenerateIdentity(paths.KeysDir, auth.NewMemorySecretStore()); err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	storeErr := errors.New("keychain locked")
+
+	err := RunAgentStart(paths, failingStore{err: storeErr}, &bytes.Buffer{})
+	if !errors.Is(err, storeErr) || errors.Is(err, errNoIdentity) {
+		t.Fatalf("expected the store error, got: %v", err)
+	}
+}
