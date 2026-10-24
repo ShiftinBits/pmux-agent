@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,20 +36,16 @@ func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 	}
 }
 
-func TestRunAgentStart_DirectSpawn(t *testing.T) {
+func TestRunAgentStart_NoIdentity(t *testing.T) {
 	paths := testPaths(t)
-
-	// No identity → EnsureRunning returns nil (no-op)
 	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
 	err := RunAgentStart(paths, store, &buf)
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
+	if !errors.Is(err, errNoIdentity) {
+		t.Fatalf("expected errNoIdentity, got: %v", err)
 	}
-
-	output := buf.String()
-	if !strings.Contains(output, "Agent started") {
-		t.Errorf("expected 'Agent started' message, got: %q", output)
+	if strings.Contains(buf.String(), "Agent started") {
+		t.Errorf("must not report 'Agent started', got: %q", buf.String())
 	}
 }

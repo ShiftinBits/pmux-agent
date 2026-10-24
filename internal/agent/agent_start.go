@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -8,14 +9,21 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
+var errNoIdentity = errors.New("no identity found; run 'pmux init' first")
+
 // RunAgentStart starts the Pocketmux agent. It checks whether the agent is
-// already running and otherwise spawns it directly via EnsureRunning.
+// already running, fails with errNoIdentity if no identity exists, and
+// otherwise spawns it directly via EnsureRunning.
 func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) error {
 	// Check if already running
 	pidFile := PIDFilePath(paths)
 	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
 		fmt.Fprintf(w, "Agent is already running (PID %d)\n", pid)
 		return nil
+	}
+
+	if !auth.HasIdentity(paths.KeysDir, store) {
+		return errNoIdentity
 	}
 
 	if err := EnsureRunning(paths, store); err != nil {

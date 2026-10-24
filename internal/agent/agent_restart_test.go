@@ -15,23 +15,24 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
-// Restart when nothing is running must NOT error (unlike a bare stop) — it just
-// starts the agent.
-func TestRunAgentRestart_NotRunning_StartsAnyway(t *testing.T) {
+// Restart when nothing is running is not an error by itself, but with no
+// identity the start phase reports it and restart fails.
+func TestRunAgentRestart_NotRunning_NoIdentity(t *testing.T) {
 	paths := testPaths(t)
-	store := auth.NewMemorySecretStore() // no identity → EnsureRunning is a no-op
+	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
-	if err := RunAgentRestart(paths, store, &buf); err != nil {
-		t.Fatalf("expected nil error when agent not running, got: %v", err)
+	err := RunAgentRestart(paths, store, &buf)
+	if !errors.Is(err, errNoIdentity) {
+		t.Fatalf("expected errNoIdentity, got: %v", err)
 	}
 
 	output := buf.String()
 	if !strings.Contains(output, "Agent was not running") {
 		t.Errorf("expected 'not running' note, got: %q", output)
 	}
-	if !strings.Contains(output, "Agent started") {
-		t.Errorf("expected 'Agent started', got: %q", output)
+	if strings.Contains(output, "Agent started") {
+		t.Errorf("must not report 'Agent started', got: %q", output)
 	}
 }
 
@@ -65,6 +66,12 @@ func TestRunAgentRestart_StopHardError_DoesNotStart(t *testing.T) {
 func TestRunAgentRestart_StalePID_Restarts(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
 
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
 	if err := os.WriteFile(pidPath, []byte("999999999"), 0600); err != nil {
@@ -86,6 +93,12 @@ func TestRunAgentRestart_StalePID_Restarts(t *testing.T) {
 func TestRunAgentRestart_Running_StopsThenStarts(t *testing.T) {
 	paths := testPaths(t)
 	store := auth.NewMemorySecretStore()
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
 
 	cmd := exec.Command("sleep", "60")
 	if err := cmd.Start(); err != nil {
