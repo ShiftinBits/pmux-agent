@@ -9,7 +9,8 @@ import (
 )
 
 // RunAgentStart starts the Pocketmux agent. It checks whether the agent is
-// already running and otherwise spawns it directly via EnsureRunning.
+// already running, and otherwise spawns it directly via EnsureRunning, which
+// fails with auth.ErrNoIdentity if no identity exists.
 func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) error {
 	// Check if already running
 	pidFile := PIDFilePath(paths)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -242,6 +243,53 @@ func TestHasIdentity(t *testing.T) {
 		}
 		if !HasIdentity(dir, store) {
 			t.Error("HasIdentity() = false, want true")
+		}
+	})
+}
+
+// getErrStore is a SecretStore whose Get always fails with err and counts calls.
+type getErrStore struct {
+	SecretStore
+	err   error
+	calls int
+}
+
+func (s *getErrStore) Get(string) ([]byte, error) { s.calls++; return nil, s.err }
+
+func TestCheckIdentity(t *testing.T) {
+	storeErr := errors.New("keychain locked")
+	writePub := func(dir string) {
+		os.WriteFile(filepath.Join(dir, publicKeyFile), make([]byte, ed25519.PublicKeySize), keyFilePerms)
+	}
+
+	t.Run("no public key: ErrNoIdentity without touching the store", func(t *testing.T) {
+		store := &getErrStore{err: storeErr}
+		if err := CheckIdentity(t.TempDir(), store); !errors.Is(err, ErrNoIdentity) {
+			t.Errorf("CheckIdentity() = %v, want ErrNoIdentity", err)
+		}
+		if store.calls != 0 {
+			t.Errorf("store.Get called %d times, want 0", store.calls)
+		}
+	})
+
+	t.Run("private key missing: ErrNoIdentity", func(t *testing.T) {
+		dir := t.TempDir()
+		writePub(dir)
+		if err := CheckIdentity(dir, NewMemorySecretStore()); !errors.Is(err, ErrNoIdentity) {
+			t.Errorf("CheckIdentity() = %v, want ErrNoIdentity", err)
+		}
+	})
+
+	t.Run("store failure: wrapped store error, read once", func(t *testing.T) {
+		dir := t.TempDir()
+		writePub(dir)
+		store := &getErrStore{err: storeErr}
+		err := CheckIdentity(dir, store)
+		if !errors.Is(err, storeErr) || errors.Is(err, ErrNoIdentity) {
+			t.Errorf("CheckIdentity() = %v, want the store error", err)
+		}
+		if store.calls != 1 {
+			t.Errorf("store.Get called %d times, want 1", store.calls)
 		}
 	})
 }

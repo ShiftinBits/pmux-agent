@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,20 +36,29 @@ func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 	}
 }
 
-func TestRunAgentStart_DirectSpawn(t *testing.T) {
+func TestRunAgentStart_NoIdentity(t *testing.T) {
 	paths := testPaths(t)
-
-	// No identity → EnsureRunning returns nil (no-op)
 	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
 	err := RunAgentStart(paths, store, &buf)
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
 	}
+	if strings.Contains(buf.String(), "Agent started") {
+		t.Errorf("must not report 'Agent started', got: %q", buf.String())
+	}
+}
 
-	output := buf.String()
-	if !strings.Contains(output, "Agent started") {
-		t.Errorf("expected 'Agent started' message, got: %q", output)
+func TestRunAgentStart_StoreError(t *testing.T) {
+	paths := testPaths(t)
+	if _, err := auth.GenerateIdentity(paths.KeysDir, auth.NewMemorySecretStore()); err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	storeErr := errors.New("keychain locked")
+
+	err := RunAgentStart(paths, failingStore{err: storeErr}, &bytes.Buffer{})
+	if !errors.Is(err, storeErr) || errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected the store error, got: %v", err)
 	}
 }

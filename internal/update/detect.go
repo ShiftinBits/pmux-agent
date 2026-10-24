@@ -77,7 +77,7 @@ func Detect(buildMethod string) InstallMethod {
 		if strings.Contains(exePath, "/snap/") {
 			return MethodSnap
 		}
-		if strings.Contains(exePath, "/Cellar/") || strings.Contains(exePath, "/opt/homebrew/") {
+		if strings.Contains(exePath, "/Caskroom/") || strings.Contains(exePath, "/Cellar/") || strings.Contains(exePath, "/opt/homebrew/") {
 			return MethodHomebrew
 		}
 	}

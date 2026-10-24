@@ -39,14 +39,15 @@ func signalReloadPairing(pid int) {
 
 // EnsureRunning checks if the agent is already running and starts it if not.
 // Returns nil if the agent is running (or was started successfully).
-// Does nothing if no identity exists (agent can't authenticate without one).
+// Spawns nothing and returns auth.CheckIdentity's error if no identity exists
+// (auth.ErrNoIdentity) or it can't be read — the agent can't authenticate
+// without one. Passthrough callers ignore auth.ErrNoIdentity.
 //
 // Uses flock on the PID file to serialize concurrent callers, preventing
 // duplicate agent spawns from racing pmux commands.
 func EnsureRunning(paths config.Paths, store auth.SecretStore) error {
-	// No identity — agent can't authenticate
-	if !auth.HasIdentity(paths.KeysDir, store) {
-		return nil
+	if err := auth.CheckIdentity(paths.KeysDir, store); err != nil {
+		return err
 	}
 
 	pidFile := PIDFilePath(paths)

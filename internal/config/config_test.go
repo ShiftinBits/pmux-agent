@@ -417,6 +417,8 @@ func TestKeepaliveInterval(t *testing.T) {
 		{"over_cap_clamped", "1m", MaxKeepaliveInterval, true},
 		{"10s", "10s", 10 * time.Second, false},
 		{"invalid_fallback", "bad", 30 * time.Second, false},
+		{"zero_fallback", "0s", 30 * time.Second, false},
+		{"negative_fallback", "-5s", 30 * time.Second, false},
 	}
 
 	for _, tt := range tests {
@@ -444,6 +446,8 @@ func TestUpdateCheckInterval(t *testing.T) {
 		{"30m", "30m", 30 * time.Minute},
 		{"empty_fallback", "", 24 * time.Hour},
 		{"invalid_fallback", "bad", 24 * time.Hour},
+		{"zero_fallback", "0s", 24 * time.Hour},
+		{"negative_fallback", "-5s", 24 * time.Hour},
 	}
 
 	for _, tt := range tests {
@@ -468,6 +472,8 @@ func TestValidate_UpdateCheckInterval(t *testing.T) {
 		{"valid_1h", "1h", false},
 		{"valid_empty", "", false}, // empty is allowed (uses default)
 		{"invalid", "notaduration", true},
+		{"zero", "0s", true},
+		{"negative", "-5s", true},
 	}
 
 	for _, tt := range tests {
@@ -477,6 +483,24 @@ func TestValidate_UpdateCheckInterval(t *testing.T) {
 			err := cfg.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() with check_interval=%q: err=%v, wantErr=%v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_KeepaliveIntervalNonPositive(t *testing.T) {
+	for _, value := range []string{"0s", "-5s"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Connection.KeepaliveInterval = value
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() with keepalive_interval=%q: want error, got nil", value)
+			}
+			for _, want := range []string{"connection.keepalive_interval", "must be positive"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate() error %q does not contain %q", err, want)
+				}
 			}
 		})
 	}

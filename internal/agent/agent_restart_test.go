@@ -15,24 +15,82 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/config"
 )
 
-// Restart when nothing is running must NOT error (unlike a bare stop) — it just
-// starts the agent.
-func TestRunAgentRestart_NotRunning_StartsAnyway(t *testing.T) {
+// With no identity restart fails up front, before the stop phase runs.
+func TestRunAgentRestart_NotRunning_NoIdentity(t *testing.T) {
 	paths := testPaths(t)
-	store := auth.NewMemorySecretStore() // no identity → EnsureRunning is a no-op
+	store := auth.NewMemorySecretStore()
 
 	var buf bytes.Buffer
-	if err := RunAgentRestart(paths, store, &buf); err != nil {
-		t.Fatalf("expected nil error when agent not running, got: %v", err)
+	err := RunAgentRestart(paths, store, &buf)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "Agent was not running") {
-		t.Errorf("expected 'not running' note, got: %q", output)
+	if strings.Contains(output, "Agent was not running") || strings.Contains(output, "Agent started") {
+		t.Errorf("must not stop or start anything, got: %q", output)
 	}
-	if !strings.Contains(output, "Agent started") {
-		t.Errorf("expected 'Agent started', got: %q", output)
+}
+
+// A running agent must not be stopped when the identity pre-check fails.
+func TestRunAgentRestart_NoIdentity_DoesNotStop(t *testing.T) {
+	paths := testPaths(t)
+	origStop := runAgentStop
+	t.Cleanup(func() { runAgentStop = origStop })
+	stopCalled := false
+	runAgentStop = func(config.Paths, io.Writer) error {
+		stopCalled = true
+		return nil
 	}
+
+	err := RunAgentRestart(paths, auth.NewMemorySecretStore(), &bytes.Buffer{})
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
+	}
+	if stopCalled {
+		t.Error("RunAgentStop must not be called when there is no identity")
+	}
+}
+
+// A secret store failure is surfaced, not reported as a missing identity.
+func TestRunAgentRestart_StoreError_DoesNotStop(t *testing.T) {
+	paths := testPaths(t)
+	if _, err := auth.GenerateIdentity(paths.KeysDir, auth.NewMemorySecretStore()); err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	storeErr := errors.New("keychain locked")
+	origStop := runAgentStop
+	t.Cleanup(func() { runAgentStop = origStop })
+	stopCalled := false
+	runAgentStop = func(config.Paths, io.Writer) error {
+		stopCalled = true
+		return nil
+	}
+
+	err := RunAgentRestart(paths, failingStore{err: storeErr}, &bytes.Buffer{})
+	if !errors.Is(err, storeErr) || errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected the store error, got: %v", err)
+	}
+	if stopCalled {
+		t.Error("RunAgentStop must not be called when the secret store fails")
+	}
+}
+
+// failingStore is a SecretStore whose Get always fails with err.
+type failingStore struct {
+	auth.SecretStore
+	err error
+}
+
+func (s failingStore) Get(string) ([]byte, error) { return nil, s.err }
+
+func newIdentityStore(t *testing.T, paths config.Paths) auth.SecretStore {
+	t.Helper()
+	store := auth.NewMemorySecretStore()
+	if _, err := auth.GenerateIdentity(paths.KeysDir, store); err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	return store
 }
 
 // A hard (non-sentinel) stop failure must short-circuit: start is not attempted,
@@ -52,7 +110,7 @@ func TestRunAgentRestart_StopHardError_DoesNotStart(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := RunAgentRestart(paths, auth.NewMemorySecretStore(), &buf)
+	err := RunAgentRestart(paths, newIdentityStore(t, paths), &buf)
 	if !errors.Is(err, stopErr) {
 		t.Fatalf("expected the stop error to propagate, got: %v", err)
 	}
@@ -61,10 +119,38 @@ func TestRunAgentRestart_StopHardError_DoesNotStart(t *testing.T) {
 	}
 }
 
+// With an identity and nothing running, restart notes it and starts anyway.
+func TestRunAgentRestart_NotRunning_StartsAnyway(t *testing.T) {
+	paths := testPaths(t)
+	store := newIdentityStore(t, paths)
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if err := RunAgentRestart(paths, store, &buf); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Agent was not running") || !strings.Contains(output, "Agent started") {
+		t.Errorf("expected not-running note then 'Agent started', got: %q", output)
+	}
+}
+
 // A stale PID file is cleaned up by the stop phase, then the agent starts.
 func TestRunAgentRestart_StalePID_Restarts(t *testing.T) {
 	paths := testPaths(t)
-	store := auth.NewMemorySecretStore()
+	store := newIdentityStore(t, paths)
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
 
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)
 	if err := os.WriteFile(pidPath, []byte("999999999"), 0600); err != nil {
@@ -85,7 +171,13 @@ func TestRunAgentRestart_StalePID_Restarts(t *testing.T) {
 // A live agent is stopped (SIGTERM, PID file removed) then started again.
 func TestRunAgentRestart_Running_StopsThenStarts(t *testing.T) {
 	paths := testPaths(t)
-	store := auth.NewMemorySecretStore()
+	store := newIdentityStore(t, paths)
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
 
 	cmd := exec.Command("sleep", "60")
 	if err := cmd.Start(); err != nil {
