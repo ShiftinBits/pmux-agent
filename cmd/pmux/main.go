@@ -600,14 +600,14 @@ Pocketmux commands:
   status               Show agent and pairing status
   unpair               Remove the paired mobile device
   update               Check for and apply updates
-  uninstall [-y]       Remove Pocketmux completely (reverses 'init')
+  uninstall [--keep-config] [-y]  Remove Pocketmux completely (reverses 'init')
   agent run            Run the agent in the foreground
   agent start          Start the agent
   agent stop           Stop the agent
   agent restart        Restart the agent
   agent status         Show agent status and recent logs
-  --version            Show version
-  --help               Show this help
+  --version, -v        Show version
+  --help, -h           Show this help
 
 All other commands are passed through to tmux -L pmux.
 Run 'pmux' with no args to start a new session.
