@@ -82,6 +82,9 @@ func TestDetect_HomebrewPath(t *testing.T) {
 	}{
 		{"Cellar", "/usr/local/Cellar/pmux/1.0.0/bin/pmux"},
 		{"opt/homebrew", "/opt/homebrew/Cellar/pmux/1.0.0/bin/pmux"},
+		{"Intel Caskroom", "/usr/local/Caskroom/pmux/1.0.0/pmux"},
+		{"Linuxbrew Caskroom", "/home/linuxbrew/.linuxbrew/Caskroom/pmux/1.0.0/pmux"},
+		{"Apple Silicon Caskroom", "/opt/homebrew/Caskroom/pmux/1.0.0/pmux"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
