@@ -130,18 +130,35 @@ func RemoveKeyFiles(keysDir string) error {
 	return nil
 }
 
-// HasIdentity checks whether an Ed25519 keypair exists.
-// The private key is checked in the SecretStore and the public key on disk.
-func HasIdentity(keysDir string, store SecretStore) bool {
-	// Check public key on disk
+// ErrNoIdentity is returned by CheckIdentity when no keypair exists.
+var ErrNoIdentity = errors.New("no identity found; run 'pmux init' first")
+
+// CheckIdentity reports whether an Ed25519 keypair exists. It returns
+// ErrNoIdentity when the public key is missing on disk or the private key is
+// missing from the SecretStore, and the wrapped store error when the store
+// fails for any other reason (e.g. a locked keychain), so an unreadable
+// identity is never mistaken for a missing one. The store is read at most once.
+func CheckIdentity(keysDir string, store SecretStore) error {
+	// Check public key on disk first so a fresh host never touches the store
 	pubPath := filepath.Join(keysDir, publicKeyFile)
 	if _, err := os.Stat(pubPath); err != nil {
-		return false
+		return ErrNoIdentity
 	}
 
 	// Check private key in secure store
-	_, err := store.Get(SecretKeyEd25519Private)
-	return !errors.Is(err, ErrSecretNotFound) && err == nil
+	if _, err := store.Get(SecretKeyEd25519Private); err != nil {
+		if errors.Is(err, ErrSecretNotFound) {
+			return ErrNoIdentity
+		}
+		return fmt.Errorf("read identity from secret store: %w", err)
+	}
+	return nil
+}
+
+// HasIdentity checks whether an Ed25519 keypair exists.
+// The private key is checked in the SecretStore and the public key on disk.
+func HasIdentity(keysDir string, store SecretStore) bool {
+	return CheckIdentity(keysDir, store) == nil
 }
 
 // SignChallenge signs the token exchange challenge: deviceId + "|" + nonce.

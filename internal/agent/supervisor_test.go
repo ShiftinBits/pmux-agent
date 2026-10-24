@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,10 +35,10 @@ func TestEnsureRunning_NoIdentity(t *testing.T) {
 
 	store := auth.NewMemorySecretStore()
 
-	// No identity exists — EnsureRunning should be a no-op
+	// No identity exists — EnsureRunning spawns nothing and says why
 	err := EnsureRunning(paths, store)
-	if err != nil {
-		t.Errorf("EnsureRunning should not error without identity: %v", err)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Errorf("EnsureRunning without identity: want auth.ErrNoIdentity, got %v", err)
 	}
 
 	// No PID file should be created

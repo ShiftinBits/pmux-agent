@@ -42,8 +42,8 @@ func TestRunAgentStart_NoIdentity(t *testing.T) {
 
 	var buf bytes.Buffer
 	err := RunAgentStart(paths, store, &buf)
-	if !errors.Is(err, errNoIdentity) {
-		t.Fatalf("expected errNoIdentity, got: %v", err)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
 	}
 	if strings.Contains(buf.String(), "Agent started") {
 		t.Errorf("must not report 'Agent started', got: %q", buf.String())
@@ -58,7 +58,7 @@ func TestRunAgentStart_StoreError(t *testing.T) {
 	storeErr := errors.New("keychain locked")
 
 	err := RunAgentStart(paths, failingStore{err: storeErr}, &bytes.Buffer{})
-	if !errors.Is(err, storeErr) || errors.Is(err, errNoIdentity) {
+	if !errors.Is(err, storeErr) || errors.Is(err, auth.ErrNoIdentity) {
 		t.Fatalf("expected the store error, got: %v", err)
 	}
 }

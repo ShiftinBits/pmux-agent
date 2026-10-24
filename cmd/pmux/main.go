@@ -134,7 +134,7 @@ func ensureAgent(cfg config.Config) {
 		return
 	}
 
-	if err := agent.EnsureRunning(paths, store); err != nil {
+	if err := agent.EnsureRunning(paths, store); err != nil && !errors.Is(err, auth.ErrNoIdentity) {
 		fmt.Fprintf(os.Stderr, "warning: failed to start agent: %v\n", err)
 	}
 }

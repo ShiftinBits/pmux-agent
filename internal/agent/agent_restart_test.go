@@ -22,8 +22,8 @@ func TestRunAgentRestart_NotRunning_NoIdentity(t *testing.T) {
 
 	var buf bytes.Buffer
 	err := RunAgentRestart(paths, store, &buf)
-	if !errors.Is(err, errNoIdentity) {
-		t.Fatalf("expected errNoIdentity, got: %v", err)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
 	}
 
 	output := buf.String()
@@ -44,8 +44,8 @@ func TestRunAgentRestart_NoIdentity_DoesNotStop(t *testing.T) {
 	}
 
 	err := RunAgentRestart(paths, auth.NewMemorySecretStore(), &bytes.Buffer{})
-	if !errors.Is(err, errNoIdentity) {
-		t.Fatalf("expected errNoIdentity, got: %v", err)
+	if !errors.Is(err, auth.ErrNoIdentity) {
+		t.Fatalf("expected ErrNoIdentity, got: %v", err)
 	}
 	if stopCalled {
 		t.Error("RunAgentStop must not be called when there is no identity")
@@ -68,7 +68,7 @@ func TestRunAgentRestart_StoreError_DoesNotStop(t *testing.T) {
 	}
 
 	err := RunAgentRestart(paths, failingStore{err: storeErr}, &bytes.Buffer{})
-	if !errors.Is(err, storeErr) || errors.Is(err, errNoIdentity) {
+	if !errors.Is(err, storeErr) || errors.Is(err, auth.ErrNoIdentity) {
 		t.Fatalf("expected the store error, got: %v", err)
 	}
 	if stopCalled {
@@ -116,6 +116,28 @@ func TestRunAgentRestart_StopHardError_DoesNotStart(t *testing.T) {
 	}
 	if startCalled {
 		t.Error("RunAgentStart must not be called when stop fails")
+	}
+}
+
+// With an identity and nothing running, restart notes it and starts anyway.
+func TestRunAgentRestart_NotRunning_StartsAnyway(t *testing.T) {
+	paths := testPaths(t)
+	store := newIdentityStore(t, paths)
+	origStart := runAgentStart
+	t.Cleanup(func() { runAgentStart = origStart })
+	runAgentStart = func(_ config.Paths, _ auth.SecretStore, w io.Writer) error {
+		fmt.Fprint(w, "Agent started\n")
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if err := RunAgentRestart(paths, store, &buf); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Agent was not running") || !strings.Contains(output, "Agent started") {
+		t.Errorf("expected not-running note then 'Agent started', got: %q", output)
 	}
 }
 

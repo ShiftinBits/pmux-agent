@@ -22,7 +22,7 @@ var (
 // Two deliberate simplifications over running the two commands literally:
 //   - A restart when nothing is running is not an error; it just starts the
 //     agent (a bare `stop` exits non-zero in that case), unless no identity
-//     exists, in which case restart fails with errNoIdentity ("run pmux init")
+//     exists, in which case restart fails with auth.ErrNoIdentity ("run pmux init")
 //     before stopping anything, so a running agent is never left down.
 //   - No extra wait between the phases: RunAgentStop is synchronous and removes
 //     the PID file before returning, and RunAgentStart's already-running check
@@ -30,7 +30,7 @@ var (
 //     stale-PID race. If stop fails outright, start is not attempted (the old
 //     process may still be alive).
 func RunAgentRestart(paths config.Paths, store auth.SecretStore, w io.Writer) error {
-	if err := checkIdentity(paths, store); err != nil {
+	if err := auth.CheckIdentity(paths.KeysDir, store); err != nil {
 		return err
 	}
 	switch err := runAgentStop(paths, w); {
