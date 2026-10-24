@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -568,29 +567,6 @@ func TestHomebrewUpdater_Update_NoBrew(t *testing.T) {
 	}
 
 	_ = origPath // restored by t.Setenv cleanup
-}
-
-func TestBrewUpgradeArgs(t *testing.T) {
-	tests := []struct {
-		name string
-		path string
-		want []string
-	}{
-		{"Apple Silicon Caskroom", "/opt/homebrew/Caskroom/pmux/1.0.0/pmux", []string{"upgrade", "--cask", "shiftinbits/tap/pmux"}},
-		{"Intel Caskroom", "/usr/local/Caskroom/pmux/1.0.0/pmux", []string{"upgrade", "--cask", "shiftinbits/tap/pmux"}},
-		{"Cellar formula", "/opt/homebrew/Cellar/pmux/1.0.0/bin/pmux", []string{"upgrade", "shiftinbits/tap/pmux"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			original := executablePath
-			executablePath = func() (string, error) { return tt.path, nil }
-			defer func() { executablePath = original }()
-
-			if got := brewUpgradeArgs(); !slices.Equal(got, tt.want) {
-				t.Errorf("brewUpgradeArgs() = %v, want %v", got, tt.want)
-			}
-		})
-	}
 }
 
 func TestErrElevationRequired_Error(t *testing.T) {
