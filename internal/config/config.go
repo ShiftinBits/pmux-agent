@@ -504,8 +504,12 @@ func (c *Config) Validate() error {
 	if _, err := time.ParseDuration(c.Connection.ReconnectInterval); err != nil {
 		return fmt.Errorf("connection.reconnect_interval: %w", err)
 	}
-	if _, err := time.ParseDuration(c.Connection.KeepaliveInterval); err != nil {
+	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
+	if err != nil {
 		return fmt.Errorf("connection.keepalive_interval: %w", err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("connection.keepalive_interval: must be positive, got %q", c.Connection.KeepaliveInterval)
 	}
 	// Note: an over-cap keepalive_interval is NOT a validation error — it would
 	// hard-fail the agent on startup after an upgrade for anyone who tuned it up.
@@ -523,8 +527,12 @@ func (c *Config) Validate() error {
 
 	// update.check_interval must parse if non-empty
 	if c.Update.CheckInterval != "" {
-		if _, err := time.ParseDuration(c.Update.CheckInterval); err != nil {
+		d, err := time.ParseDuration(c.Update.CheckInterval)
+		if err != nil {
 			return fmt.Errorf("update.check_interval: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("update.check_interval: must be positive, got %q", c.Update.CheckInterval)
 		}
 	}
 
@@ -557,15 +565,15 @@ func (c *Config) ReconnectInterval() time.Duration {
 const MaxKeepaliveInterval = 45 * time.Second
 
 // parsedKeepalive returns the configured keepalive duration and whether it
-// parsed. Centralizing the parse keeps KeepaliveInterval and KeepaliveClamped
+// parsed to a positive value. Centralizing the parse keeps KeepaliveInterval and KeepaliveClamped
 // from drifting.
 func (c *Config) parsedKeepalive() (time.Duration, bool) {
 	d, err := time.ParseDuration(c.Connection.KeepaliveInterval)
-	return d, err == nil
+	return d, err == nil && d > 0
 }
 
 // KeepaliveInterval returns the configured keepalive interval duration, clamped
-// to MaxKeepaliveInterval. Falls back to 30s if parsing fails. Call
+// to MaxKeepaliveInterval. Falls back to 30s if parsing fails or the value is non-positive. Call
 // KeepaliveClamped to detect whether the configured value was capped.
 func (c *Config) KeepaliveInterval() time.Duration {
 	d, ok := c.parsedKeepalive()
@@ -580,17 +588,17 @@ func (c *Config) KeepaliveInterval() time.Duration {
 
 // KeepaliveClamped reports whether the configured keepalive_interval exceeds
 // MaxKeepaliveInterval and was therefore clamped by KeepaliveInterval. An
-// unparseable value falls back to 30s and is not considered clamped.
+// unparseable or non-positive value falls back to 30s and is not considered clamped.
 func (c *Config) KeepaliveClamped() bool {
 	d, ok := c.parsedKeepalive()
 	return ok && d > MaxKeepaliveInterval
 }
 
 // UpdateCheckInterval returns the parsed update check interval duration.
-// Falls back to 24h if parsing fails.
+// Falls back to 24h if parsing fails or the value is non-positive.
 func (c *Config) UpdateCheckInterval() time.Duration {
 	d, err := time.ParseDuration(c.Update.CheckInterval)
-	if err != nil {
+	if err != nil || d <= 0 {
 		return 24 * time.Hour
 	}
 	return d
