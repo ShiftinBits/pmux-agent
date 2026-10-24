@@ -21,7 +21,7 @@ func shellQuote(s string) string {
 
 // PaneBridge provides a bidirectional byte stream to a tmux pane.
 // Output is streamed via tmux pipe-pane through a FIFO, and input
-// is sent via tmux send-keys -l.
+// is sent via SendKeys (load-buffer + paste-buffer, never send-keys argv).
 //
 // Internally, a relay goroutine copies from the FIFO into an os.Pipe.
 // Callers read from the pipe's read end. This design ensures that
@@ -49,7 +49,7 @@ type PaneBridge struct {
 const relayPollInterval = 50 * time.Millisecond
 
 // AttachPane creates a bidirectional stream to a tmux pane.
-// Output is captured via pipe-pane and input is sent via send-keys.
+// Output is captured via pipe-pane and input is sent via SendKeys.
 // If cols and rows are positive, the pane's window is resized to those dimensions.
 func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) {
 	// Create temp directory for the output FIFO
@@ -203,7 +203,7 @@ func (pb *PaneBridge) Read(buf []byte) (int, error) {
 	return n, nil
 }
 
-// Write sends input to the pane via tmux send-keys.
+// Write sends input to the pane via SendKeys (load-buffer + paste-buffer).
 // Implements io.Writer.
 func (pb *PaneBridge) Write(data []byte) (int, error) {
 	pb.mu.Lock()
