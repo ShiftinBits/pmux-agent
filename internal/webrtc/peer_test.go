@@ -285,6 +285,52 @@ func TestPeerManager_DuplicateSDPAnswerIgnored(t *testing.T) {
 	}
 }
 
+// An answer that fails SetRemoteDescription while an offer is pending must tear
+// the peer down through OnPeerDisconnect, so a session that was live before an
+// ICE-restart offer is detached rather than silently dropped.
+func TestPeerManager_InvalidSDPAnswerFiresDisconnect(t *testing.T) {
+	const id = "mobile-badanswer"
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID(id)
+	pm.SharedSecretFn = testSharedSecretFn
+	var mu sync.Mutex
+	var fired []string
+	pm.OnPeerDisconnect = func(deviceID string) {
+		mu.Lock()
+		fired = append(fired, deviceID)
+		mu.Unlock()
+	}
+	defer pm.CloseAll()
+
+	pm.handleConnectRequest(id, testAttemptA)
+	peer := getPeer(pm, id)
+	if peer == nil {
+		t.Fatal("peer not tracked after the SDP offer was sent")
+	}
+	if got := peer.conn.SignalingState(); got != webrtc.SignalingStateHaveLocalOffer {
+		t.Fatalf("signaling state = %v, want have-local-offer", got)
+	}
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, AttemptID: testAttemptA, SDP: "v=0"})
+
+	deadline := time.Now().Add(time.Second)
+	for getPeer(pm, id) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("peer not removed within 1s of an invalid SDP answer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pm.cleanupWg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fired) != 1 || fired[0] != id {
+		t.Errorf("OnPeerDisconnect fired with %v, want exactly [%s]", fired, id)
+	}
+}
+
 // failingSender records messages like mockSender but fails Send for failType.
 type failingSender struct {
 	mockSender
