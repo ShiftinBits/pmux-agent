@@ -639,3 +639,32 @@ func TestGithubUpdater_DownloadRejectsUntrustedURLs(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckDownloadRedirect(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{"release assets host allowed", "https://release-assets.githubusercontent.com/asset", ""},
+		{"objects host allowed", "https://objects.githubusercontent.com/asset", ""},
+		{"github host allowed", "https://github.com/asset", ""},
+		{"untrusted host rejected", "https://evil.example.com/asset", "untrusted redirect host"},
+		{"http scheme rejected", "http://release-assets.githubusercontent.com/asset", "untrusted redirect scheme"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
+			err := checkDownloadRedirect(req, nil)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
