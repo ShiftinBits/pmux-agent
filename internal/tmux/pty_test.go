@@ -1,8 +1,10 @@
 package tmux
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -374,4 +376,83 @@ func TestAttachPane_ReplacesExistingPipe(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	readUntil(t, bridge, marker, 5*time.Second)
+}
+
+// newPollTestClient returns a client on a dedicated socket for the FIFO
+// readiness tests, killing the server before and after the test.
+func newPollTestClient(t *testing.T) *Client {
+	t.Helper()
+	skipIfNoTmux(t)
+	const socket = "pmux-fifo-poll-test"
+	kill := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	kill()
+	t.Cleanup(kill)
+	return NewClient(socket)
+}
+
+func TestAttachPane_ClosePromptlyWhenIdle(t *testing.T) {
+	c := newPollTestClient(t)
+	if _, err := c.CreateSession("poll-close", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	bridge, err := c.AttachPane(sessions[0].Windows[0].Panes[0].ID, 80, 24)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+
+	// Let the relay settle into its idle poll, then close.
+	time.Sleep(100 * time.Millisecond)
+	closeDone := make(chan struct{})
+	go func() {
+		_ = bridge.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	select {
+	case <-bridge.relayDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("relay goroutine did not exit promptly after Close")
+	}
+}
+
+func TestAttachPane_EchoLatency(t *testing.T) {
+	c := newPollTestClient(t)
+	if _, err := c.CreateSession("poll-latency", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	bridge, err := c.AttachPane(sessions[0].Windows[0].Panes[0].ID, 80, 24)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer bridge.Close()
+
+	const samples = 30
+	var lat []time.Duration
+	for i := 0; i < samples; i++ {
+		marker := fmt.Sprintf("Q%dZ", i)
+		if _, err := bridge.Write([]byte(marker)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		start := time.Now()
+		readUntil(t, bridge, marker, 5*time.Second)
+		lat = append(lat, time.Since(start))
+	}
+	sort.Slice(lat, func(a, b int) bool { return lat[a] < lat[b] })
+	median := lat[len(lat)/2]
+	t.Logf("write-return to bridge Read latency: min=%v median=%v max=%v", lat[0], median, lat[len(lat)-1])
+	if median >= relayPollInterval {
+		t.Errorf("median echo latency %v not below the old %v poll interval", median, relayPollInterval)
+	}
 }

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // shellQuote wraps s in POSIX single quotes, escaping each embedded
@@ -43,9 +45,9 @@ type PaneBridge struct {
 	closed         bool
 }
 
-// relayPollInterval is how often the relay goroutine checks the done
-// channel when the FIFO has no data. This is short enough to avoid
-// perceptible lag on shutdown but long enough to avoid busy-waiting.
+// relayPollInterval is the longest the relay goroutine waits in poll(2)
+// before re-checking the done channel when the FIFO has no data. Data wakes
+// the poll immediately; the interval only bounds shutdown latency.
 const relayPollInterval = 50 * time.Millisecond
 
 // AttachPane creates a bidirectional stream to a tmux pane.
@@ -129,9 +131,32 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 	return pb, nil
 }
 
+// waitReadable blocks until the FIFO fd is readable or relayPollInterval
+// elapses, retrying on EINTR. Any other poll error returns immediately so
+// the caller's next read surfaces it.
+func (pb *PaneBridge) waitReadable() {
+	fds := []unix.PollFd{{Fd: int32(pb.fifoFd), Events: unix.POLLIN}}
+	deadline := time.Now().Add(relayPollInterval)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		ms := int(remaining / time.Millisecond)
+		if ms < 1 {
+			ms = 1
+		}
+		if _, err := unix.Poll(fds, ms); err != unix.EINTR {
+			return
+		}
+	}
+}
+
 // relayFIFOToPipe copies data from the FIFO to the relay pipe using
-// non-blocking reads. Polls the FIFO fd at short intervals and checks
-// the done channel between polls so it can exit promptly on Close().
+// non-blocking reads. When the FIFO is empty it waits in poll(2) for
+// readability (waking immediately on data) for at most relayPollInterval,
+// and checks the done channel between polls so it exits within one interval
+// on Close().
 func (pb *PaneBridge) relayFIFOToPipe() {
 	defer close(pb.relayDone)
 	defer func() {
@@ -158,15 +183,9 @@ func (pb *PaneBridge) relayFIFOToPipe() {
 		}
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-				// No data available — poll after a short sleep.
-				// Use a timer with select for prompt cancellation.
-				timer := time.NewTimer(relayPollInterval)
-				select {
-				case <-pb.done:
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
+				// No data available — block in poll(2) until the FIFO is
+				// readable or the interval elapses, then re-check done.
+				pb.waitReadable()
 				continue
 			}
 			// FIFO error (EBADF after close, etc.) — stop relaying
