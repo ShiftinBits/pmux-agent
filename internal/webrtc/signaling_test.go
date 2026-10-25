@@ -936,6 +936,42 @@ func TestSignalingClient_SendWritesJSON(t *testing.T) {
 	}
 }
 
+func TestSignalingClient_SendBoundedWhenServerStopsReading(t *testing.T) {
+	id, logger := testSetup(t)
+
+	release := make(chan struct{})
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		<-release // stop reading so the client's send buffers fill
+	})
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	go sc.Run(ctx)
+	time.Sleep(400 * time.Millisecond) // wait for connection
+
+	msg := SignalingMessage{Type: "ice_candidate", TargetDeviceID: "m", Candidate: strings.Repeat("a", 1<<20)}
+	var sendErr error
+	var elapsed time.Duration
+	for i := 0; i < 256 && sendErr == nil; i++ {
+		start := time.Now()
+		sendErr = sc.Send(msg)
+		elapsed = time.Since(start)
+	}
+	if sendErr == nil {
+		t.Skip("could not fill socket buffers to stall the write")
+	}
+	if elapsed > 6*time.Second {
+		t.Errorf("erroring Send took %v, want <= 6s", elapsed)
+	}
+}
+
 func TestReadDeadline_DisconnectsOnSilentServer(t *testing.T) {
 	id, logger := testSetup(t)
 

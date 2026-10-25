@@ -321,7 +321,10 @@ func (sc *SignalingClient) Send(msg SignalingMessage) error {
 	if sc.conn == nil {
 		return fmt.Errorf("not connected")
 	}
-	return sc.conn.WriteMessage(websocket.TextMessage, data)
+	sc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err = sc.conn.WriteMessage(websocket.TextMessage, data)
+	sc.conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 // JWT returns the current JWT token. Thread-safe.
