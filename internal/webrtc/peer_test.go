@@ -2843,3 +2843,114 @@ func TestPeerManager_ConnectRequestAttemptIDValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestPeerManager_FetchTurnCredentialsNegativeCache(t *testing.T) {
+	logger := testLogger()
+	sender := &mockSender{}
+
+	t.Run("hung server fails within timeout and is not retried", func(t *testing.T) {
+		release := make(chan struct{})
+		var mu sync.Mutex
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			<-release
+		}))
+		t.Cleanup(func() {
+			close(release)
+			srv.Close()
+		})
+
+		pm := NewPeerManager(logger, sender, srv.URL, func() string { return "test-jwt" }, nil, "")
+		start := time.Now()
+		if _, err := pm.fetchTurnCredentials(); err == nil {
+			t.Fatal("expected error from hung TURN server")
+		}
+		if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
+			t.Errorf("first fetch took %v, want <= 3.5s", elapsed)
+		}
+
+		start = time.Now()
+		if _, err := pm.fetchTurnCredentials(); err == nil {
+			t.Fatal("expected error from negative cache")
+		}
+		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+			t.Errorf("second fetch took %v, want < 100ms", elapsed)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if requests != 1 {
+			t.Errorf("server saw %d requests, want 1", requests)
+		}
+	})
+
+	t.Run("retries after backoff elapses", func(t *testing.T) {
+		srv := mockTurnServer(t)
+		defer srv.Close()
+
+		pm := NewPeerManager(logger, sender, srv.URL, func() string { return "test-jwt" }, nil, "")
+		pm.turnFailTime = time.Now().Add(-turnFailBackoff - time.Second)
+		servers, err := pm.fetchTurnCredentials()
+		if err != nil {
+			t.Fatalf("fetchTurnCredentials() error: %v", err)
+		}
+		if len(servers) == 0 {
+			t.Fatal("expected at least one ICE server")
+		}
+		if len(pm.turnCache) == 0 || !pm.turnFailTime.IsZero() {
+			t.Error("expected success to populate cache and clear failure time")
+		}
+	})
+}
+
+func TestPeerManager_GetSharedSecret(t *testing.T) {
+	orig := sharedSecretTimeout
+	sharedSecretTimeout = 100 * time.Millisecond
+	defer func() { sharedSecretTimeout = orig }()
+
+	tests := []struct {
+		name    string
+		fn      func(string) ([]byte, error)
+		wantErr string
+		want    string
+	}{
+		{"fast secret", func(string) ([]byte, error) { return []byte("s3cret"), nil }, "", "s3cret"},
+		{"empty secret", func(string) ([]byte, error) { return nil, nil }, "empty shared secret", ""},
+		{"blocking read times out", nil, "timed out", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			fn := tt.fn
+			if fn == nil {
+				fn = func(string) ([]byte, error) {
+					<-release
+					return []byte("late"), nil
+				}
+			}
+			pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost", func() string { return "" }, nil, "")
+			pm.SharedSecretFn = fn
+
+			start := time.Now()
+			got, err := pm.getSharedSecret("dev")
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Errorf("getSharedSecret took %v", elapsed)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("secret = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

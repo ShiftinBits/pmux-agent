@@ -66,6 +66,14 @@ const pcDisconnectedTimeout = 10 * time.Second
 // TURN credentials typically have a 24h TTL, so 10 minutes is conservative.
 const turnCacheTTL = 10 * time.Minute
 
+// turnFetchTimeout bounds the TURN credential request. The fetch runs on the
+// signaling readLoop before the offer is sent, so it bounds the pre-offer delay.
+const turnFetchTimeout = 3 * time.Second
+
+// turnFailBackoff is how long a failed TURN fetch suppresses further attempts,
+// so repeated connects during an outage do not each wait out the timeout.
+const turnFailBackoff = 30 * time.Second
+
 // TurnCredentials holds STUN/TURN server credentials from the signaling server.
 type TurnCredentials struct {
 	URLs       []string `json:"urls"`
@@ -138,6 +146,7 @@ type PeerManager struct {
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
 	turnCache        []webrtc.ICEServer     // cached TURN credentials
 	turnCacheTime    time.Time              // when turnCache was last populated
+	turnFailTime     time.Time              // when the last TURN fetch failed (negative cache)
 }
 
 // Peer represents a single WebRTC peer connection to a mobile device.
@@ -220,6 +229,10 @@ func (pm *PeerManager) SetAllowedDeviceID(id string) {
 	pm.mu.Unlock()
 }
 
+// sharedSecretTimeout bounds the keyring read on the signaling readLoop.
+// A var so tests can shorten it.
+var sharedSecretTimeout = 2 * time.Second
+
 // getSharedSecret returns the pairing shared secret for a device, or an error
 // if no source is configured or the secret is missing/empty. Used to fail
 // closed: a connection that cannot be authenticated is rejected.
@@ -227,9 +240,28 @@ func (pm *PeerManager) getSharedSecret(deviceID string) ([]byte, error) {
 	if pm.SharedSecretFn == nil {
 		return nil, fmt.Errorf("no shared secret source configured")
 	}
-	secret, err := pm.SharedSecretFn(deviceID)
-	if err != nil {
-		return nil, err
+
+	type result struct {
+		secret []byte
+		err    error
+	}
+	// Buffered so a late result is dropped instead of blocking the goroutine.
+	// A timed-out read leaves one goroutine blocked on the keyring until it returns.
+	ch := make(chan result, 1)
+	fn := pm.SharedSecretFn
+	go func() {
+		s, e := fn(deviceID)
+		ch <- result{s, e}
+	}()
+	var secret []byte
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		secret = r.secret
+	case <-time.After(sharedSecretTimeout):
+		return nil, fmt.Errorf("shared secret read timed out")
 	}
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("empty shared secret for device %s", deviceID)
@@ -258,7 +290,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		jwt:              jwtFn,
 		handler:          handler,
 		hmacSecret:       hmacSecret,
-		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		httpClient:       &http.Client{Timeout: turnFetchTimeout},
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
@@ -887,8 +919,27 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		pm.logger.Debug("using cached TURN credentials", "age", time.Since(pm.turnCacheTime).Round(time.Second))
 		return cached, nil
 	}
+	if time.Since(pm.turnFailTime) < turnFailBackoff {
+		pm.mu.Unlock()
+		return nil, fmt.Errorf("TURN credentials recently failed; skipping fetch")
+	}
 	pm.mu.Unlock()
 
+	servers, err := pm.requestTurnCredentials()
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if err != nil {
+		pm.turnFailTime = time.Now()
+		return nil, err
+	}
+	pm.turnFailTime = time.Time{}
+	pm.turnCache = servers
+	pm.turnCacheTime = time.Now()
+	return servers, nil
+}
+
+// requestTurnCredentials performs the HTTP request for TURN credentials.
+func (pm *PeerManager) requestTurnCredentials() ([]webrtc.ICEServer, error) {
 	url := pm.serverURL + "/turn/credentials"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -924,12 +975,6 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		Username:   creds.Username,
 		Credential: creds.Credential,
 	}}
-
-	// Cache the result.
-	pm.mu.Lock()
-	pm.turnCache = servers
-	pm.turnCacheTime = time.Now()
-	pm.mu.Unlock()
 
 	return servers, nil
 }
