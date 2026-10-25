@@ -154,8 +154,21 @@ func (u *githubUpdater) fetchExpectedChecksum(url, filename string) (string, err
 }
 
 var allowedDownloadHosts = map[string]bool{
-	"github.com":                    true,
-	"objects.githubusercontent.com": true,
+	"github.com":                           true,
+	"objects.githubusercontent.com":        true,
+	"release-assets.githubusercontent.com": true,
+}
+
+// checkDownloadRedirect rejects redirects to hosts outside the allowlist or
+// to non-https schemes.
+func checkDownloadRedirect(req *http.Request, via []*http.Request) error {
+	if !allowedDownloadHosts[req.URL.Host] {
+		return fmt.Errorf("untrusted redirect host: %s", req.URL.Host)
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("untrusted redirect scheme: %s", req.URL.Scheme)
+	}
+	return nil
 }
 
 // download fetches a URL and returns the response body, limited to maxBytes.
@@ -169,16 +182,8 @@ func (u *githubUpdater) download(url string, maxBytes int64) ([]byte, error) {
 	}
 
 	client := &http.Client{
-		Timeout: 2 * time.Minute,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !allowedDownloadHosts[req.URL.Host] {
-				return fmt.Errorf("untrusted redirect host: %s", req.URL.Host)
-			}
-			if req.URL.Scheme != "https" {
-				return fmt.Errorf("untrusted redirect scheme: %s", req.URL.Scheme)
-			}
-			return nil
-		},
+		Timeout:       2 * time.Minute,
+		CheckRedirect: checkDownloadRedirect,
 	}
 	resp, err := client.Get(url)
 	if err != nil {
