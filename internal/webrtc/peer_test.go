@@ -224,6 +224,67 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	pm.CloseAll()
 }
 
+// A repeated sdp_answer arriving once the offer is already answered must be
+// ignored rather than tearing down the live peer.
+func TestPeerManager_DuplicateSDPAnswerIgnored(t *testing.T) {
+	sender := &mockSender{}
+	api := fastAPI(t)
+	pm := NewPeerManager(testLogger(), sender, "http://unused", func() string { return "test-jwt" }, nil, "")
+	pm.API = api
+	pm.SetAllowedDeviceID("mobile-dup")
+	pm.SharedSecretFn = testSharedSecretFn
+	defer pm.CloseAll()
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-dup"})
+	time.Sleep(500 * time.Millisecond)
+
+	offers := sender.messagesOfType("sdp_offer")
+	if len(offers) == 0 {
+		t.Fatal("no SDP offer sent")
+	}
+
+	answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create answer PC: %v", err)
+	}
+	defer answerPC.Close()
+	if err := answerPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+		t.Fatalf("set remote desc: %v", err)
+	}
+	answer, err := answerPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	if err := answerPC.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set local desc: %v", err)
+	}
+
+	msg := SignalingMessage{Type: "sdp_answer", TargetDeviceID: "mobile-dup", SDP: answer.SDP}
+	pm.HandleSignalingMessage(msg)
+
+	pm.mu.Lock()
+	peer, ok := pm.peers["mobile-dup"]
+	pm.mu.Unlock()
+	if !ok {
+		t.Fatal("peer should exist after first answer")
+	}
+	if peer.conn.SignalingState() != webrtc.SignalingStateStable {
+		t.Fatalf("signaling state = %v, want stable", peer.conn.SignalingState())
+	}
+
+	pm.HandleSignalingMessage(msg)
+
+	pm.mu.Lock()
+	cur, ok := pm.peers["mobile-dup"]
+	pm.mu.Unlock()
+	if !ok || cur != peer {
+		t.Fatal("peer should survive a duplicate answer")
+	}
+	if peer.conn.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		t.Error("peer connection should not be closed by a duplicate answer")
+	}
+}
+
 // failingSender records messages like mockSender but fails Send for failType.
 type failingSender struct {
 	mockSender

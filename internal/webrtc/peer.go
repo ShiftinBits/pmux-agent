@@ -866,6 +866,10 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID, attemptID, sdp string) {
 		pm.logger.Info("ignoring sdp_answer for another attempt", "mobile", mobileDeviceID, "attempt", attemptID)
 		return
 	}
+	if peer.conn.SignalingState() == webrtc.SignalingStateStable {
+		pm.logger.Debug("ignoring sdp_answer: no offer pending", "mobile", mobileDeviceID)
+		return
+	}
 
 	answer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
@@ -874,7 +878,11 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID, attemptID, sdp string) {
 
 	if err := peer.conn.SetRemoteDescription(answer); err != nil {
 		pm.logger.Error("failed to set remote description", "error", err, "mobile", mobileDeviceID)
-		pm.ClosePeer(mobileDeviceID)
+		pm.mu.Lock()
+		if pm.peers[mobileDeviceID] == peer {
+			pm.scheduleCleanup(peer)
+		}
+		pm.mu.Unlock()
 		return
 	}
 
