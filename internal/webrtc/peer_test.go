@@ -2420,6 +2420,135 @@ func TestWaitForSendReady_DoneChannel(t *testing.T) {
 	pm.CloseAll()
 }
 
+// stalledDataChannel returns an open sender-side DataChannel whose
+// BufferedAmount stays above maxBufferedAmount. The receiver uses detached
+// DataChannels and never reads, with a small SCTP receive buffer, so its
+// receive window closes and the sender's queued bytes are never acknowledged.
+func stalledDataChannel(t *testing.T) *webrtc.DataChannel {
+	t.Helper()
+
+	sender, err := fastAPI(t).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create sender peer connection: %v", err)
+	}
+	t.Cleanup(func() { sender.Close() }) //nolint:errcheck
+
+	rse := webrtc.SettingEngine{}
+	rse.SetICETimeouts(5*time.Second, 10*time.Second, 1*time.Second)
+	rse.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	rse.SetIncludeLoopbackCandidate(true)
+	rse.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	rse.DetachDataChannels()
+	rse.SetSCTPMaxReceiveBufferSize(64 * 1024)
+	receiver, err := webrtc.NewAPI(webrtc.WithSettingEngine(rse)).NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create receiver peer connection: %v", err)
+	}
+	t.Cleanup(func() { receiver.Close() }) //nolint:errcheck
+
+	dc, err := sender.CreateDataChannel("stalled", nil)
+	if err != nil {
+		t.Fatalf("create data channel: %v", err)
+	}
+	opened := make(chan struct{})
+	dc.OnOpen(func() { close(opened) })
+
+	offer, err := sender.CreateOffer(nil)
+	if err != nil {
+		t.Fatalf("create offer: %v", err)
+	}
+	senderGathered := webrtc.GatheringCompletePromise(sender)
+	if err := sender.SetLocalDescription(offer); err != nil {
+		t.Fatalf("sender set local description: %v", err)
+	}
+	<-senderGathered
+	if err := receiver.SetRemoteDescription(*sender.LocalDescription()); err != nil {
+		t.Fatalf("receiver set remote description: %v", err)
+	}
+	answer, err := receiver.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	receiverGathered := webrtc.GatheringCompletePromise(receiver)
+	if err := receiver.SetLocalDescription(answer); err != nil {
+		t.Fatalf("receiver set local description: %v", err)
+	}
+	<-receiverGathered
+	if err := sender.SetRemoteDescription(*receiver.LocalDescription()); err != nil {
+		t.Fatalf("sender set remote description: %v", err)
+	}
+
+	select {
+	case <-opened:
+	case <-time.After(10 * time.Second):
+		t.Fatal("DataChannel did not open")
+	}
+
+	chunk := make([]byte, 32*1024)
+	for dc.BufferedAmount() <= 2*maxBufferedAmount {
+		if err := dc.Send(chunk); err != nil {
+			t.Fatalf("fill send buffer: %v", err)
+		}
+	}
+	// Let the receive window close; the buffer must then stay above the gate.
+	time.Sleep(200 * time.Millisecond)
+	if got := dc.BufferedAmount(); got <= maxBufferedAmount {
+		t.Fatalf("BufferedAmount = %d after fill, want > %d", got, maxBufferedAmount)
+	}
+	return dc
+}
+
+func TestSendMessage_BackpressureGatesOnlyOutput(t *testing.T) {
+	dc := stalledDataChannel(t)
+	p := &Peer{
+		DeviceID:      "test-gate",
+		logger:        testLogger().With("peer", "test-gate"),
+		dc:            dc,
+		authConfirmed: true,
+		sendReady:     make(chan struct{}, 1),
+		done:          make(chan struct{}),
+	}
+
+	// Control messages are not gated: each returns promptly despite the full buffer.
+	controls := []protocol.Message{
+		&protocol.PongEvent{Type: "pong"},
+		&protocol.ErrorEvent{Type: "error", Code: "stream_reset", Message: "output stream stalled; re-attach"},
+		&protocol.DetachedEvent{Type: "detached"},
+	}
+	for _, msg := range controls {
+		start := time.Now()
+		if err := p.SendMessage(msg); err != nil {
+			t.Errorf("SendMessage(%s) with BufferedAmount %d: %v", msg.MessageType(), dc.BufferedAmount(), err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("SendMessage(%s) took %v, want no backpressure wait", msg.MessageType(), elapsed)
+		}
+	}
+	if got := dc.BufferedAmount(); got <= maxBufferedAmount {
+		t.Fatalf("BufferedAmount = %d, want > %d before output send", got, maxBufferedAmount)
+	}
+
+	// Output still waits on the gate: it is blocked until the peer closes.
+	result := make(chan error, 1)
+	go func() {
+		result <- p.SendMessage(&protocol.OutputEvent{Type: "output", Data: []byte("x")})
+	}()
+	select {
+	case err := <-result:
+		t.Fatalf("output SendMessage returned %v while buffer full, want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(p.done)
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "peer connection closed") {
+			t.Errorf("output SendMessage error = %v, want backpressure peer connection closed", err)
+		}
+	case <-time.After(sendReadyTimeout):
+		t.Fatal("output SendMessage did not return after done was closed")
+	}
+}
+
 func TestFetchTurnCredentials_CacheHit(t *testing.T) {
 	// Verify that a cache hit returns the cached result without making an HTTP request.
 	logger := testLogger()

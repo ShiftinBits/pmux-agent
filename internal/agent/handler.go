@@ -13,6 +13,11 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/update"
 )
 
+// errCodeStreamReset is the error code sent when the agent tears down a
+// peer's output stream on its own (e.g. a backpressure stall), telling the
+// mobile its attachment is gone and it must re-attach to resume output.
+const errCodeStreamReset = "stream_reset"
+
 // SendFunc sends a protocol message to a specific peer.
 type SendFunc func(peerID string, msg protocol.Message) error
 
@@ -508,6 +513,8 @@ func (h *Handler) handleCreateSession(peerID string) {
 
 // streamOutput reads from a PaneBridge and sends output events to the peer.
 // Exits when the context is canceled, the bridge is closed, or sending fails.
+// On a send failure (e.g. a backpressure stall) it detaches the peer and sends
+// a stream_reset error so the mobile knows to re-attach.
 // When the bridge returns EOF (pane exited), sends pane_closed + sessions events.
 func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
 	defer func() {
@@ -577,8 +584,18 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 			Type: "output",
 			Data: data,
 		}); err != nil {
-			h.logger.Debug("output stream send failed, stopping", "peer", peerID, "error", err)
+			if ctx.Err() != nil {
+				// Detached by someone else (detach, re-attach, disconnect)
+				// while the send was waiting; that path owns cleanup.
+				h.logger.Debug("output stream send failed after cancel", "peer", peerID, "error", err)
+				return
+			}
+			h.logger.Debug("output stream send failed, detaching", "peer", peerID, "error", err)
 			h.detachPeer(peerID)
+			// The detach is agent-initiated, so the mobile would otherwise
+			// sit on a dead stream. Control messages bypass the backpressure
+			// gate, so this goes out even though the buffer is still full.
+			h.sendError(peerID, errCodeStreamReset, "output stream stalled; re-attach")
 			return
 		}
 	}

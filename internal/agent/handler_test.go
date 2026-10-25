@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -486,6 +487,99 @@ func TestHandler_InputWithoutAttach(t *testing.T) {
 	}
 	if errMsg.Code != "not_attached" {
 		t.Errorf("code = %q, want not_attached", errMsg.Code)
+	}
+}
+
+// TestHandler_OutputSendFailureSendsStreamReset verifies that when sending
+// output fails (as on a backpressure stall), the handler detaches the peer and
+// tells it to re-attach with a stream_reset error.
+func TestHandler_OutputSendFailureSendsStreamReset(t *testing.T) {
+	skipIfNoTmux(t)
+
+	const testSocket = "pmux-stream-reset-test"
+	exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	t.Cleanup(func() {
+		exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	})
+
+	tc := tmux.NewClient(testSocket)
+	catcher := &messageCatcher{}
+	errStalled := errors.New("backpressure: send timeout: DataChannel buffer full")
+	send := func(peerID string, msg protocol.Message) error {
+		catcher.Send(peerID, msg) //nolint:errcheck
+		if _, ok := msg.(*protocol.OutputEvent); ok {
+			return errStalled
+		}
+		return nil
+	}
+	h := NewHandler(tc, send, slog.Default(), "test", "")
+
+	if _, err := tc.CreateSession("stream-reset", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type:   "attach",
+		PaneID: paneID,
+		Cols:   80,
+		Rows:   24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+
+	// Produce output so streamOutput attempts (and fails) a send.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo STREAM_RESET_TEST\n"),
+	})
+
+	errorCodes := func() []string {
+		var codes []string
+		for _, m := range catcher.get() {
+			if ev, ok := m.Msg.(*protocol.ErrorEvent); ok && m.PeerID == "peer1" {
+				codes = append(codes, ev.Code)
+			}
+		}
+		return codes
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !slices.Contains(errorCodes(), errCodeStreamReset) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !slices.Contains(errorCodes(), errCodeStreamReset) {
+		t.Fatalf("error codes sent = %v, want %q", errorCodes(), errCodeStreamReset)
+	}
+
+	h.mu.Lock()
+	_, hasBridge := h.bridges["peer1"]
+	_, hasCancel := h.cancels["peer1"]
+	h.mu.Unlock()
+	if hasBridge || hasCancel {
+		t.Errorf("peer state after stall: bridge=%v cancel=%v, want both removed", hasBridge, hasCancel)
+	}
+
+	// Input after the stall detach must report the peer is no longer attached.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("x"),
+	})
+	codes := errorCodes()
+	if len(codes) == 0 || codes[len(codes)-1] != "not_attached" {
+		t.Errorf("error codes after input = %v, want last to be not_attached", codes)
+	}
+
+	resets := 0
+	for _, c := range codes {
+		if c == errCodeStreamReset {
+			resets++
+		}
+	}
+	if resets != 1 {
+		t.Errorf("stream_reset sent %d times, want 1", resets)
 	}
 }
 

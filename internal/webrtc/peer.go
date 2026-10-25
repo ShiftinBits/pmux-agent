@@ -47,9 +47,10 @@ const DataChannelLabel = "terminal"
 // fires the OnBufferedAmountLow callback, enabling backpressure-aware sending.
 const bufferedAmountLowThreshold = 4096
 
-// maxBufferedAmount is the byte threshold above which SendRaw/SendMessage
-// block waiting for the buffer to drain. 512KB is generous for terminal data
-// (typically kilobytes) while preventing unbounded growth.
+// maxBufferedAmount is the byte threshold above which SendRaw and output
+// sends via SendMessage block waiting for the buffer to drain. 512KB is
+// generous for terminal data (typically kilobytes) while preventing unbounded
+// growth.
 const maxBufferedAmount = 512 * 1024
 
 // sendReadyTimeout is the maximum time to wait for the DataChannel buffer
@@ -1761,7 +1762,11 @@ func (p *Peer) SendRaw(data []byte) error {
 }
 
 // SendMessage encodes and sends a protocol message over the DataChannel.
-// Blocks if the send buffer is full, waiting for backpressure to clear.
+// Output events block while the send buffer is full, waiting for backpressure
+// to clear. Control messages (error, detached, sessions, pong, ...) are small
+// and are sent immediately; ordered delivery still queues them behind any
+// buffered output, but they never wait on the gate, so a stall notice can go
+// out on the same buffer that stalled the output stream.
 //
 // Until auth_confirm has been sent, only the handshake messages may go out;
 // anything else is refused rather than queued, so auth_confirm is always the
@@ -1789,8 +1794,10 @@ func (p *Peer) SendMessage(msg protocol.Message) error {
 	}
 
 	// Wait without holding p.mu so Close() can proceed concurrently.
-	if err := p.waitForSendReady(dc); err != nil {
-		return fmt.Errorf("backpressure: %w", err)
+	if _, isOutput := msg.(*protocol.OutputEvent); isOutput {
+		if err := p.waitForSendReady(dc); err != nil {
+			return fmt.Errorf("backpressure: %w", err)
+		}
 	}
 	return dc.Send(data)
 }
