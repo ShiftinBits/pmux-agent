@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -18,8 +19,9 @@ import (
 // mobile its attachment is gone and it must re-attach to resume output.
 const errCodeStreamReset = "stream_reset"
 
-// SendFunc sends a protocol message to a specific peer.
-type SendFunc func(peerID string, msg protocol.Message) error
+// SendFunc sends a protocol message to a specific peer. Canceling ctx releases
+// a send that is waiting on backpressure.
+type SendFunc func(ctx context.Context, peerID string, msg protocol.Message) error
 
 // Handler processes protocol messages from mobile clients and dispatches
 // them to the appropriate tmux operations.
@@ -36,6 +38,7 @@ type Handler struct {
 	bridges      map[string]*tmux.PaneBridge   // per-peer attached bridge
 	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
 	streamDone   map[string]chan struct{}      // per-peer: present while streamOutput runs, closed when it exits
+	superseded   map[chan struct{}]bool        // stream done channel -> a detach is waiting for that stream to exit
 	paneForPeer  map[string]string             // peerID -> paneID (for restore on detach)
 	lastPingTime map[string]time.Time          // peerID -> last ping received
 	lastDims     map[string][2]int             // peerID -> [cols, rows] to skip redundant resizes
@@ -55,6 +58,7 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger, age
 		bridges:         make(map[string]*tmux.PaneBridge),
 		cancels:         make(map[string]context.CancelFunc),
 		streamDone:      make(map[string]chan struct{}),
+		superseded:      make(map[chan struct{}]bool),
 		paneForPeer:     make(map[string]string),
 		lastPingTime:    make(map[string]time.Time),
 		lastDims:        make(map[string][2]int),
@@ -298,24 +302,38 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	}
 	h.sendMsg(peerID, attachedEvent)
 
-	// compressPreStream compresses a pre-stream payload when compression is
-	// negotiated. Raw bytes must never follow attached{compression:deflate},
-	// so on failure it ends the attachment (the stream never started, so
-	// this closes its done channel) and tells the mobile to re-attach.
-	compressPreStream := func(data []byte) ([]byte, bool) {
-		if compressor == nil {
-			return data, true
+	// sendPreStream sends a pre-stream output payload, compressed when
+	// compression is negotiated. Raw bytes must never follow
+	// attached{compression:deflate}, and a compressed chunk that fails to
+	// send would desynchronize the mobile's inflater, so either failure ends
+	// the attachment as a stream failure would (failPreStream). The stream
+	// never started, so failPreStream closes its done channel and compressor.
+	failPreStream := func(reason string) {
+		if compressor != nil {
+			compressor.Close()
 		}
-		compressed, err := compressor.Compress(data)
-		if err == nil {
-			return compressed, true
+		// A canceled ctx means a concurrent detach owns the cleanup.
+		if ctx.Err() == nil {
+			h.resetStream(peerID, done, reason)
 		}
-		h.logger.Warn("pre-stream output compression failed, ending stream", "peer", peerID, "error", err)
-		compressor.Close()
-		h.detachPeerWait(peerID, false)
 		h.endStream(peerID, done)
-		h.sendError(peerID, errCodeStreamReset, "output compression failed; re-attach")
-		return nil, false
+	}
+	sendPreStream := func(data []byte) bool {
+		if compressor != nil {
+			compressed, err := compressor.Compress(data)
+			if err != nil {
+				h.logger.Warn("pre-stream output compression failed, ending stream", "peer", peerID, "error", err)
+				failPreStream("output compression failed; re-attach")
+				return false
+			}
+			data = compressed
+		}
+		if err := h.sendOutput(ctx, peerID, data); err != nil {
+			h.logger.Debug("pre-stream output send failed, ending stream", "peer", peerID, "error", err)
+			failPreStream("output stream stalled; re-attach")
+			return false
+		}
+		return true
 	}
 
 	// Synchronize terminal mode state with xterm.js on the mobile.
@@ -353,14 +371,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 					initialData = append(initialData, "\x1b[?25l"...)
 				}
 			}
-			initialData, ok := compressPreStream(initialData)
-			if !ok {
+			if !sendPreStream(initialData) {
 				return
 			}
-			h.sendMsg(peerID, &protocol.OutputEvent{
-				Type: "output",
-				Data: initialData,
-			})
 		}
 	} else if csErr == nil && (cursorState.AlternateOn || !cursorState.CursorVisible) {
 		// Fresh attach: send mode state so xterm.js enters the correct
@@ -370,14 +383,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		if !cursorState.CursorVisible {
 			stateData = append(stateData, "\x1b[?25l"...)
 		}
-		stateData, ok := compressPreStream(stateData)
-		if !ok {
+		if !sendPreStream(stateData) {
 			return
 		}
-		h.sendMsg(peerID, &protocol.OutputEvent{
-			Type: "output",
-			Data: stateData,
-		})
 	}
 
 	// Start streaming output in background with context for lifecycle
@@ -528,9 +536,10 @@ func (h *Handler) handleCreateSession(peerID string) {
 // It owns compressor (nil = no compression) and closes it on exit, then
 // closes done so a waiting detach knows the stream can no longer send.
 // Exits when the context is canceled, the bridge is closed, or sending fails.
-// On a send or compression failure it detaches the peer and sends a
-// stream_reset error so the mobile knows to re-attach.
-// When the bridge returns EOF (pane exited), sends pane_closed + sessions events.
+// On a send or compression failure, or when a newer attach displaces the
+// bridge, it detaches the peer and sends a stream_reset error so the mobile
+// knows to re-attach. When the bridge returns EOF (pane exited), sends
+// pane_closed + sessions events.
 func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge, compressor *protocol.OutputCompressor, done chan struct{}) {
 	defer h.endStream(peerID, done)
 	defer func() {
@@ -561,6 +570,12 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 			// Distinguish between context cancellation and pane exit (EOF)
 			if ctx.Err() != nil {
 				h.logger.Debug("streamOutput stopped by context", "peer", peerID)
+				return
+			}
+			if errors.Is(err, tmux.ErrBridgeDisplaced) {
+				// The pane is alive but its pipe now feeds another bridge.
+				h.logger.Info("output bridge displaced by another attach, ending stream", "peer", peerID)
+				h.resetStream(peerID, done, "pane attached elsewhere; re-attach")
 				return
 			}
 			// Pane exited — notify mobile and clean up
@@ -597,17 +612,13 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 					return
 				}
 				h.logger.Warn("output compression failed, ending stream", "peer", peerID, "error", err)
-				h.detachPeerWait(peerID, false)
-				h.sendError(peerID, errCodeStreamReset, "output compression failed; re-attach")
+				h.resetStream(peerID, done, "output compression failed; re-attach")
 				return
 			}
 			data = compressed
 		}
 
-		if err := h.sendMsg(peerID, &protocol.OutputEvent{
-			Type: "output",
-			Data: data,
-		}); err != nil {
+		if err := h.sendOutput(ctx, peerID, data); err != nil {
 			if ctx.Err() != nil {
 				// Detached by someone else (detach, re-attach, disconnect)
 				// while the send was waiting; that path owns cleanup.
@@ -615,24 +626,42 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 				return
 			}
 			h.logger.Debug("output stream send failed, detaching", "peer", peerID, "error", err)
-			h.detachPeerWait(peerID, false)
-			// The detach is agent-initiated, so the mobile would otherwise
-			// sit on a dead stream. Control messages bypass the backpressure
-			// gate, so this goes out even though the buffer is still full.
-			h.sendError(peerID, errCodeStreamReset, "output stream stalled; re-attach")
+			h.resetStream(peerID, done, "output stream stalled; re-attach")
 			return
 		}
 	}
 }
 
+// resetStream ends an output stream on the agent's own initiative: it detaches
+// the peer and, unless the stream is already being replaced, sends a
+// stream_reset error so the mobile does not sit on a dead stream. A detach
+// waiting on done (re-attach, detach, disconnect, pane exit) has already
+// superseded the stream and sends its own response, so the notice would only
+// make the mobile re-attach again. Called from the stream's goroutine (or the
+// pre-stream sends) with its done channel; never with h.mu held.
+func (h *Handler) resetStream(peerID string, done chan struct{}, reason string) {
+	h.detachPeerWait(peerID, false)
+	h.mu.Lock()
+	superseded := h.superseded[done]
+	h.mu.Unlock()
+	if superseded {
+		h.logger.Debug("stream already superseded, skipping stream_reset", "peer", peerID)
+		return
+	}
+	// Control messages bypass the backpressure gate, so this goes out even
+	// though the buffer may still be full of output.
+	h.sendError(peerID, errCodeStreamReset, reason)
+}
+
 // endStream marks a peer's output stream as exited: it drops the peer's
-// streamDone entry (only if it is still this stream's) and closes done,
-// releasing any detach waiting on it.
+// streamDone entry (only if it is still this stream's) and its superseded
+// mark, and closes done, releasing any detach waiting on it.
 func (h *Handler) endStream(peerID string, done chan struct{}) {
 	h.mu.Lock()
 	if h.streamDone[peerID] == done {
 		delete(h.streamDone, peerID)
 	}
+	delete(h.superseded, done)
 	h.mu.Unlock()
 	close(done)
 }
@@ -721,8 +750,7 @@ func (h *Handler) detachPeer(peerID string) {
 // detachPeerWait cancels the streamOutput goroutine, closes any existing
 // bridge for a peer, and auto-resizes the pane window if this was the last
 // mobile client attached. With wait, it then blocks until the peer's output
-// stream has exited (a stream blocked on backpressure can hold it for up to
-// the send-ready timeout). The stream goroutine itself must pass wait=false.
+// stream has exited. The stream goroutine itself must pass wait=false.
 // Never call it with h.mu held: the stream takes h.mu on its way out.
 func (h *Handler) detachPeerWait(peerID string, wait bool) {
 	h.mu.Lock()
@@ -730,8 +758,12 @@ func (h *Handler) detachPeerWait(peerID string, wait bool) {
 	cancel := h.cancels[peerID]
 	paneID := h.paneForPeer[peerID]
 	// The stream drops its own streamDone entry when it exits, so a stream
-	// that already detached itself is still waited for here.
+	// that already detached itself is still waited for here. Marking it
+	// superseded stops that stream from also sending stream_reset.
 	done := h.streamDone[peerID]
+	if wait && done != nil {
+		h.superseded[done] = true
+	}
 	if ok {
 		delete(h.bridges, peerID)
 		delete(h.cancels, peerID)
@@ -742,7 +774,8 @@ func (h *Handler) detachPeerWait(peerID string, wait bool) {
 	h.mu.Unlock()
 
 	// Cancel the streamOutput context first so the goroutine can exit
-	// before we close the bridge underneath it.
+	// before we close the bridge underneath it; this also releases an output
+	// send waiting on backpressure, so the wait below is short.
 	if cancel != nil {
 		cancel()
 	}
@@ -765,10 +798,21 @@ func (h *Handler) detachPeerWait(peerID string, wait bool) {
 	}
 }
 
+// sendMsg sends a control message. Control messages never wait on
+// backpressure, so no cancellation is needed.
 func (h *Handler) sendMsg(peerID string, msg protocol.Message) error {
-	if err := h.send(peerID, msg); err != nil {
+	if err := h.send(context.Background(), peerID, msg); err != nil {
 		h.logger.Debug("send failed", "type", msg.MessageType(), "peer", peerID, "error", err)
 		return err
+	}
+	return nil
+}
+
+// sendOutput sends an output event for the stream whose context is ctx, so a
+// detach canceling the stream also releases a send waiting on backpressure.
+func (h *Handler) sendOutput(ctx context.Context, peerID string, data []byte) error {
+	if err := h.send(ctx, peerID, &protocol.OutputEvent{Type: "output", Data: data}); err != nil {
+		return fmt.Errorf("send output: %w", err)
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -79,6 +80,12 @@ type Client struct {
 	// inputSeq numbers the tmux paste buffers used by SendKeys so concurrent
 	// calls never share a buffer name.
 	inputSeq atomic.Uint64
+
+	// pipes records, per pane, the bridge whose pipe-pane is the pane's
+	// current pipe (tmux allows one). Guarded by pipesMu; created lazily so a
+	// Client literal works.
+	pipesMu sync.Mutex
+	pipes   map[string]*PaneBridge
 }
 
 // NewClient creates a tmux client targeting the given socket.

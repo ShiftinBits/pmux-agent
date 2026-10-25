@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -404,8 +405,12 @@ func TestAttachPane_ClosePromptlyWhenIdle(t *testing.T) {
 		t.Fatalf("AttachPane: %v", err)
 	}
 
-	// Let the relay settle into its idle poll, then close.
+	// Let the relay settle into its idle poll, then close. Close returns only
+	// after the relay exits, so its duration bounds the relay's shutdown: one
+	// poll interval plus the pipe-pane subprocess.
 	time.Sleep(100 * time.Millisecond)
+	const closeBound = 200 * time.Millisecond
+	start := time.Now()
 	closeDone := make(chan struct{})
 	go func() {
 		_ = bridge.Close()
@@ -416,10 +421,8 @@ func TestAttachPane_ClosePromptlyWhenIdle(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not return")
 	}
-	select {
-	case <-bridge.relayDone:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("relay goroutine did not exit promptly after Close")
+	if elapsed := time.Since(start); elapsed > closeBound {
+		t.Errorf("Close took %v, want under %v", elapsed, closeBound)
 	}
 }
 
@@ -452,7 +455,70 @@ func TestAttachPane_EchoLatency(t *testing.T) {
 	sort.Slice(lat, func(a, b int) bool { return lat[a] < lat[b] })
 	median := lat[len(lat)/2]
 	t.Logf("write-return to bridge Read latency: min=%v median=%v max=%v", lat[0], median, lat[len(lat)-1])
-	if median >= relayPollInterval {
-		t.Errorf("median echo latency %v not below the old %v poll interval", median, relayPollInterval)
+	// A relay that sleeps after an empty read puts the median near half the
+	// interval; waking on readability keeps it to a few milliseconds.
+	if bound := relayPollInterval / 4; median >= bound {
+		t.Errorf("median echo latency %v, want under %v (relay poll interval %v)", median, bound, relayPollInterval)
 	}
+}
+
+// TestAttachPane_SecondAttachDisplacesFirst checks that a second bridge on the
+// same pane takes over the pipe: the first bridge's Read ends with
+// ErrBridgeDisplaced instead of blocking forever, and closing the first bridge
+// leaves the second one's pipe streaming.
+func TestAttachPane_SecondAttachDisplacesFirst(t *testing.T) {
+	skipIfNoTmux(t)
+	const socket = "pmux-pipe-displace-test"
+	kill := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	kill()
+	t.Cleanup(kill)
+	c := NewClient(socket)
+
+	if _, err := c.CreateSession("displace", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	first, err := c.AttachPane(paneID, 80, 24)
+	if err != nil {
+		t.Fatalf("first AttachPane: %v", err)
+	}
+	defer first.Close()
+	firstErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := first.Read(buf); err != nil {
+				firstErr <- err
+				return
+			}
+		}
+	}()
+
+	second, err := c.AttachPane(paneID, 80, 24)
+	if err != nil {
+		t.Fatalf("second AttachPane: %v", err)
+	}
+	defer second.Close()
+
+	select {
+	case err := <-firstErr:
+		if !errors.Is(err, ErrBridgeDisplaced) {
+			t.Errorf("first bridge Read error = %v, want ErrBridgeDisplaced", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first bridge Read still blocked after a second attach")
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if _, err := second.Write([]byte("echo DISPLACE_SURVIVES\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	readUntil(t, second, "DISPLACE_SURVIVES", 5*time.Second)
 }

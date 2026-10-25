@@ -5,6 +5,7 @@ package integration
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -30,7 +31,7 @@ type orderedRecorder struct {
 	msgs []protocol.Message
 }
 
-func (r *orderedRecorder) Send(_ string, msg protocol.Message) error {
+func (r *orderedRecorder) Send(_ context.Context, _ string, msg protocol.Message) error {
 	r.mu.Lock()
 	r.msgs = append(r.msgs, msg)
 	r.mu.Unlock()

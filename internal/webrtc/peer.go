@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -52,6 +53,12 @@ const bufferedAmountLowThreshold = 4096
 // generous for terminal data (typically kilobytes) while preventing unbounded
 // growth.
 const maxBufferedAmount = 512 * 1024
+
+// maxControlBufferedAmount is the hard ceiling for control messages, which do
+// not wait on the output gate: above it they are refused instead of queued, so
+// buffer growth stays bounded during a stall. It sits above maxBufferedAmount
+// so a stall notice still fits behind output parked at the gate.
+const maxControlBufferedAmount = 2 * maxBufferedAmount
 
 // sendReadyTimeout is the maximum time to wait for the DataChannel buffer
 // to drain before returning an error. Prevents permanent deadlock if the
@@ -550,6 +557,13 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 	}()
 }
 
+// isClosed reports whether the manager is closed (see the closed field).
+func (pm *PeerManager) isClosed() bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.closed
+}
+
 // PeerCount returns the number of active peer connections.
 func (pm *PeerManager) PeerCount() int {
 	pm.mu.Lock()
@@ -572,7 +586,8 @@ func (pm *PeerManager) PeerStates() map[string]string {
 }
 
 // SendTo sends a protocol message to a specific peer via their DataChannel.
-func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
+// Canceling ctx releases an output send waiting on backpressure.
+func (pm *PeerManager) SendTo(ctx context.Context, deviceID string, msg protocol.Message) error {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
 	pm.mu.Unlock()
@@ -581,13 +596,24 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 		return fmt.Errorf("no peer connection for device %s", deviceID)
 	}
 
-	return peer.SendMessage(msg)
+	return peer.SendMessageContext(ctx, msg)
 }
 
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
 func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	requestStart := time.Now()
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID, "attempt", attemptID)
+
+	// While closed (shutdown, or a pairing reload closing every peer) a new
+	// peer would miss its cleanup and watchdogs, which check closed, and could
+	// hold the single peer slot after the reopen. Drop the request without a
+	// connection_rejected: the mobile treats unknown reasons as not_paired.
+	// It retries after the server's peer_unavailable. The insert below
+	// re-checks under the lock.
+	if pm.isClosed() {
+		pm.logger.Info("ignoring connect_request while peers are closing", "mobile", mobileDeviceID)
+		return
+	}
 
 	// Validate device is the paired device. Fail closed: an empty allowedID
 	// (e.g. an unpaired agent) rejects all connections rather than accepting any.
@@ -772,6 +798,12 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	}
 
 	pm.mu.Lock()
+	if pm.closed {
+		pm.mu.Unlock()
+		pc.Close()
+		pm.logger.Info("dropping new peer: peers closed during connect", "mobile", mobileDeviceID)
+		return
+	}
 	// Re-check limit under lock to prevent TOCTOU race if HandleSignalingMessage
 	// is called concurrently (the early check above is an unlocked fast path).
 	if _, replacing := pm.peers[mobileDeviceID]; !replacing && len(pm.peers) >= pm.MaxPeers {
@@ -1752,10 +1784,10 @@ func (p *Peer) logSelectedCandidatePair() {
 
 // waitForSendReady blocks if the DataChannel buffer exceeds maxBufferedAmount,
 // waiting for the OnBufferedAmountLow callback to signal that sending can resume.
-// Returns an error if the timeout expires or the peer is closed (done channel
-// is closed by Close()). The dc parameter must be captured under p.mu before
-// calling this method (which runs without the lock held).
-func (p *Peer) waitForSendReady(dc *webrtc.DataChannel) error {
+// Returns an error if the timeout expires, ctx is canceled, or the peer is
+// closed (done channel is closed by Close()). The dc parameter must be captured
+// under p.mu before calling this method (which runs without the lock held).
+func (p *Peer) waitForSendReady(ctx context.Context, dc *webrtc.DataChannel) error {
 	// Drain any stale signal from a prior drain cycle to prevent false
 	// fast-path returns when the buffer has refilled since the last signal.
 	select {
@@ -1773,6 +1805,8 @@ func (p *Peer) waitForSendReady(dc *webrtc.DataChannel) error {
 		return nil
 	case <-p.done:
 		return fmt.Errorf("peer connection closed")
+	case <-ctx.Done():
+		return fmt.Errorf("send canceled: %w", ctx.Err())
 	case <-time.After(sendReadyTimeout):
 		return fmt.Errorf("send timeout: DataChannel buffer full (%d bytes)", dc.BufferedAmount())
 	}
@@ -1799,23 +1833,29 @@ func (p *Peer) SendRaw(data []byte) error {
 	p.mu.Unlock()
 
 	// Wait without holding p.mu so Close() can proceed concurrently.
-	if err := p.waitForSendReady(dc); err != nil {
+	if err := p.waitForSendReady(context.Background(), dc); err != nil {
 		return fmt.Errorf("backpressure: %w", err)
 	}
 	return dc.Send(data)
 }
 
-// SendMessage encodes and sends a protocol message over the DataChannel.
+// SendMessage is SendMessageContext without cancellation.
+func (p *Peer) SendMessage(msg protocol.Message) error {
+	return p.SendMessageContext(context.Background(), msg)
+}
+
+// SendMessageContext encodes and sends a protocol message over the DataChannel.
 // Output events block while the send buffer is full, waiting for backpressure
-// to clear. Control messages (error, detached, sessions, pong, ...) are small
-// and are sent immediately; ordered delivery still queues them behind any
-// buffered output, but they never wait on the gate, so a stall notice can go
-// out on the same buffer that stalled the output stream.
+// to clear; canceling ctx ends the wait. Control messages (error, detached,
+// sessions, pong, ...) are small and never wait on the gate, so a stall notice
+// can go out on the same buffer that stalled the output stream; ordered
+// delivery still queues them behind any buffered output. They are refused
+// once the buffer passes maxControlBufferedAmount, keeping growth bounded.
 //
 // Until auth_confirm has been sent, only the handshake messages may go out;
 // anything else is refused rather than queued, so auth_confirm is always the
 // first message the peer receives after the handshake.
-func (p *Peer) SendMessage(msg protocol.Message) error {
+func (p *Peer) SendMessageContext(ctx context.Context, msg protocol.Message) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -1839,9 +1879,11 @@ func (p *Peer) SendMessage(msg protocol.Message) error {
 
 	// Wait without holding p.mu so Close() can proceed concurrently.
 	if _, isOutput := msg.(*protocol.OutputEvent); isOutput {
-		if err := p.waitForSendReady(dc); err != nil {
+		if err := p.waitForSendReady(ctx, dc); err != nil {
 			return fmt.Errorf("backpressure: %w", err)
 		}
+	} else if buffered := dc.BufferedAmount(); buffered > maxControlBufferedAmount {
+		return fmt.Errorf("backpressure: refusing %s: DataChannel buffer full (%d bytes)", msg.MessageType(), buffered)
 	}
 	return dc.Send(data)
 }

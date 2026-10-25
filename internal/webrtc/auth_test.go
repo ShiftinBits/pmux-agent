@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -817,7 +818,7 @@ func TestPeerManager_SendToRefusedUntilAuthConfirmed(t *testing.T) {
 	}
 
 	pong := &protocol.PongEvent{Type: "pong"}
-	err := pm.SendTo(deviceID, pong)
+	err := pm.SendTo(context.Background(), deviceID, pong)
 	if err == nil || !strings.Contains(err.Error(), "peer not authenticated") {
 		t.Fatalf("SendTo before auth: err = %v, want a peer not authenticated error", err)
 	}
@@ -835,7 +836,7 @@ func TestPeerManager_SendToRefusedUntilAuthConfirmed(t *testing.T) {
 
 	// authConfirmed is set once the auth_confirm send returns, so poll.
 	waitUntil(t, 2*time.Second, "SendTo to succeed after auth_confirm", func() bool {
-		return pm.SendTo(deviceID, pong) == nil
+		return pm.SendTo(context.Background(), deviceID, pong) == nil
 	})
 	waitUntil(t, 5*time.Second, "pong delivery", func() bool { return len(m.types()) >= 3 })
 
@@ -870,7 +871,7 @@ func TestPeerManager_AuthConfirmFirstAfterHandshake(t *testing.T) {
 				return
 			default:
 			}
-			_ = pm.SendTo(deviceID, pong)
+			_ = pm.SendTo(context.Background(), deviceID, pong)
 			runtime.Gosched()
 		}
 	}()

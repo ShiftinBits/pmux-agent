@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,11 @@ import (
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+// ErrBridgeDisplaced is returned by PaneBridge.Read once a newer AttachPane on
+// the same pane has replaced this bridge's pipe: tmux allows one pipe per pane,
+// so this bridge will receive no further output.
+var ErrBridgeDisplaced = errors.New("pane bridge displaced by a newer attach")
 
 // PaneBridge provides a bidirectional byte stream to a tmux pane.
 // Output is streamed via tmux pipe-pane through a FIFO, and input
@@ -43,6 +49,7 @@ type PaneBridge struct {
 	initialContent string
 	mu             sync.Mutex
 	closed         bool
+	displaced      bool // set when a newer bridge replaced this one's pipe
 }
 
 // relayPollInterval is the longest the relay goroutine waits in poll(2)
@@ -89,30 +96,6 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 	// This provides the initial screen state (what was already displayed).
 	initialContent, _ := c.CapturePane(paneID)
 
-	// Start pipe-pane to stream pane output to our FIFO.
-	// Output-only is pipe-pane's default (no -I/-O flags). -o is deliberately
-	// omitted: it means "only open a new pipe if none is open" and toggles an
-	// existing pipe off, so attaching would silently fail to stream. Without
-	// it, tmux replaces any existing pipe on the pane with ours. A user's own
-	// pipe-pane on this pane is therefore replaced; detaching stops our pipe.
-	// The FIFO path is passed as a positional argument ($0) to an inner
-	// sh -c, so it is never interpreted as shell syntax — only as data.
-	// This prevents command injection even if the path contained $(...)
-	// or backtick sequences.
-	if _, err := c.run("pipe-pane", "-t", paneID,
-		fmt.Sprintf("exec sh -c 'cat > \"$0\"' %s", shellQuote(fifoPath))); err != nil {
-		pipeR.Close()
-		pipeW.Close()
-		syscall.Close(fd)
-		os.RemoveAll(dir) //nolint:errcheck
-		return nil, fmt.Errorf("start pipe-pane: %w", err)
-	}
-
-	// Resize pane if dimensions are specified.
-	if cols > 0 && rows > 0 {
-		_ = c.ResizePane(paneID, cols, rows)
-	}
-
 	pb := &PaneBridge{
 		client:         c,
 		paneID:         paneID,
@@ -123,6 +106,45 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 		done:           make(chan struct{}),
 		relayDone:      make(chan struct{}),
 		initialContent: initialContent,
+	}
+
+	// Start pipe-pane to stream pane output to our FIFO.
+	// Output-only is pipe-pane's default (no -I/-O flags). -o is deliberately
+	// omitted: it means "only open a new pipe if none is open" and toggles an
+	// existing pipe off, so attaching would silently fail to stream. Without
+	// it, tmux replaces any existing pipe on the pane with ours. A user's own
+	// pipe-pane on this pane is therefore replaced; detaching stops our pipe.
+	// The FIFO path is passed as a positional argument ($0) to an inner
+	// sh -c, so it is never interpreted as shell syntax — only as data.
+	// This prevents command injection even if the path contained $(...)
+	// or backtick sequences.
+	//
+	// The pipe and the ownership record change together under pipesMu, so
+	// the record always names the bridge whose pipe tmux has open. A bridge
+	// this replaces is told so, since its FIFO will get no more output.
+	c.pipesMu.Lock()
+	if _, err := c.run("pipe-pane", "-t", paneID,
+		fmt.Sprintf("exec sh -c 'cat > \"$0\"' %s", shellQuote(fifoPath))); err != nil {
+		c.pipesMu.Unlock()
+		pipeR.Close()
+		pipeW.Close()
+		syscall.Close(fd)
+		os.RemoveAll(dir) //nolint:errcheck
+		return nil, fmt.Errorf("start pipe-pane: %w", err)
+	}
+	if c.pipes == nil {
+		c.pipes = make(map[string]*PaneBridge)
+	}
+	prev := c.pipes[paneID]
+	c.pipes[paneID] = pb
+	c.pipesMu.Unlock()
+	if prev != nil {
+		prev.displace()
+	}
+
+	// Resize pane if dimensions are specified.
+	if cols > 0 && rows > 0 {
+		_ = c.ResizePane(paneID, cols, rows)
 	}
 
 	// Start the relay goroutine that copies from FIFO to pipe.
@@ -210,7 +232,8 @@ func (pb *PaneBridge) InitialContent() string {
 }
 
 // Read reads output bytes from the pane. Blocks until data is available.
-// Returns io.EOF when the bridge is closed. Implements io.Reader.
+// Returns io.EOF when the bridge is closed, and ErrBridgeDisplaced once a
+// newer bridge on the same pane has taken over the pipe. Implements io.Reader.
 func (pb *PaneBridge) Read(buf []byte) (int, error) {
 	pb.mu.Lock()
 	if pb.closed {
@@ -221,9 +244,30 @@ func (pb *PaneBridge) Read(buf []byte) (int, error) {
 
 	n, err := pb.pipeR.Read(buf)
 	if err != nil {
+		pb.mu.Lock()
+		displaced := pb.displaced && !pb.closed
+		pb.mu.Unlock()
+		if displaced {
+			return n, ErrBridgeDisplaced
+		}
 		return n, err
 	}
 	return n, nil
+}
+
+// displace marks the bridge as replaced by a newer bridge on the same pane
+// and closes the relay pipe's write end, so a blocked Read returns
+// ErrBridgeDisplaced instead of waiting on a FIFO tmux no longer writes to.
+// The bridge still needs Close to release its FIFO and temp directory.
+func (pb *PaneBridge) displace() {
+	pb.mu.Lock()
+	if pb.closed || pb.displaced {
+		pb.mu.Unlock()
+		return
+	}
+	pb.displaced = true
+	pb.mu.Unlock()
+	pb.pipeW.Close()
 }
 
 // Write sends input to the pane via SendKeys (load-buffer + paste-buffer).
@@ -255,9 +299,10 @@ func (pb *PaneBridge) Resize(cols, rows int) error {
 	return pb.client.ResizePane(pb.paneID, cols, rows)
 }
 
-// Close detaches from the pane, disabling pipe-pane and cleaning up
-// the FIFO, relay pipe, and temp directory. Any blocked Read call will
-// return io.EOF because the pipe write end is closed.
+// Close detaches from the pane, disabling pipe-pane if this bridge's pipe
+// is still the pane's current one, and cleans up the FIFO, relay pipe, and
+// temp directory. Any blocked Read call will return io.EOF because the pipe
+// write end is closed.
 func (pb *PaneBridge) Close() error {
 	pb.mu.Lock()
 	if pb.closed {
@@ -267,8 +312,7 @@ func (pb *PaneBridge) Close() error {
 	pb.closed = true
 	pb.mu.Unlock()
 
-	// Disable pipe-pane (empty command removes the pipe)
-	pb.client.run("pipe-pane", "-t", pb.paneID) //nolint:errcheck
+	pb.client.releasePipe(pb)
 
 	// Signal the relay goroutine to stop.
 	close(pb.done)
@@ -292,6 +336,19 @@ func (pb *PaneBridge) Close() error {
 	os.RemoveAll(pb.fifoDir) //nolint:errcheck
 
 	return nil
+}
+
+// releasePipe disables pipe-pane on pb's pane (an empty command removes the
+// pipe), but only while pb owns it: a pipe a newer bridge installed is left
+// running.
+func (c *Client) releasePipe(pb *PaneBridge) {
+	c.pipesMu.Lock()
+	defer c.pipesMu.Unlock()
+	if c.pipes[pb.paneID] != pb {
+		return
+	}
+	delete(c.pipes, pb.paneID)
+	c.run("pipe-pane", "-t", pb.paneID) //nolint:errcheck
 }
 
 // WindowForPane returns the "session_id:window_id" target for a pane.

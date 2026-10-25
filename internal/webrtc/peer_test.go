@@ -1,7 +1,9 @@
 package webrtc
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -773,7 +775,7 @@ func TestPeerManager_SendTo(t *testing.T) {
 
 	pm := NewPeerManager(logger, sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
 
-	err := pm.SendTo("nonexistent", &protocol.PongEvent{Type: "pong"})
+	err := pm.SendTo(context.Background(), "nonexistent", &protocol.PongEvent{Type: "pong"})
 	if err == nil {
 		t.Error("expected error for nonexistent peer")
 	}
@@ -1795,7 +1797,7 @@ func (h *fakeBridgeHandler) handle(peerID string, msg protocol.Message) {
 				return
 			case <-time.After(10 * time.Millisecond):
 			}
-			_ = h.pm.SendTo(peerID, out)
+			_ = h.pm.SendTo(context.Background(), peerID, out)
 		}
 	}()
 }
@@ -2409,7 +2411,7 @@ func TestWaitForSendReady_DoneChannel(t *testing.T) {
 	// so it returns nil immediately on the fast path. To exercise the done-channel
 	// path, call waitForSendReady on a peer whose done channel will be closed.
 	// The fast path (buffer low) returns nil — that is the expected behavior here.
-	err := testPeer.waitForSendReady(dc)
+	err := testPeer.waitForSendReady(context.Background(), dc)
 	if err != nil {
 		// Only fail if the error is unexpected (not the done-channel path)
 		if !strings.Contains(err.Error(), "peer connection closed") {
@@ -2420,11 +2422,12 @@ func TestWaitForSendReady_DoneChannel(t *testing.T) {
 	pm.CloseAll()
 }
 
-// stalledDataChannel returns an open sender-side DataChannel whose
-// BufferedAmount stays above maxBufferedAmount. The receiver uses detached
-// DataChannels and never reads, with a small SCTP receive buffer, so its
-// receive window closes and the sender's queued bytes are never acknowledged.
-func stalledDataChannel(t *testing.T) *webrtc.DataChannel {
+// stalledDataChannel returns an open sender-side DataChannel filled past
+// fillTo bytes whose BufferedAmount stays above maxBufferedAmount. The receiver
+// uses detached DataChannels and never reads, with a small SCTP receive buffer,
+// so its receive window closes and the sender's queued bytes are never
+// acknowledged.
+func stalledDataChannel(t *testing.T, fillTo int) *webrtc.DataChannel {
 	t.Helper()
 
 	sender, err := fastAPI(t).NewPeerConnection(webrtc.Configuration{})
@@ -2485,7 +2488,7 @@ func stalledDataChannel(t *testing.T) *webrtc.DataChannel {
 	}
 
 	chunk := make([]byte, 32*1024)
-	for dc.BufferedAmount() <= 2*maxBufferedAmount {
+	for dc.BufferedAmount() <= uint64(fillTo) {
 		if err := dc.Send(chunk); err != nil {
 			t.Fatalf("fill send buffer: %v", err)
 		}
@@ -2499,7 +2502,12 @@ func stalledDataChannel(t *testing.T) *webrtc.DataChannel {
 }
 
 func TestSendMessage_BackpressureGatesOnlyOutput(t *testing.T) {
-	dc := stalledDataChannel(t)
+	// Fill past the output gate but stay under the control ceiling (the
+	// receiver's 64KB window can drain a little before it closes).
+	dc := stalledDataChannel(t, maxBufferedAmount+128*1024)
+	if got := dc.BufferedAmount(); got > maxControlBufferedAmount {
+		t.Fatalf("BufferedAmount = %d, want <= %d so control messages pass", got, maxControlBufferedAmount)
+	}
 	p := &Peer{
 		DeviceID:      "test-gate",
 		logger:        testLogger().With("peer", "test-gate"),
@@ -2546,6 +2554,58 @@ func TestSendMessage_BackpressureGatesOnlyOutput(t *testing.T) {
 		}
 	case <-time.After(sendReadyTimeout):
 		t.Fatal("output SendMessage did not return after done was closed")
+	}
+}
+
+// TestSendMessage_BackpressureCeilingAndCancel checks the two bounds on a
+// stalled buffer: control messages are refused once it passes
+// maxControlBufferedAmount instead of queueing without limit, and canceling
+// the context releases an output send waiting at the gate.
+func TestSendMessage_BackpressureCeilingAndCancel(t *testing.T) {
+	dc := stalledDataChannel(t, maxControlBufferedAmount+128*1024)
+	if got := dc.BufferedAmount(); got <= maxControlBufferedAmount {
+		t.Fatalf("BufferedAmount = %d, want > %d", got, maxControlBufferedAmount)
+	}
+	p := &Peer{
+		DeviceID:      "test-ceiling",
+		logger:        testLogger().With("peer", "test-ceiling"),
+		dc:            dc,
+		authConfirmed: true,
+		sendReady:     make(chan struct{}, 1),
+		done:          make(chan struct{}),
+	}
+
+	before := dc.BufferedAmount()
+	start := time.Now()
+	err := p.SendMessage(&protocol.PongEvent{Type: "pong"})
+	if err == nil || !strings.Contains(err.Error(), "backpressure") {
+		t.Errorf("control SendMessage over the ceiling = %v, want a backpressure error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("control SendMessage took %v, want an immediate refusal", elapsed)
+	}
+	if after := dc.BufferedAmount(); after > before {
+		t.Errorf("BufferedAmount grew from %d to %d, want the refused message not queued", before, after)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- p.SendMessageContext(ctx, &protocol.OutputEvent{Type: "output", Data: []byte("x")})
+	}()
+	select {
+	case err := <-result:
+		t.Fatalf("output SendMessageContext returned %v while buffer full, want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("output SendMessageContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("output SendMessageContext did not return promptly after cancel")
 	}
 }
 
@@ -2847,7 +2907,7 @@ func TestPeer_WaitForSendReady_Done(t *testing.T) {
 		done:      done,
 	}
 
-	err = p.waitForSendReady(dc)
+	err = p.waitForSendReady(context.Background(), dc)
 	// If buffer is below threshold, waitForSendReady returns nil immediately.
 	// That's fine — the function works correctly either way.
 	// We're testing that it doesn't hang when done is closed.
@@ -2910,7 +2970,7 @@ func TestPeerManager_SendTo_NoPeer(t *testing.T) {
 	sender := &mockSender{}
 	pm := NewPeerManager(testLogger(), sender, "", func() string { return "" }, nil, "")
 
-	err := pm.SendTo("nonexistent", &protocol.PongEvent{Type: "pong"})
+	err := pm.SendTo(context.Background(), "nonexistent", &protocol.PongEvent{Type: "pong"})
 	if err == nil {
 		t.Fatal("expected error from SendTo with no peer")
 	}
@@ -2996,7 +3056,8 @@ func TestPeerManager_CloseAllFiresDisconnectPerPeer(t *testing.T) {
 
 // TestPeerManager_CloseAllAndReopen checks that a reload's close reopens the
 // manager, so peers that connect afterwards still get cleanup and an ICE
-// restart watchdog, while a shutdown's CloseAll leaves it closed.
+// restart watchdog, while a shutdown's CloseAll leaves it closed and drops
+// connect requests instead of installing a peer that would miss them.
 func TestPeerManager_CloseAllAndReopen(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -3039,18 +3100,29 @@ func TestPeerManager_CloseAllAndReopen(t *testing.T) {
 				t.Fatalf("closed = %v after close, want %v", closed, !tt.reopen)
 			}
 
-			// A peer connecting after the close: an ICE restart arms its
-			// watchdog only while the manager is open.
-			connectTestMobile(t, pm, sender, deviceID, true)
-			if getPeer(pm, deviceID) == nil {
-				t.Fatal("peer not installed after close")
-			}
-			pm.attemptICERestart(deviceID)
-			pm.mu.Lock()
-			_, armed := pm.iceRestartTimers[deviceID]
-			pm.mu.Unlock()
-			if armed != tt.reopen {
-				t.Errorf("ICE restart watchdog armed = %v, want %v", armed, tt.reopen)
+			if tt.reopen {
+				// A peer connecting after the reopen gets an ICE restart watchdog.
+				connectTestMobile(t, pm, sender, deviceID, true)
+				if getPeer(pm, deviceID) == nil {
+					t.Fatal("peer not installed after reopen")
+				}
+				pm.attemptICERestart(deviceID)
+				pm.mu.Lock()
+				_, armed := pm.iceRestartTimers[deviceID]
+				pm.mu.Unlock()
+				if !armed {
+					t.Error("ICE restart watchdog not armed after reopen")
+				}
+			} else {
+				// A closed manager drops the connect request outright.
+				mark := sender.mark()
+				pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+				if offers := sender.messagesOfTypeSince("sdp_offer", mark); len(offers) != 0 {
+					t.Errorf("sent %d SDP offers while closed, want 0", len(offers))
+				}
+				if getPeer(pm, deviceID) != nil {
+					t.Error("peer installed while closed")
+				}
 			}
 
 			// scheduleCleanup spawns the teardown only while the manager is open.

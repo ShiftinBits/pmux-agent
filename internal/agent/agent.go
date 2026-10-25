@@ -169,8 +169,8 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 
 	updateStateFile := update.StateFilePath(paths.ConfigDir)
 
-	handler := NewHandler(tmuxClient, func(peerID string, msg protocol.Message) error {
-		return peerManager.SendTo(peerID, msg)
+	handler := NewHandler(tmuxClient, func(ctx context.Context, peerID string, msg protocol.Message) error {
+		return peerManager.SendTo(ctx, peerID, msg)
 	}, logger, version, updateStateFile)
 
 	hostName := cfg.Name
