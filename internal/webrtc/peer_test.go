@@ -3070,6 +3070,20 @@ func TestPeerManager_CloseAllAndReopen(t *testing.T) {
 	}
 }
 
+// TestPeerManager_ReloadAfterShutdownStaysClosed checks that a reload close
+// finishing after shutdown's CloseAll does not reopen the manager.
+func TestPeerManager_ReloadAfterShutdownStaysClosed(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.CloseAll()
+	pm.CloseAllAndReopen()
+	pm.mu.Lock()
+	closed := pm.closed
+	pm.mu.Unlock()
+	if !closed {
+		t.Error("CloseAllAndReopen reopened a manager that CloseAll shut down")
+	}
+}
+
 // TestPeerManager_CloseAllConcurrentWithCleanup races reload closes against
 // the signaling paths that spawn tracked cleanup (a replacing connect_request
 // and peer_unavailable). Under -race this catches a cleanupWg.Add racing
