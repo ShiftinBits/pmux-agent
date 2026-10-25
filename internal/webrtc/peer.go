@@ -66,6 +66,10 @@ const pcDisconnectedTimeout = 10 * time.Second
 // TURN credentials typically have a 24h TTL, so 10 minutes is conservative.
 const turnCacheTTL = 10 * time.Minute
 
+// turnFetchTimeout bounds the TURN credential request. The fetch runs on the
+// signaling readLoop before the offer is sent, so it bounds the pre-offer delay.
+const turnFetchTimeout = 3 * time.Second
+
 // TurnCredentials holds STUN/TURN server credentials from the signaling server.
 type TurnCredentials struct {
 	URLs       []string `json:"urls"`
@@ -184,6 +188,10 @@ const authChallengeTimeout = 10 * time.Second
 // session's handler teardown before continuing the new peer's negotiation.
 const replacementTeardownTimeout = 3 * time.Second
 
+// offerAnswerTimeout bounds how long a peer waits for the mobile's SDP answer
+// to the initial offer before it is closed. A var so tests can shorten it.
+var offerAnswerTimeout = 30 * time.Second
+
 // authNonceSize is the length in bytes of the per-connection challenge nonce,
 // and of the mobile's nonce in auth_response.
 const authNonceSize = 32
@@ -220,6 +228,10 @@ func (pm *PeerManager) SetAllowedDeviceID(id string) {
 	pm.mu.Unlock()
 }
 
+// sharedSecretTimeout bounds the keyring read on the signaling readLoop.
+// A var so tests can shorten it.
+var sharedSecretTimeout = 2 * time.Second
+
 // getSharedSecret returns the pairing shared secret for a device, or an error
 // if no source is configured or the secret is missing/empty. Used to fail
 // closed: a connection that cannot be authenticated is rejected.
@@ -227,9 +239,28 @@ func (pm *PeerManager) getSharedSecret(deviceID string) ([]byte, error) {
 	if pm.SharedSecretFn == nil {
 		return nil, fmt.Errorf("no shared secret source configured")
 	}
-	secret, err := pm.SharedSecretFn(deviceID)
-	if err != nil {
-		return nil, err
+
+	type result struct {
+		secret []byte
+		err    error
+	}
+	// Buffered so a late result is dropped instead of blocking the goroutine.
+	// A timed-out read leaves one goroutine blocked on the keyring until it returns.
+	ch := make(chan result, 1)
+	fn := pm.SharedSecretFn
+	go func() {
+		s, e := fn(deviceID)
+		ch <- result{s, e}
+	}()
+	var secret []byte
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		secret = r.secret
+	case <-time.After(sharedSecretTimeout):
+		return nil, fmt.Errorf("shared secret read timed out")
 	}
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("empty shared secret for device %s", deviceID)
@@ -258,7 +289,7 @@ func NewPeerManager(logger *slog.Logger, signaling MessageSender, serverURL stri
 		jwt:              jwtFn,
 		handler:          handler,
 		hmacSecret:       hmacSecret,
-		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		httpClient:       &http.Client{Timeout: turnFetchTimeout},
 		MaxPeers:         1,
 		peers:            make(map[string]*Peer),
 		disconnectTimers: make(map[string]*time.Timer),
@@ -646,6 +677,14 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 
 	if pm.API == nil {
 		iceServers, err := pm.fetchTurnCredentials()
+		if err != nil && pm.ForceRelay {
+			// No connection_rejected is sent: no existing reason fits, and mobile
+			// treats unknown reasons as not_paired (full reset). The mobile sees
+			// the server's peer_unavailable after the signaling session expires.
+			pm.logger.Error("force relay enabled but no TURN credentials; skipping connection attempt",
+				"mobile", mobileDeviceID, "error", err)
+			return
+		}
 		if err != nil {
 			pm.logger.Warn("failed to fetch TURN credentials, using STUN only", "error", err)
 			iceServers = []webrtc.ICEServer{
@@ -749,9 +788,29 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		SDP:            offer.SDP,
 	}); err != nil {
 		pm.logger.Error("failed to send SDP offer", "error", err)
+		pm.ClosePeer(mobileDeviceID)
+		return
 	}
 
 	pm.logger.Info("SDP offer sent", "mobile", mobileDeviceID, "elapsed", time.Since(requestStart).Round(time.Millisecond))
+
+	// Answer watchdog: close the peer if the mobile never answers, so a lost
+	// answer can't hold the single peer slot. Not tracked in a timer map: the
+	// identity and answered checks make a late fire a no-op. "Answered" is
+	// CurrentRemoteDescription, not remoteDescSet: an ICE restart clears
+	// remoteDescSet before its own watchdog is registered, but keeps the
+	// current remote description from the first answer.
+	time.AfterFunc(offerAnswerTimeout, func() {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+		if pm.closed || pm.peers[mobileDeviceID] != peer {
+			return
+		}
+		if peer.conn.CurrentRemoteDescription() == nil {
+			pm.logger.Warn("no SDP answer for initial offer, closing peer", "mobile", mobileDeviceID)
+			pm.scheduleCleanup(peer)
+		}
+	})
 }
 
 // recordReplacedAttemptLocked remembers the attempt ID of a peer replaced by a
@@ -798,6 +857,10 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID, attemptID, sdp string) {
 		pm.logger.Info("ignoring sdp_answer for another attempt", "mobile", mobileDeviceID, "attempt", attemptID)
 		return
 	}
+	if peer.conn.SignalingState() == webrtc.SignalingStateStable {
+		pm.logger.Debug("ignoring sdp_answer: no offer pending", "mobile", mobileDeviceID)
+		return
+	}
 
 	answer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
@@ -806,7 +869,11 @@ func (pm *PeerManager) handleSDPAnswer(mobileDeviceID, attemptID, sdp string) {
 
 	if err := peer.conn.SetRemoteDescription(answer); err != nil {
 		pm.logger.Error("failed to set remote description", "error", err, "mobile", mobileDeviceID)
-		pm.ClosePeer(mobileDeviceID)
+		pm.mu.Lock()
+		if pm.peers[mobileDeviceID] == peer {
+			pm.scheduleCleanup(peer)
+		}
+		pm.mu.Unlock()
 		return
 	}
 
@@ -889,6 +956,19 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 	}
 	pm.mu.Unlock()
 
+	servers, err := pm.requestTurnCredentials()
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	pm.turnCache = servers
+	pm.turnCacheTime = time.Now()
+	return servers, nil
+}
+
+// requestTurnCredentials performs the HTTP request for TURN credentials.
+func (pm *PeerManager) requestTurnCredentials() ([]webrtc.ICEServer, error) {
 	url := pm.serverURL + "/turn/credentials"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -924,12 +1004,6 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		Username:   creds.Username,
 		Credential: creds.Credential,
 	}}
-
-	// Cache the result.
-	pm.mu.Lock()
-	pm.turnCache = servers
-	pm.turnCacheTime = time.Now()
-	pm.mu.Unlock()
 
 	return servers, nil
 }

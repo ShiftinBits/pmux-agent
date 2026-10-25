@@ -936,6 +936,58 @@ func TestSignalingClient_SendWritesJSON(t *testing.T) {
 	}
 }
 
+func TestSignalingClient_SendBoundedWhenServerStopsReading(t *testing.T) {
+	id, logger := testSetup(t)
+
+	release := make(chan struct{})
+	var connectCount atomic.Int32
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		connectCount.Add(1)
+		conn.ReadMessage() // auth
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		<-release // stop reading so the client's send buffers fill
+	})
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	go sc.Run(ctx)
+	time.Sleep(400 * time.Millisecond) // wait for connection
+
+	msg := SignalingMessage{Type: "ice_candidate", TargetDeviceID: "m", Candidate: strings.Repeat("a", 1<<20)}
+	var sendErr error
+	var elapsed time.Duration
+	for i := 0; i < 256 && sendErr == nil; i++ {
+		start := time.Now()
+		sendErr = sc.Send(msg)
+		elapsed = time.Since(start)
+	}
+	if sendErr == nil {
+		t.Skip("could not fill socket buffers to stall the write")
+	}
+	if elapsed > 6*time.Second {
+		t.Errorf("erroring Send took %v, want <= 6s", elapsed)
+	}
+	var ne net.Error
+	if !errors.As(sendErr, &ne) || !ne.Timeout() {
+		t.Errorf("Send error = %v, want a write timeout", sendErr)
+	}
+
+	// The failed write closes the socket, so the client reconnects promptly
+	// instead of waiting out the read deadline.
+	deadline := time.Now().Add(5 * time.Second)
+	for connectCount.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("client did not reconnect within 5s of the failed write")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestReadDeadline_DisconnectsOnSilentServer(t *testing.T) {
 	id, logger := testSetup(t)
 
@@ -1158,6 +1210,114 @@ func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 	}
 }
 
+func TestSuspendDuringAuth_ClosesConnection(t *testing.T) {
+	id, logger := testSetup(t)
+
+	type firstConnResult struct {
+		messages int
+		err      error
+	}
+	var connCount atomic.Int32
+	authPending := make(chan struct{})
+	releaseAuth := make(chan struct{})
+	firstDone := make(chan firstConnResult, 1)
+	secondConnected := make(chan struct{}, 1)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		if connCount.Add(1) == 1 {
+			close(authPending)
+			<-releaseAuth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+			var res firstConnResult
+			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			for {
+				_, _, err := conn.ReadMessage()
+				if err != nil {
+					res.err = err
+					break
+				}
+				res.messages++
+			}
+			firstDone <- res
+			return
+		}
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		select {
+		case secondConnected <- struct{}{}:
+		default:
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-authPending:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client never started authenticating")
+	}
+
+	sc.Suspend()
+	close(releaseAuth)
+
+	select {
+	case res := <-firstDone:
+		var closeErr *websocket.CloseError
+		if !errors.As(res.err, &closeErr) || closeErr.Code != websocket.CloseNormalClosure {
+			t.Errorf("first connection ended with %v, want normal close frame", res.err)
+		}
+		if res.messages != 0 {
+			t.Errorf("server received %d messages after auth, want none", res.messages)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not see the connection close after suspend mid-auth")
+	}
+
+	// Run must be paused, not reconnecting.
+	select {
+	case <-secondConnected:
+		t.Fatal("client reconnected while suspended")
+	case <-time.After(200 * time.Millisecond):
+	}
+	sc.mu.Lock()
+	if sc.conn != nil {
+		t.Error("sc.conn set after suspended mid-auth connect")
+	}
+	if !sc.failureStart.IsZero() {
+		t.Error("suspend mid-auth counted as a connection failure")
+	}
+	sc.mu.Unlock()
+
+	sc.Resume()
+	select {
+	case <-secondConnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not reconnect after Resume()")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}
+
 func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 	oversized := make([]byte, maxSignalingMessageSize+1)
 	for i := range oversized {
@@ -1200,8 +1360,9 @@ func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 			if !errors.Is(err, websocket.ErrReadLimit) {
 				t.Errorf("connectAndServe() error = %v, want wrapping websocket.ErrReadLimit", err)
 			}
-			if connected != tt.authenticate {
-				t.Errorf("connected = %v, want %v", connected, tt.authenticate)
+			// Even the authenticated case dropped immediately, so it is not stable.
+			if connected {
+				t.Errorf("connected = true, want false for a short-lived connection")
 			}
 		})
 	}
@@ -1484,5 +1645,86 @@ func TestEnsureToken_HonorsContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("ensureToken() took %v, want it bound by the context", elapsed)
+	}
+}
+
+// runWithAuthThenHold runs a client against a server that authenticates and
+// then holds each connection for hold before closing it. It returns the
+// server-side connection timestamps once at least want connections arrive.
+func runWithAuthThenHold(t *testing.T, hold time.Duration, want int) []time.Time {
+	t.Helper()
+	id, logger := testSetup(t)
+
+	var mu sync.Mutex
+	var times []time.Time
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		conn.ReadMessage()
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		time.Sleep(hold)
+		conn.Close()
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(times)
+		mu.Unlock()
+		if n >= want {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]time.Time(nil), times...)
+}
+
+func TestReconnect_ShortLivedConnectionKeepsBackoffGrowing(t *testing.T) {
+	// Default threshold (30s): an immediately dropped connection is not stable.
+	times := runWithAuthThenHold(t, 0, 5)
+	if len(times) < 5 {
+		t.Fatalf("got %d connections, want >= 5", len(times))
+	}
+	gap1 := times[1].Sub(times[0])
+	gap4 := times[4].Sub(times[3])
+	if gap4 <= 2*gap1 {
+		t.Errorf("4th gap %v not > 2x 1st gap %v: backoff did not grow", gap4, gap1)
+	}
+}
+
+func TestReconnect_StableConnectionResetsBackoff(t *testing.T) {
+	orig := stableConnectionThreshold
+	stableConnectionThreshold = 50 * time.Millisecond
+	defer func() { stableConnectionThreshold = orig }()
+
+	times := runWithAuthThenHold(t, 100*time.Millisecond, 5)
+	if len(times) < 5 {
+		t.Fatalf("got %d connections, want >= 5", len(times))
+	}
+	// Each connection lasts ~100ms; with reset the wait stays near 10-15ms,
+	// so connect-to-connect gaps stay well below what 4 doublings would give.
+	for i := 1; i < len(times); i++ {
+		gap := times[i].Sub(times[i-1])
+		if gap > 100*time.Millisecond+80*time.Millisecond {
+			t.Errorf("gap %d = %v, backoff did not reset after stable connection", i, gap)
+		}
 	}
 }

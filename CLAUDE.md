@@ -36,7 +36,7 @@ CI (`.github/workflows/`): `build.yml` = vet + build; `test.yml` = unit tests + 
 
 Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstall [--keep-config] [-y]`, `update`, `agent`, `--version/-v`, `--help/-h`. `agent` subcommands: `start`, `stop`, `restart`, `status`, and internal `run` (what `spawn()` execs). Everything else (and no args) → `ensureAgent()` then `proxy.ExecTmux()`.
 
-**There is no OS service layer** (no launchd/systemd install). The agent is spawned by `EnsureRunning()` on any `pmux` command: `flock` on `agent.pid` → if alive send SIGUSR1, else spawn `pmux agent run` with `Setsid`. On macOS a launchd-spawned agent is faceless and never auto-allowed by the Application Firewall, forcing TURN relay.
+**There is no OS service layer** (no launchd/systemd install). The agent is spawned by `EnsureRunning()` on any `pmux` command: `flock` on `agent.pid` → if the PID is the agent (alive and its argv is `pmux agent run`, `IsAgentProcess`) send SIGUSR1; otherwise the pid file is treated as stale and a new `pmux agent run` is spawned with `Setsid`. On macOS a launchd-spawned agent is faceless and never auto-allowed by the Application Firewall, forcing TURN relay.
 
 ### Signals (agent process)
 
@@ -83,7 +83,7 @@ Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `tr
 - **Single-pairing**: enforced at runtime by `PeerManager.MaxPeers` (default 1) + `SetAllowedDeviceID`. Re-pairing replaces the old device with confirmation.
 - **Wire limits** in `protocol/validation.go` must match `@pocketmux/shared` `src/codec.ts`. `TestCrossLanguageFixtures` reads `packages/shared/src/__tests__/fixtures` (skips if shared isn't cloned alongside).
 - **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`. Falls back to uncompressed on error.
-- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` (no macOS sleep hook).
+- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` (no macOS sleep hook).
 - **ICE recovery** (`peer.go`): `disconnectTimers` (10s grace, rescheduled if fired early after sleep) → `attemptICERestart` → separate `iceRestartTimers` 20s watchdog closes the peer if not Connected.
 - **TURN**: `fetchTurnCredentials` (JWT + HMAC), cached 10m, falls back to STUN-only on failure.
 - **Updates**: `update.Detect()` order: ldflag `dev` → `/snap/` → `/Caskroom/`, `/Cellar/` or `/opt/homebrew/` → `dpkg -s` → `rpm -q` → github. Only the github method self-replaces (`minio/selfupdate`, SHA256-verified, host allow-list); homebrew runs `brew upgrade`; deb/rpm/snap install nothing and return `*ErrElevationRequired{Command}` — `pmux update` prints the command and leaves update state untouched. The CLI banner and mobile `SessionsEvent.UpdateAvailable` are gated on `State.IsStale(runningVersion)`, so state written by an older binary is ignored. Release builds leave `installMethod` empty. `Checker.Check` no-ops when version is `dev`.

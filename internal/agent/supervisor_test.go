@@ -195,6 +195,7 @@ func TestStopRunning_RunningProcess(t *testing.T) {
 
 	// Write its PID to the PID file
 	os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), pidFilePerms)
+	fakeAgentArgs(t, pid)
 
 	// StopRunning should send SIGTERM and the process should exit
 	if err := StopRunning(paths); err != nil {
@@ -257,6 +258,13 @@ func TestEnsureRunning_AlreadyRunning(t *testing.T) {
 	pidFile := PIDFilePath(paths)
 	os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), pidFilePerms)
 	t.Cleanup(func() { os.Remove(pidFile) })
+	fakeAgentArgs(t, os.Getpid())
+	origSpawn := spawnFn
+	t.Cleanup(func() { spawnFn = origSpawn })
+	spawnFn = func(string) error {
+		t.Error("spawn must not be called when the agent is running")
+		return nil
+	}
 
 	// Register to catch SIGUSR1 (EnsureRunning signals activity)
 	ch := make(chan os.Signal, 1)
@@ -277,5 +285,86 @@ func TestEnsureRunning_AlreadyRunning(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for SIGUSR1 from EnsureRunning")
+	}
+}
+
+// startUnrelatedProcess starts a `sleep 30` child standing in for an unrelated
+// process that reused a stale agent PID. The returned channel closes once the
+// child exits; it is reaped right away, so a signal-induced death is visible
+// rather than hidden behind a zombie that kill(pid, 0) still reports as alive.
+func startUnrelatedProcess(t *testing.T) (int, <-chan struct{}) {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep process: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		cmd.Wait() //nolint:errcheck
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		cmd.Process.Kill() //nolint:errcheck
+		<-exited
+	})
+	return cmd.Process.Pid, exited
+}
+
+// assertStillAlive fails the test if the child exited, e.g. because it was
+// signalled as if it were the agent.
+func assertStillAlive(t *testing.T, pid int, exited <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-exited:
+		t.Fatal("unrelated process was signalled and exited")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if !IsProcessRunning(pid) {
+		t.Fatal("unrelated process is no longer running")
+	}
+}
+
+func TestEnsureRunning_StalePIDReusedByUnrelatedProcess(t *testing.T) {
+	paths := testPaths(t)
+	store := newIdentityStore(t, paths)
+
+	pid, exited := startUnrelatedProcess(t)
+	pidFile := PIDFilePath(paths)
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), pidFilePerms); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	origSpawn := spawnFn
+	t.Cleanup(func() { spawnFn = origSpawn })
+	spawned := false
+	spawnFn = func(string) error {
+		spawned = true
+		return nil
+	}
+
+	if err := EnsureRunning(paths, store); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if !spawned {
+		t.Error("EnsureRunning must spawn an agent when the PID is not the agent")
+	}
+	assertStillAlive(t, pid, exited)
+}
+
+func TestStopRunning_StalePIDReusedByUnrelatedProcess(t *testing.T) {
+	paths := testPaths(t)
+
+	pid, exited := startUnrelatedProcess(t)
+	pidFile := PIDFilePath(paths)
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), pidFilePerms); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	if err := StopRunning(paths); err != nil {
+		t.Fatalf("StopRunning: %v", err)
+	}
+	assertStillAlive(t, pid, exited)
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Error("stale PID file should be removed")
 	}
 }

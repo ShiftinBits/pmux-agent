@@ -70,12 +70,12 @@ func EnsureRunning(paths config.Paths, store auth.SecretStore) error {
 	// Re-read PID under the lock — another process may have spawned
 	// while we were waiting for the lock.
 	pid, err := ReadPIDFile(pidFile)
-	if err == nil && IsProcessRunning(pid) {
+	if err == nil && IsAgentProcess(pid) {
 		signalActivity(pid)
 		return nil
 	}
 
-	return spawn(pidFile)
+	return spawnFn(pidFile)
 }
 
 // StopRunning stops the background agent if it is running.
@@ -90,7 +90,7 @@ func StopRunning(paths config.Paths) error {
 		return nil
 	}
 
-	if !IsProcessRunning(pid) {
+	if !IsAgentProcess(pid) {
 		RemovePIDFile(pidFile)
 		return nil
 	}
@@ -134,6 +134,9 @@ func StopRunning(paths config.Paths) error {
 func PIDFilePath(paths config.Paths) string {
 	return filepath.Join(paths.ConfigDir, pidFileName)
 }
+
+// spawnFn starts the agent. Package var so tests can avoid exec'ing a real agent.
+var spawnFn = spawn
 
 // spawn starts a new agent process in the background.
 func spawn(pidFile string) error {

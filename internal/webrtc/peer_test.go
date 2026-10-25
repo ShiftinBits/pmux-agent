@@ -224,6 +224,222 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	pm.CloseAll()
 }
 
+// A repeated sdp_answer arriving once the offer is already answered must be
+// ignored rather than tearing down the live peer.
+func TestPeerManager_DuplicateSDPAnswerIgnored(t *testing.T) {
+	sender := &mockSender{}
+	api := fastAPI(t)
+	pm := NewPeerManager(testLogger(), sender, "http://unused", func() string { return "test-jwt" }, nil, "")
+	pm.API = api
+	pm.SetAllowedDeviceID("mobile-dup")
+	pm.SharedSecretFn = testSharedSecretFn
+	defer pm.CloseAll()
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: "mobile-dup"})
+	time.Sleep(500 * time.Millisecond)
+
+	offers := sender.messagesOfType("sdp_offer")
+	if len(offers) == 0 {
+		t.Fatal("no SDP offer sent")
+	}
+
+	answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("create answer PC: %v", err)
+	}
+	defer answerPC.Close()
+	if err := answerPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+		t.Fatalf("set remote desc: %v", err)
+	}
+	answer, err := answerPC.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("create answer: %v", err)
+	}
+	if err := answerPC.SetLocalDescription(answer); err != nil {
+		t.Fatalf("set local desc: %v", err)
+	}
+
+	msg := SignalingMessage{Type: "sdp_answer", TargetDeviceID: "mobile-dup", SDP: answer.SDP}
+	pm.HandleSignalingMessage(msg)
+
+	pm.mu.Lock()
+	peer, ok := pm.peers["mobile-dup"]
+	pm.mu.Unlock()
+	if !ok {
+		t.Fatal("peer should exist after first answer")
+	}
+	if peer.conn.SignalingState() != webrtc.SignalingStateStable {
+		t.Fatalf("signaling state = %v, want stable", peer.conn.SignalingState())
+	}
+
+	pm.HandleSignalingMessage(msg)
+
+	pm.mu.Lock()
+	cur, ok := pm.peers["mobile-dup"]
+	pm.mu.Unlock()
+	if !ok || cur != peer {
+		t.Fatal("peer should survive a duplicate answer")
+	}
+	if peer.conn.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		t.Error("peer connection should not be closed by a duplicate answer")
+	}
+}
+
+// An answer that fails SetRemoteDescription while an offer is pending must tear
+// the peer down through OnPeerDisconnect, so a session that was live before an
+// ICE-restart offer is detached rather than silently dropped.
+func TestPeerManager_InvalidSDPAnswerFiresDisconnect(t *testing.T) {
+	const id = "mobile-badanswer"
+	sender := &mockSender{}
+	pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	pm.API = fastAPI(t)
+	pm.SetAllowedDeviceID(id)
+	pm.SharedSecretFn = testSharedSecretFn
+	var mu sync.Mutex
+	var fired []string
+	pm.OnPeerDisconnect = func(deviceID string) {
+		mu.Lock()
+		fired = append(fired, deviceID)
+		mu.Unlock()
+	}
+	defer pm.CloseAll()
+
+	pm.handleConnectRequest(id, testAttemptA)
+	peer := getPeer(pm, id)
+	if peer == nil {
+		t.Fatal("peer not tracked after the SDP offer was sent")
+	}
+	if got := peer.conn.SignalingState(); got != webrtc.SignalingStateHaveLocalOffer {
+		t.Fatalf("signaling state = %v, want have-local-offer", got)
+	}
+
+	pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, AttemptID: testAttemptA, SDP: "v=0"})
+
+	deadline := time.Now().Add(time.Second)
+	for getPeer(pm, id) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("peer not removed within 1s of an invalid SDP answer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pm.cleanupWg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fired) != 1 || fired[0] != id {
+		t.Errorf("OnPeerDisconnect fired with %v, want exactly [%s]", fired, id)
+	}
+}
+
+// failingSender records messages like mockSender but fails Send for failType.
+type failingSender struct {
+	mockSender
+	failType string
+}
+
+func (f *failingSender) Send(msg SignalingMessage) error {
+	if msg.Type == f.failType {
+		return fmt.Errorf("send %s: connection closed", msg.Type)
+	}
+	return f.mockSender.Send(msg)
+}
+
+// An initial offer that can't be sent, or is never answered, must not hold the
+// peer slot; an answered offer must survive the answer watchdog.
+func TestPeerManager_InitialOfferAnswerWatchdog(t *testing.T) {
+	orig := offerAnswerTimeout
+	offerAnswerTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { offerAnswerTimeout = orig })
+
+	tests := []struct {
+		name        string
+		failOffer   bool
+		answer      bool
+		iceRestart  bool // simulate the ICE-restart window: remoteDescSet cleared, no restart watchdog yet
+		wantPresent bool
+	}{
+		{name: "unanswered offer closes peer", wantPresent: false},
+		{name: "answered offer keeps peer", answer: true, wantPresent: true},
+		{name: "answered offer survives ICE-restart window", answer: true, iceRestart: true, wantPresent: true},
+		{name: "unsent offer closes peer immediately", failOffer: true, wantPresent: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const id = "mobile-offerwd"
+			sender := &failingSender{}
+			if tt.failOffer {
+				sender.failType = "sdp_offer"
+			}
+			api := fastAPI(t)
+			pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+			pm.API = api
+			pm.SetAllowedDeviceID(id)
+			pm.SharedSecretFn = testSharedSecretFn
+			defer pm.CloseAll()
+
+			pm.handleConnectRequest(id, testAttemptA)
+
+			if tt.failOffer {
+				if getPeer(pm, id) != nil {
+					t.Fatal("peer still tracked after the SDP offer failed to send")
+				}
+				return
+			}
+
+			offers := sender.messagesOfType("sdp_offer")
+			if len(offers) == 0 {
+				t.Fatal("no SDP offer sent")
+			}
+			if getPeer(pm, id) == nil {
+				t.Fatal("peer not tracked after the SDP offer was sent")
+			}
+
+			if tt.answer {
+				answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+				if err != nil {
+					t.Fatalf("create answer PC: %v", err)
+				}
+				defer answerPC.Close()
+				if err := answerPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+					t.Fatalf("set remote desc: %v", err)
+				}
+				answer, err := answerPC.CreateAnswer(nil)
+				if err != nil {
+					t.Fatalf("create answer: %v", err)
+				}
+				if err := answerPC.SetLocalDescription(answer); err != nil {
+					t.Fatalf("set local desc: %v", err)
+				}
+				pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, AttemptID: testAttemptA, SDP: answer.SDP})
+			}
+
+			if tt.iceRestart {
+				p := getPeer(pm, id)
+				p.mu.Lock()
+				p.remoteDescSet = false
+				p.mu.Unlock()
+			}
+
+			if !tt.wantPresent {
+				deadline := time.Now().Add(time.Second)
+				for getPeer(pm, id) != nil {
+					if time.Now().After(deadline) {
+						t.Fatal("unanswered peer not closed within 1s of the answer timeout")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				return
+			}
+
+			time.Sleep(3 * offerAnswerTimeout)
+			if getPeer(pm, id) == nil {
+				t.Error("answered peer was closed by the answer watchdog")
+			}
+		})
+	}
+}
+
 func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()
@@ -948,6 +1164,60 @@ func TestPeerManager_ForceRelay(t *testing.T) {
 	}
 	if !peer.forceRelay {
 		t.Error("peer.forceRelay should be true when PeerManager.ForceRelay is set")
+	}
+
+	pm.CloseAll()
+}
+
+// syncBuffer is a goroutine-safe log capture buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestPeerManager_ForceRelayWithoutTurnCredentialsSkipsAttempt(t *testing.T) {
+	sender := &mockSender{}
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelError}))
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badServer.Close()
+
+	pm := NewPeerManager(logger, sender, badServer.URL, func() string { return "test-jwt" }, nil, "")
+	pm.ForceRelay = true
+	pm.SetAllowedDeviceID("mobile-norelay")
+	pm.SharedSecretFn = testSharedSecretFn
+
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: "mobile-norelay",
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	pm.mu.Lock()
+	_, exists := pm.peers["mobile-norelay"]
+	pm.mu.Unlock()
+	if exists {
+		t.Error("no peer should be created when force_relay has no TURN credentials")
+	}
+	if offers := sender.messagesOfType("sdp_offer"); len(offers) != 0 {
+		t.Errorf("sdp_offer count = %d, want 0", len(offers))
+	}
+	if !strings.Contains(logs.String(), "force relay enabled but no TURN credentials") {
+		t.Errorf("expected force-relay error log, got: %q", logs.String())
 	}
 
 	pm.CloseAll()
@@ -2839,6 +3109,76 @@ func TestPeerManager_ConnectRequestAttemptIDValidation(t *testing.T) {
 			}
 			if offers[0].AttemptID != tt.want {
 				t.Errorf("sdp_offer attemptId = %q, want %q", offers[0].AttemptID, tt.want)
+			}
+		})
+	}
+}
+
+func TestPeerManager_FetchTurnCredentialsTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	pm := NewPeerManager(testLogger(), &mockSender{}, srv.URL, func() string { return "test-jwt" }, nil, "")
+	start := time.Now()
+	if _, err := pm.fetchTurnCredentials(); err == nil {
+		t.Fatal("expected error from hung TURN server")
+	}
+	if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
+		t.Errorf("fetch took %v, want <= 3.5s", elapsed)
+	}
+}
+
+func TestPeerManager_GetSharedSecret(t *testing.T) {
+	orig := sharedSecretTimeout
+	sharedSecretTimeout = 100 * time.Millisecond
+	defer func() { sharedSecretTimeout = orig }()
+
+	tests := []struct {
+		name    string
+		fn      func(string) ([]byte, error)
+		wantErr string
+		want    string
+	}{
+		{"fast secret", func(string) ([]byte, error) { return []byte("s3cret"), nil }, "", "s3cret"},
+		{"empty secret", func(string) ([]byte, error) { return nil, nil }, "empty shared secret", ""},
+		{"blocking read times out", nil, "timed out", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			fn := tt.fn
+			if fn == nil {
+				fn = func(string) ([]byte, error) {
+					<-release
+					return []byte("late"), nil
+				}
+			}
+			pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost", func() string { return "" }, nil, "")
+			pm.SharedSecretFn = fn
+
+			start := time.Now()
+			got, err := pm.getSharedSecret("dev")
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Errorf("getSharedSecret took %v", elapsed)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("secret = %q, want %q", got, tt.want)
 			}
 		})
 	}

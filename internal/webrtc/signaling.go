@@ -53,9 +53,19 @@ const (
 	connectCycleTimeout = 20 * time.Second
 )
 
+// stableConnectionThreshold is how long an authenticated connection must stay
+// up before Run treats it as healthy and resets reconnect backoff. A server
+// that accepts auth and then drops the socket must not pin backoff at its
+// initial value. A var so tests can shorten it.
+var stableConnectionThreshold = 30 * time.Second
+
 // errAuthRejected marks a WebSocket auth the server explicitly refused (an
 // error reply or a 4001 close), as opposed to a timeout or transport failure.
 var errAuthRejected = errors.New("auth failed")
+
+// errSuspended is returned by connectAndServe when Suspend ran while the
+// connection was still authenticating.
+var errSuspended = errors.New("signaling suspended during connect")
 
 // jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
 // after a shared server outage don't reconnect in lockstep. The result is
@@ -239,6 +249,12 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		// Suspended mid-connect: go straight to the suspend wait without
+		// counting a failure or backing off.
+		if errors.Is(err, errSuspended) {
+			continue
+		}
+
 		// HMAC rejection is permanent — stop retrying immediately.
 		var hmacErr *auth.HMACRejectedError
 		if errors.As(err, &hmacErr) {
@@ -315,7 +331,16 @@ func (sc *SignalingClient) Send(msg SignalingMessage) error {
 	if sc.conn == nil {
 		return fmt.Errorf("not connected")
 	}
-	return sc.conn.WriteMessage(websocket.TextMessage, data)
+	sc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err = sc.conn.WriteMessage(websocket.TextMessage, data)
+	sc.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		// A failed write leaves the gorilla writer permanently broken. Close the
+		// socket so the readLoop errors out and Run reconnects now, instead of
+		// staying "connected" until the read deadline expires.
+		sc.conn.Close()
+	}
+	return err
 }
 
 // JWT returns the current JWT token. Thread-safe.
@@ -382,7 +407,8 @@ func (sc *SignalingClient) Close() {
 }
 
 // connectAndServe establishes one WebSocket connection and runs until disconnect.
-// Returns (true, err) if auth succeeded before the error, (false, err) otherwise.
+// Returns (true, err) if the authenticated connection stayed up at least
+// stableConnectionThreshold, (false, err) otherwise.
 func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool, err error) {
 	deadline := time.Now().Add(connectCycleTimeout)
 	cycleCtx, cancelCycle := context.WithDeadline(ctx, deadline)
@@ -441,10 +467,21 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		return false, authErr
 	}
 
-	// Now authenticated — make visible to other goroutines.
+	// Now authenticated — make visible to other goroutines, unless Suspend ran
+	// while auth was pending (it could not see this conn). Send a best-effort
+	// close frame so the server marks the host offline immediately; the deferred
+	// conn.Close() releases the socket.
 	sc.mu.Lock()
+	if sc.suspended {
+		sc.mu.Unlock()
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(2*time.Second))
+		return false, errSuspended
+	}
 	sc.conn = conn
 	sc.mu.Unlock()
+	connectedAt := time.Now()
 
 	// Reset read deadline on WebSocket pong frames so server-level
 	// pings prevent false timeout disconnects.
@@ -493,7 +530,7 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 	// Read messages
 	err = sc.readLoop(conn)
 	close(readDone)
-	return true, err
+	return time.Since(connectedAt) >= stableConnectionThreshold, err
 }
 
 // authenticate sends the JWT auth message and waits for confirmation.

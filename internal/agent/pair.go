@@ -324,7 +324,7 @@ func RunPair(paths config.Paths, cfg config.Config, store auth.SecretStore, hmac
 	// If the agent is still running (e.g., a racing pmux command restarted it),
 	// signal it to reload the new pairing state.
 	pidFile := PIDFilePath(paths)
-	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
+	if pid, err := ReadPIDFile(pidFile); err == nil && IsAgentProcess(pid) {
 		signalReloadPairing(pid)
 	}
 
