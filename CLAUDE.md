@@ -82,7 +82,7 @@ Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `tr
 - **Fail-closed pairing**: unpaired/load-error states set allowed device ID to `"!"`-prefixed sentinels.
 - **Single-pairing**: enforced at runtime by `PeerManager.MaxPeers` (default 1) + `SetAllowedDeviceID`. Re-pairing replaces the old device with confirmation.
 - **Wire limits** in `protocol/validation.go` must match `@pocketmux/shared` `src/codec.ts`. `TestCrossLanguageFixtures` reads `packages/shared/src/__tests__/fixtures` (skips if shared isn't cloned alongside).
-- **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`. Falls back to uncompressed on error.
+- **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`; each output stream owns its compressor. A compression error ends the stream and sends `stream_reset`; the mobile re-attaches.
 - **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` (no macOS sleep hook).
 - **ICE recovery** (`peer.go`): `disconnectTimers` (10s grace, rescheduled if fired early after sleep) → `attemptICERestart` → separate `iceRestartTimers` 20s watchdog closes the peer if not Connected.
 - **TURN**: `fetchTurnCredentials` (JWT + HMAC), cached 10m, falls back to STUN-only on failure.

@@ -33,13 +33,13 @@ type Handler struct {
 	updateStateFile string          // path to update-state.json for update notifications
 
 	mu           sync.Mutex
-	bridges      map[string]*tmux.PaneBridge           // per-peer attached bridge
-	cancels      map[string]context.CancelFunc         // per-peer streamOutput cancel
-	paneForPeer  map[string]string                     // peerID -> paneID (for restore on detach)
-	lastPingTime map[string]time.Time                  // peerID -> last ping received
-	lastDims     map[string][2]int                     // peerID -> [cols, rows] to skip redundant resizes
-	compressors  map[string]*protocol.OutputCompressor // per-peer stateful deflate compressor
-	exitNotified map[string]bool                       // peerID -> true if handlePaneExit already fired
+	bridges      map[string]*tmux.PaneBridge   // per-peer attached bridge
+	cancels      map[string]context.CancelFunc // per-peer streamOutput cancel
+	streamDone   map[string]chan struct{}      // per-peer: present while streamOutput runs, closed when it exits
+	paneForPeer  map[string]string             // peerID -> paneID (for restore on detach)
+	lastPingTime map[string]time.Time          // peerID -> last ping received
+	lastDims     map[string][2]int             // peerID -> [cols, rows] to skip redundant resizes
+	exitNotified map[string]bool               // peerID -> true if handlePaneExit already fired
 }
 
 // NewHandler creates a protocol message handler.
@@ -54,10 +54,10 @@ func NewHandler(tmuxClient *tmux.Client, send SendFunc, logger *slog.Logger, age
 		ctx:             context.Background(), // overridden by SetContext in agent.go
 		bridges:         make(map[string]*tmux.PaneBridge),
 		cancels:         make(map[string]context.CancelFunc),
+		streamDone:      make(map[string]chan struct{}),
 		paneForPeer:     make(map[string]string),
 		lastPingTime:    make(map[string]time.Time),
 		lastDims:        make(map[string][2]int),
-		compressors:     make(map[string]*protocol.OutputCompressor),
 		exitNotified:    make(map[string]bool),
 	}
 }
@@ -274,27 +274,49 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	parentCtx := h.ctx
 	h.mu.Unlock()
 	ctx, cancel := context.WithCancel(parentCtx)
+	done := make(chan struct{})
 
 	h.mu.Lock()
 	h.bridges[peerID] = bridge
 	h.cancels[peerID] = cancel
+	h.streamDone[peerID] = done
 	h.paneForPeer[peerID] = req.PaneID
 	h.lastDims[peerID] = [2]int{req.Cols, req.Rows}
 	h.mu.Unlock()
 
-	// Build attached event — echo compression if negotiated
+	// Build attached event — echo compression if negotiated. The compressor
+	// is used here for the pre-stream sends, then handed to streamOutput,
+	// which owns it from then on (flate.Writer is not goroutine-safe).
 	attachedEvent := &protocol.AttachedEvent{
 		Type:   "attached",
 		PaneID: req.PaneID,
 	}
+	var compressor *protocol.OutputCompressor
 	if req.Compression == "deflate" {
-		compressor := protocol.NewOutputCompressor()
-		h.mu.Lock()
-		h.compressors[peerID] = compressor
-		h.mu.Unlock()
+		compressor = protocol.NewOutputCompressor()
 		attachedEvent.Compression = "deflate"
 	}
 	h.sendMsg(peerID, attachedEvent)
+
+	// compressPreStream compresses a pre-stream payload when compression is
+	// negotiated. Raw bytes must never follow attached{compression:deflate},
+	// so on failure it ends the attachment (the stream never started, so
+	// this closes its done channel) and tells the mobile to re-attach.
+	compressPreStream := func(data []byte) ([]byte, bool) {
+		if compressor == nil {
+			return data, true
+		}
+		compressed, err := compressor.Compress(data)
+		if err == nil {
+			return compressed, true
+		}
+		h.logger.Warn("pre-stream output compression failed, ending stream", "peer", peerID, "error", err)
+		compressor.Close()
+		h.detachPeerWait(peerID, false)
+		h.endStream(peerID, done)
+		h.sendError(peerID, errCodeStreamReset, "output compression failed; re-attach")
+		return nil, false
+	}
 
 	// Synchronize terminal mode state with xterm.js on the mobile.
 	// pipe-pane only captures output AFTER it starts — mode-setting sequences
@@ -331,15 +353,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 					initialData = append(initialData, "\x1b[?25l"...)
 				}
 			}
-			h.mu.Lock()
-			compressor := h.compressors[peerID]
-			h.mu.Unlock()
-			if compressor != nil {
-				if compressed, err := compressor.Compress(initialData); err == nil {
-					initialData = compressed
-				} else {
-					h.logger.Warn("failed to compress initial content", "peer", peerID, "error", err)
-				}
+			initialData, ok := compressPreStream(initialData)
+			if !ok {
+				return
 			}
 			h.sendMsg(peerID, &protocol.OutputEvent{
 				Type: "output",
@@ -354,13 +370,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		if !cursorState.CursorVisible {
 			stateData = append(stateData, "\x1b[?25l"...)
 		}
-		h.mu.Lock()
-		compressor := h.compressors[peerID]
-		h.mu.Unlock()
-		if compressor != nil {
-			if compressed, err := compressor.Compress(stateData); err == nil {
-				stateData = compressed
-			}
+		stateData, ok := compressPreStream(stateData)
+		if !ok {
+			return
 		}
 		h.sendMsg(peerID, &protocol.OutputEvent{
 			Type: "output",
@@ -368,8 +380,9 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		})
 	}
 
-	// Start streaming output in background with context for lifecycle management
-	go h.streamOutput(ctx, peerID, bridge)
+	// Start streaming output in background with context for lifecycle
+	// management. streamOutput owns the compressor and closes done on exit.
+	go h.streamOutput(ctx, peerID, bridge, compressor, done)
 
 	// Start pane existence watcher — detects pane closure when the process exits
 	go h.watchPane(ctx, peerID, req.PaneID)
@@ -512,17 +525,25 @@ func (h *Handler) handleCreateSession(peerID string) {
 }
 
 // streamOutput reads from a PaneBridge and sends output events to the peer.
+// It owns compressor (nil = no compression) and closes it on exit, then
+// closes done so a waiting detach knows the stream can no longer send.
 // Exits when the context is canceled, the bridge is closed, or sending fails.
-// On a send failure (e.g. a backpressure stall) it detaches the peer and sends
-// a stream_reset error so the mobile knows to re-attach.
+// On a send or compression failure it detaches the peer and sends a
+// stream_reset error so the mobile knows to re-attach.
 // When the bridge returns EOF (pane exited), sends pane_closed + sessions events.
-func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge) {
+func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.PaneBridge, compressor *protocol.OutputCompressor, done chan struct{}) {
+	defer h.endStream(peerID, done)
+	defer func() {
+		if compressor != nil {
+			compressor.Close()
+		}
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			h.logger.Error("panic in streamOutput",
 				"recover", r, "peer", peerID,
 				"stack", string(debug.Stack()))
-			h.detachPeer(peerID)
+			h.detachPeerWait(peerID, false)
 		}
 	}()
 
@@ -543,7 +564,14 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 				return
 			}
 			// Pane exited — notify mobile and clean up
-			h.handlePaneExit(peerID)
+			h.handlePaneExit(peerID, false)
+			return
+		}
+
+		// A detach may have canceled the stream while Read was returning
+		// data; that output belongs to a stream the mobile no longer reads.
+		if ctx.Err() != nil {
+			h.logger.Debug("streamOutput canceled after read", "peer", peerID)
 			return
 		}
 
@@ -558,26 +586,22 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 		data := make([]byte, len(filtered))
 		copy(data, filtered)
 
-		// Compress output data if compression is active for this peer
-		h.mu.Lock()
-		compressor := h.compressors[peerID]
-		h.mu.Unlock()
-
+		// Raw bytes must never follow attached{compression:deflate}: there
+		// is no per-message flag, so the mobile would inflate them as part
+		// of the deflate stream. A compression error ends the stream.
 		if compressor != nil {
 			compressed, err := compressor.Compress(data)
 			if err != nil {
-				h.logger.Warn("output compression failed, disabling for peer",
-					"peer", peerID, "error", err)
-				h.mu.Lock()
-				if c := h.compressors[peerID]; c != nil {
-					c.Close()
-					delete(h.compressors, peerID)
+				if ctx.Err() != nil {
+					h.logger.Debug("output compression failed after cancel", "peer", peerID, "error", err)
+					return
 				}
-				h.mu.Unlock()
-				// Fall through to send uncompressed data
-			} else {
-				data = compressed
+				h.logger.Warn("output compression failed, ending stream", "peer", peerID, "error", err)
+				h.detachPeerWait(peerID, false)
+				h.sendError(peerID, errCodeStreamReset, "output compression failed; re-attach")
+				return
 			}
+			data = compressed
 		}
 
 		if err := h.sendMsg(peerID, &protocol.OutputEvent{
@@ -591,7 +615,7 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 				return
 			}
 			h.logger.Debug("output stream send failed, detaching", "peer", peerID, "error", err)
-			h.detachPeer(peerID)
+			h.detachPeerWait(peerID, false)
 			// The detach is agent-initiated, so the mobile would otherwise
 			// sit on a dead stream. Control messages bypass the backpressure
 			// gate, so this goes out even though the buffer is still full.
@@ -601,9 +625,23 @@ func (h *Handler) streamOutput(ctx context.Context, peerID string, bridge *tmux.
 	}
 }
 
-// handlePaneExit is called when streamOutput detects that a pane has exited.
-// It sends a pane_closed event followed by a fresh sessions tree, then cleans up.
-func (h *Handler) handlePaneExit(peerID string) {
+// endStream marks a peer's output stream as exited: it drops the peer's
+// streamDone entry (only if it is still this stream's) and closes done,
+// releasing any detach waiting on it.
+func (h *Handler) endStream(peerID string, done chan struct{}) {
+	h.mu.Lock()
+	if h.streamDone[peerID] == done {
+		delete(h.streamDone, peerID)
+	}
+	h.mu.Unlock()
+	close(done)
+}
+
+// handlePaneExit is called when streamOutput or watchPane detects that a pane
+// has exited. It sends a pane_closed event followed by a fresh sessions tree,
+// then cleans up. wait is passed to detachPeerWait: it must be false when
+// called from the stream goroutine, which cannot wait for its own exit.
+func (h *Handler) handlePaneExit(peerID string, wait bool) {
 	h.mu.Lock()
 	paneID := h.paneForPeer[peerID]
 	if paneID == "" || h.exitNotified[peerID] {
@@ -638,7 +676,7 @@ func (h *Handler) handlePaneExit(peerID string) {
 	}
 
 	// Clean up bridge and state
-	h.detachPeer(peerID)
+	h.detachPeerWait(peerID, wait)
 }
 
 // watchPane periodically checks whether the attached pane still exists in tmux.
@@ -666,28 +704,39 @@ func (h *Handler) watchPane(ctx context.Context, peerID, paneID string) {
 		case <-ticker.C:
 			if !h.tmux.PaneExists(paneID) {
 				h.logger.Info("watchPane: pane no longer exists, triggering handlePaneExit", "peer", peerID, "pane", paneID)
-				h.handlePaneExit(peerID)
+				h.handlePaneExit(peerID, true)
 				return
 			}
 		}
 	}
 }
 
-// detachPeer cancels the streamOutput goroutine, closes any existing bridge
-// for a peer, and auto-resizes the pane window if this was the last
-// mobile client attached.
+// detachPeer detaches a peer and waits for its output stream to exit, so
+// nothing from the old stream can be sent after the caller returns (e.g.
+// after a re-attach's attached event or a detached event).
 func (h *Handler) detachPeer(peerID string) {
+	h.detachPeerWait(peerID, true)
+}
+
+// detachPeerWait cancels the streamOutput goroutine, closes any existing
+// bridge for a peer, and auto-resizes the pane window if this was the last
+// mobile client attached. With wait, it then blocks until the peer's output
+// stream has exited (a stream blocked on backpressure can hold it for up to
+// the send-ready timeout). The stream goroutine itself must pass wait=false.
+// Never call it with h.mu held: the stream takes h.mu on its way out.
+func (h *Handler) detachPeerWait(peerID string, wait bool) {
 	h.mu.Lock()
 	bridge, ok := h.bridges[peerID]
 	cancel := h.cancels[peerID]
 	paneID := h.paneForPeer[peerID]
-	compressor := h.compressors[peerID]
+	// The stream drops its own streamDone entry when it exits, so a stream
+	// that already detached itself is still waited for here.
+	done := h.streamDone[peerID]
 	if ok {
 		delete(h.bridges, peerID)
 		delete(h.cancels, peerID)
 		delete(h.paneForPeer, peerID)
 		delete(h.lastDims, peerID)
-		delete(h.compressors, peerID)
 		delete(h.exitNotified, peerID)
 	}
 	h.mu.Unlock()
@@ -698,12 +747,14 @@ func (h *Handler) detachPeer(peerID string) {
 		cancel()
 	}
 
+	// Closing the bridge unblocks a stream parked in Read, so it must
+	// happen before the wait.
 	if ok {
 		bridge.Close()
 	}
 
-	if compressor != nil {
-		compressor.Close()
+	if wait && done != nil {
+		<-done
 	}
 
 	// Release the forced window size so the desktop window auto-fits again.

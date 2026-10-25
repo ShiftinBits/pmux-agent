@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -1154,23 +1157,37 @@ func TestHandler_AttachWithCompression(t *testing.T) {
 		t.Errorf("PaneID = %q, want %q", attachedEvent.PaneID, paneID)
 	}
 
-	// Verify compressor is tracked
-	h.mu.Lock()
-	compressor := h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor == nil {
-		t.Fatal("expected compressor to be tracked after attach with compression=deflate")
+	// Produce output; the first OutputEvent after attached must be the start
+	// of a deflate stream, so a fresh reader inflates it.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo DEFLATE_ATTACH_MARKER\n"),
+	})
+	out := waitForOutput(t, catcher, "peer1", 5*time.Second)
+	inflated, err := inflateFresh(out.Data)
+	if err != nil {
+		t.Fatalf("first output did not inflate with a fresh reader: %v", err)
+	}
+	if len(inflated) == 0 {
+		t.Error("first output inflated to no bytes")
 	}
 
-	// Detach — compressor should be cleaned up
+	h.mu.Lock()
+	done := h.streamDone["peer1"]
+	h.mu.Unlock()
+	if done == nil {
+		t.Fatal("expected a running output stream after attach")
+	}
+
+	// Detach waits for the stream to exit, so its done channel (closed after
+	// the stream closes its compressor) is already closed by "detached".
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
 	catcher.waitFor(t, "detached", 2*time.Second)
 
-	h.mu.Lock()
-	compressor = h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor != nil {
-		t.Error("expected compressor to be nil after detach")
+	select {
+	case <-done:
+	default:
+		t.Error("output stream still running after detached was sent")
 	}
 }
 
@@ -1205,15 +1222,57 @@ func TestHandler_AttachWithoutCompression(t *testing.T) {
 		t.Errorf("Compression = %q, want empty string", attachedEvent.Compression)
 	}
 
-	// Verify no compressor is tracked
-	h.mu.Lock()
-	compressor := h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor != nil {
-		t.Error("expected no compressor when compression was not requested")
+	// Without compression, output is the plain terminal bytes.
+	const marker = "PLAIN_OUTPUT_MARKER"
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo " + marker + "\n"),
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		for _, m := range catcher.get() {
+			if out, ok := m.Msg.(*protocol.OutputEvent); ok && strings.Contains(string(out.Data), marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Errorf("expected plain output containing %q", marker)
 	}
 
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
+// waitForOutput returns the first OutputEvent sent to peerID.
+func waitForOutput(t *testing.T, catcher *messageCatcher, peerID string, timeout time.Duration) *protocol.OutputEvent {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, m := range catcher.get() {
+			if out, ok := m.Msg.(*protocol.OutputEvent); ok && m.PeerID == peerID {
+				return out
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for output to %s", peerID)
+	return nil
+}
+
+// inflateFresh inflates data with a new raw-deflate reader. The agent
+// sync-flushes without ever closing the stream, so the reader ends with
+// io.ErrUnexpectedEOF once it has consumed everything; that is not an error.
+func inflateFresh(data []byte) ([]byte, error) {
+	out, err := io.ReadAll(flate.NewReader(bytes.NewReader(data)))
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return out, err
+	}
+	return out, nil
 }
 
 func TestHandler_CompressedStreamOutput(t *testing.T) {
