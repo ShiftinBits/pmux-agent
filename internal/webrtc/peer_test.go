@@ -953,6 +953,60 @@ func TestPeerManager_ForceRelay(t *testing.T) {
 	pm.CloseAll()
 }
 
+// syncBuffer is a goroutine-safe log capture buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestPeerManager_ForceRelayWithoutTurnCredentialsSkipsAttempt(t *testing.T) {
+	sender := &mockSender{}
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelError}))
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badServer.Close()
+
+	pm := NewPeerManager(logger, sender, badServer.URL, func() string { return "test-jwt" }, nil, "")
+	pm.ForceRelay = true
+	pm.SetAllowedDeviceID("mobile-norelay")
+	pm.SharedSecretFn = testSharedSecretFn
+
+	pm.HandleSignalingMessage(SignalingMessage{
+		Type:           "connect_request",
+		TargetDeviceID: "mobile-norelay",
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	pm.mu.Lock()
+	_, exists := pm.peers["mobile-norelay"]
+	pm.mu.Unlock()
+	if exists {
+		t.Error("no peer should be created when force_relay has no TURN credentials")
+	}
+	if offers := sender.messagesOfType("sdp_offer"); len(offers) != 0 {
+		t.Errorf("sdp_offer count = %d, want 0", len(offers))
+	}
+	if !strings.Contains(logs.String(), "force relay enabled but no TURN credentials") {
+		t.Errorf("expected force-relay error log, got: %q", logs.String())
+	}
+
+	pm.CloseAll()
+}
+
 // --- PeerConnection state handling + ICE restart tests ---
 
 func TestPeerManager_DisconnectedStartsGraceTimer(t *testing.T) {

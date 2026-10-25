@@ -678,6 +678,14 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 
 	if pm.API == nil {
 		iceServers, err := pm.fetchTurnCredentials()
+		if err != nil && pm.ForceRelay {
+			// No connection_rejected is sent: no existing reason fits, and mobile
+			// treats unknown reasons as not_paired (full reset). The mobile sees
+			// the server's peer_unavailable after the signaling session expires.
+			pm.logger.Error("force relay enabled but no TURN credentials; skipping connection attempt",
+				"mobile", mobileDeviceID, "error", err)
+			return
+		}
 		if err != nil {
 			pm.logger.Warn("failed to fetch TURN credentials, using STUN only", "error", err)
 			iceServers = []webrtc.ICEServer{
