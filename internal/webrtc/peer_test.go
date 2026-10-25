@@ -224,6 +224,106 @@ func TestPeerManager_SDPExchange(t *testing.T) {
 	pm.CloseAll()
 }
 
+// failingSender records messages like mockSender but fails Send for failType.
+type failingSender struct {
+	mockSender
+	failType string
+}
+
+func (f *failingSender) Send(msg SignalingMessage) error {
+	if msg.Type == f.failType {
+		return fmt.Errorf("send %s: connection closed", msg.Type)
+	}
+	return f.mockSender.Send(msg)
+}
+
+// An initial offer that can't be sent, or is never answered, must not hold the
+// peer slot; an answered offer must survive the answer watchdog.
+func TestPeerManager_InitialOfferAnswerWatchdog(t *testing.T) {
+	orig := offerAnswerTimeout
+	offerAnswerTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { offerAnswerTimeout = orig })
+
+	tests := []struct {
+		name        string
+		failOffer   bool
+		answer      bool
+		wantPresent bool
+	}{
+		{name: "unanswered offer closes peer", wantPresent: false},
+		{name: "answered offer keeps peer", answer: true, wantPresent: true},
+		{name: "unsent offer closes peer immediately", failOffer: true, wantPresent: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const id = "mobile-offerwd"
+			sender := &failingSender{}
+			if tt.failOffer {
+				sender.failType = "sdp_offer"
+			}
+			api := fastAPI(t)
+			pm := NewPeerManager(testLogger(), sender, "http://localhost:1", func() string { return "jwt" }, nil, "")
+			pm.API = api
+			pm.SetAllowedDeviceID(id)
+			pm.SharedSecretFn = testSharedSecretFn
+			defer pm.CloseAll()
+
+			pm.handleConnectRequest(id, testAttemptA)
+
+			if tt.failOffer {
+				if getPeer(pm, id) != nil {
+					t.Fatal("peer still tracked after the SDP offer failed to send")
+				}
+				return
+			}
+
+			offers := sender.messagesOfType("sdp_offer")
+			if len(offers) == 0 {
+				t.Fatal("no SDP offer sent")
+			}
+			if getPeer(pm, id) == nil {
+				t.Fatal("peer not tracked after the SDP offer was sent")
+			}
+
+			if tt.answer {
+				answerPC, err := api.NewPeerConnection(webrtc.Configuration{})
+				if err != nil {
+					t.Fatalf("create answer PC: %v", err)
+				}
+				defer answerPC.Close()
+				if err := answerPC.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offers[0].SDP}); err != nil {
+					t.Fatalf("set remote desc: %v", err)
+				}
+				answer, err := answerPC.CreateAnswer(nil)
+				if err != nil {
+					t.Fatalf("create answer: %v", err)
+				}
+				if err := answerPC.SetLocalDescription(answer); err != nil {
+					t.Fatalf("set local desc: %v", err)
+				}
+				pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, AttemptID: testAttemptA, SDP: answer.SDP})
+			}
+
+			if !tt.wantPresent {
+				deadline := time.Now().Add(time.Second)
+				for getPeer(pm, id) != nil {
+					if time.Now().After(deadline) {
+						t.Fatal("unanswered peer not closed within 1s of the answer timeout")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				return
+			}
+
+			time.Sleep(3 * offerAnswerTimeout)
+			if getPeer(pm, id) == nil {
+				t.Error("answered peer was closed by the answer watchdog")
+			}
+		})
+	}
+}
+
 func TestPeerManager_DataChannelProtocol(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()

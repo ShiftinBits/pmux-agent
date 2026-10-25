@@ -193,6 +193,10 @@ const authChallengeTimeout = 10 * time.Second
 // session's handler teardown before continuing the new peer's negotiation.
 const replacementTeardownTimeout = 3 * time.Second
 
+// offerAnswerTimeout bounds how long a peer waits for the mobile's SDP answer
+// to the initial offer before it is closed. A var so tests can shorten it.
+var offerAnswerTimeout = 30 * time.Second
+
 // authNonceSize is the length in bytes of the per-connection challenge nonce,
 // and of the mobile's nonce in auth_response.
 const authNonceSize = 32
@@ -789,9 +793,33 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		SDP:            offer.SDP,
 	}); err != nil {
 		pm.logger.Error("failed to send SDP offer", "error", err)
+		pm.ClosePeer(mobileDeviceID)
+		return
 	}
 
 	pm.logger.Info("SDP offer sent", "mobile", mobileDeviceID, "elapsed", time.Since(requestStart).Round(time.Millisecond))
+
+	// Answer watchdog: close the peer if the mobile never answers, so a lost
+	// answer can't hold the single peer slot. Not tracked in a timer map: the
+	// identity and remoteDescSet checks make a late fire a no-op.
+	time.AfterFunc(offerAnswerTimeout, func() {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+		if pm.closed || pm.peers[mobileDeviceID] != peer {
+			return
+		}
+		// An ICE restart clears remoteDescSet; its own watchdog supervises it.
+		if _, restarting := pm.iceRestartTimers[mobileDeviceID]; restarting {
+			return
+		}
+		peer.mu.Lock()
+		answered := peer.remoteDescSet
+		peer.mu.Unlock()
+		if !answered {
+			pm.logger.Warn("no SDP answer for initial offer, closing peer", "mobile", mobileDeviceID)
+			pm.scheduleCleanup(peer)
+		}
+	})
 }
 
 // recordReplacedAttemptLocked remembers the attempt ID of a peer replaced by a
