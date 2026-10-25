@@ -46,7 +46,7 @@ Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstal
 | SIGUSR2 | Reload pairing state, close all peers, then reopen the `PeerManager` for new connections (`CloseAllAndReopen`; sent by `pmux pair`) |
 | SIGTERM/SIGINT | Graceful stop (10s cap; `CloseAll` leaves the `PeerManager` closed); second signal → `os.Exit(1)` |
 
-Both closes run `OnPeerDisconnect` for each peer before its Pion `Close` (which can block 30s+), so pane teardown (window-size restore, pipe release) finishes within the shutdown cap. While closed, `handleConnectRequest` drops connect requests (no `connection_rejected`); the mobile retries after the server's `peer_unavailable`.
+Both closes run `OnPeerDisconnect` for each peer before its Pion `Close` (which can block 30s+), so pane teardown (window-size restore, pipe release) finishes within the shutdown cap. While closed, `handleConnectRequest` drops connect requests (no `connection_rejected`); the mobile retries after the server's `peer_unavailable`. The reload reopens once the disconnect handlers finish, without waiting for the old peers' Pion `Close`, so a re-paired phone is not held off by an unreachable old one.
 
 ### Files (`~/.config/pmux/`, hardcoded via `os.UserHomeDir`, not XDG)
 

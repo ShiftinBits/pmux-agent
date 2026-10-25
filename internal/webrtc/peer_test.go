@@ -3156,6 +3156,47 @@ func TestPeerManager_ReloadAfterShutdownStaysClosed(t *testing.T) {
 	}
 }
 
+// TestPeerManager_ReloadDoesNotWaitForPeerClose checks that a reload reopens
+// the manager once the disconnect handler has run, while the old peer's Close
+// is still blocked (a Pion close to an unreachable phone can take 30s+), so a
+// re-paired phone's connect_request is not dropped in the meantime.
+func TestPeerManager_ReloadDoesNotWaitForPeerClose(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	old := newBarePeer("mobile-old")
+	pm.mu.Lock()
+	pm.peers[old.DeviceID] = old
+	pm.mu.Unlock()
+	fired := make(chan string, 1)
+	pm.OnPeerDisconnect = func(id string) { fired <- id }
+
+	old.mu.Lock() // Close blocks until this is released.
+	reopened := make(chan struct{})
+	go func() {
+		pm.CloseAllAndReopen()
+		close(reopened)
+	}()
+	select {
+	case <-reopened:
+	case <-time.After(2 * time.Second):
+		old.mu.Unlock()
+		t.Fatal("CloseAllAndReopen waited for the old peer's Close")
+	}
+	if pm.isClosed() {
+		t.Error("manager still closed after CloseAllAndReopen returned")
+	}
+	if id := <-fired; id != old.DeviceID {
+		t.Errorf("OnPeerDisconnect fired for %q, want %q", id, old.DeviceID)
+	}
+
+	old.mu.Unlock()
+	select {
+	case <-old.done:
+	case <-time.After(2 * time.Second):
+		t.Error("old peer was never closed")
+	}
+	pm.CloseAll()
+}
+
 // TestPeerManager_CloseAllConcurrentWithCleanup races reload closes against
 // the signaling paths that spawn tracked cleanup (a replacing connect_request
 // and peer_unavailable). Under -race this catches a cleanupWg.Add racing

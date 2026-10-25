@@ -459,17 +459,21 @@ func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
 	pm.shutDown = true
 	pm.mu.Unlock()
-	pm.closeAll()
+	pm.closeAll(true)
 }
 
 // CloseAllAndReopen closes all peer connections, as CloseAll does, then reopens
 // the manager so peers that connect afterwards get the normal cleanup and ICE
-// restart handling. Used when the pairing state is reloaded. Reusing cleanupWg
-// is safe because closeAll has returned from cleanupWg.Wait and new Adds only
-// happen once closed is cleared. A CloseAll that overlaps the reload wins and
-// the manager stays closed.
+// restart handling. Used when the pairing state is reloaded. It reopens once
+// the disconnect handlers and cleanup goroutines are done, without waiting for
+// the old peers' Pion Close (30s+ for an unreachable peer): connect requests
+// are dropped while closed, and a re-paired phone connects right away. The old
+// peers are already out of the map, so their Closed callbacks are no-ops.
+// Reusing cleanupWg is safe because closeAll has returned from cleanupWg.Wait
+// and new Adds only happen once closed is cleared. A CloseAll that overlaps the
+// reload wins and the manager stays closed.
 func (pm *PeerManager) CloseAllAndReopen() {
-	pm.closeAll()
+	pm.closeAll(false)
 	pm.mu.Lock()
 	if !pm.shutDown {
 		pm.closed = false
@@ -478,8 +482,10 @@ func (pm *PeerManager) CloseAllAndReopen() {
 }
 
 // closeAll marks the manager closed, notifies the disconnect handler and closes
-// every tracked peer, then waits for the tracked cleanup goroutines.
-func (pm *PeerManager) closeAll() {
+// every tracked peer, then waits for the tracked cleanup goroutines. With
+// waitClose false it returns once every disconnect handler has run and leaves
+// the peers' Close running in the background.
+func (pm *PeerManager) closeAll(waitClose bool) {
 	pm.mu.Lock()
 	pm.closed = true
 	peers := pm.peers
@@ -504,18 +510,23 @@ func (pm *PeerManager) closeAll() {
 	// pane and releases the pipe, and must finish even when Close outlasts the
 	// shutdown bound. The map is already cleared, so the Closed state callback
 	// does not fire the handler a second time.
-	var closeWg sync.WaitGroup
+	var notifyWg, closeWg sync.WaitGroup
 	for deviceID, p := range peers {
+		notifyWg.Add(1)
 		closeWg.Add(1)
 		go func() {
 			defer closeWg.Done()
 			if pm.OnPeerDisconnect != nil {
 				pm.OnPeerDisconnect(deviceID)
 			}
+			notifyWg.Done()
 			p.Close()
 		}()
 	}
-	closeWg.Wait()
+	notifyWg.Wait()
+	if waitClose {
+		closeWg.Wait()
+	}
 
 	// Wait for any in-flight cleanup goroutines spawned by handlePeerStateChange
 	// or attemptICERestart to finish before returning.
