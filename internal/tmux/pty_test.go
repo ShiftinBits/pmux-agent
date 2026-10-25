@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -330,4 +331,47 @@ func TestAttachPane_HostUndisturbed(t *testing.T) {
 	if !names["bridge-bystander"] {
 		t.Error("bystander session should still exist")
 	}
+}
+
+func TestAttachPane_ReplacesExistingPipe(t *testing.T) {
+	skipIfNoTmux(t)
+	const socket = "pmux-pty-prepipe-test"
+	c := NewClient(socket)
+	cleanup := func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	if _, err := c.CreateSession("prepipe", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	if _, err := c.run("pipe-pane", "-t", paneID, "cat >/dev/null"); err != nil {
+		t.Fatalf("pre-existing pipe-pane: %v", err)
+	}
+	out, err := c.run("display", "-p", "-t", paneID, "#{pane_pipe}")
+	if err != nil {
+		t.Fatalf("display pane_pipe: %v", err)
+	}
+	if strings.TrimSpace(out) != "1" {
+		t.Fatalf("pane_pipe = %q before attach, want 1", strings.TrimSpace(out))
+	}
+
+	bridge, err := c.AttachPane(paneID, 80, 24)
+	if err != nil {
+		t.Fatalf("AttachPane: %v", err)
+	}
+	defer bridge.Close()
+
+	marker := "PREPIPE_MARKER_77"
+	if _, err := bridge.Write([]byte("echo " + marker + "\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	readUntil(t, bridge, marker, 5*time.Second)
 }

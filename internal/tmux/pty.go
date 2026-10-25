@@ -88,12 +88,16 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 	initialContent, _ := c.CapturePane(paneID)
 
 	// Start pipe-pane to stream pane output to our FIFO.
-	// -o means output only (not input echo).
+	// Output-only is pipe-pane's default (no -I/-O flags). -o is deliberately
+	// omitted: it means "only open a new pipe if none is open" and toggles an
+	// existing pipe off, so attaching would silently fail to stream. Without
+	// it, tmux replaces any existing pipe on the pane with ours. A user's own
+	// pipe-pane on this pane is therefore replaced; detaching stops our pipe.
 	// The FIFO path is passed as a positional argument ($0) to an inner
 	// sh -c, so it is never interpreted as shell syntax — only as data.
 	// This prevents command injection even if the path contained $(...)
 	// or backtick sequences.
-	if _, err := c.run("pipe-pane", "-t", paneID, "-o",
+	if _, err := c.run("pipe-pane", "-t", paneID,
 		fmt.Sprintf("exec sh -c 'cat > \"$0\"' %s", shellQuote(fifoPath))); err != nil {
 		pipeR.Close()
 		pipeW.Close()
