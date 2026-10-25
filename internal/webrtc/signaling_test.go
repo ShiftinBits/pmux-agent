@@ -1200,8 +1200,9 @@ func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 			if !errors.Is(err, websocket.ErrReadLimit) {
 				t.Errorf("connectAndServe() error = %v, want wrapping websocket.ErrReadLimit", err)
 			}
-			if connected != tt.authenticate {
-				t.Errorf("connected = %v, want %v", connected, tt.authenticate)
+			// Even the authenticated case dropped immediately, so it is not stable.
+			if connected {
+				t.Errorf("connected = true, want false for a short-lived connection")
 			}
 		})
 	}
@@ -1484,5 +1485,86 @@ func TestEnsureToken_HonorsContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("ensureToken() took %v, want it bound by the context", elapsed)
+	}
+}
+
+// runWithAuthThenHold runs a client against a server that authenticates and
+// then holds each connection for hold before closing it. It returns the
+// server-side connection timestamps once at least want connections arrive.
+func runWithAuthThenHold(t *testing.T, hold time.Duration, want int) []time.Time {
+	t.Helper()
+	id, logger := testSetup(t)
+
+	var mu sync.Mutex
+	var times []time.Time
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		conn.ReadMessage()
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		time.Sleep(hold)
+		conn.Close()
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+	sc.InitialBackoff = 10 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(times)
+		mu.Unlock()
+		if n >= want {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]time.Time(nil), times...)
+}
+
+func TestReconnect_ShortLivedConnectionKeepsBackoffGrowing(t *testing.T) {
+	// Default threshold (30s): an immediately dropped connection is not stable.
+	times := runWithAuthThenHold(t, 0, 5)
+	if len(times) < 5 {
+		t.Fatalf("got %d connections, want >= 5", len(times))
+	}
+	gap1 := times[1].Sub(times[0])
+	gap4 := times[4].Sub(times[3])
+	if gap4 <= 2*gap1 {
+		t.Errorf("4th gap %v not > 2x 1st gap %v: backoff did not grow", gap4, gap1)
+	}
+}
+
+func TestReconnect_StableConnectionResetsBackoff(t *testing.T) {
+	orig := stableConnectionThreshold
+	stableConnectionThreshold = 50 * time.Millisecond
+	defer func() { stableConnectionThreshold = orig }()
+
+	times := runWithAuthThenHold(t, 100*time.Millisecond, 5)
+	if len(times) < 5 {
+		t.Fatalf("got %d connections, want >= 5", len(times))
+	}
+	// Each connection lasts ~100ms; with reset the wait stays near 10-15ms,
+	// so connect-to-connect gaps stay well below what 4 doublings would give.
+	for i := 1; i < len(times); i++ {
+		gap := times[i].Sub(times[i-1])
+		if gap > 100*time.Millisecond+80*time.Millisecond {
+			t.Errorf("gap %d = %v, backoff did not reset after stable connection", i, gap)
+		}
 	}
 }
