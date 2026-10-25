@@ -70,10 +70,6 @@ const turnCacheTTL = 10 * time.Minute
 // signaling readLoop before the offer is sent, so it bounds the pre-offer delay.
 const turnFetchTimeout = 3 * time.Second
 
-// turnFailBackoff is how long a failed TURN fetch suppresses further attempts,
-// so repeated connects during an outage do not each wait out the timeout.
-const turnFailBackoff = 30 * time.Second
-
 // TurnCredentials holds STUN/TURN server credentials from the signaling server.
 type TurnCredentials struct {
 	URLs       []string `json:"urls"`
@@ -146,7 +142,6 @@ type PeerManager struct {
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
 	turnCache        []webrtc.ICEServer     // cached TURN credentials
 	turnCacheTime    time.Time              // when turnCache was last populated
-	turnFailTime     time.Time              // when the last TURN fetch failed (negative cache)
 }
 
 // Peer represents a single WebRTC peer connection to a mobile device.
@@ -801,21 +796,17 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 
 	// Answer watchdog: close the peer if the mobile never answers, so a lost
 	// answer can't hold the single peer slot. Not tracked in a timer map: the
-	// identity and remoteDescSet checks make a late fire a no-op.
+	// identity and answered checks make a late fire a no-op. "Answered" is
+	// CurrentRemoteDescription, not remoteDescSet: an ICE restart clears
+	// remoteDescSet before its own watchdog is registered, but keeps the
+	// current remote description from the first answer.
 	time.AfterFunc(offerAnswerTimeout, func() {
 		pm.mu.Lock()
 		defer pm.mu.Unlock()
 		if pm.closed || pm.peers[mobileDeviceID] != peer {
 			return
 		}
-		// An ICE restart clears remoteDescSet; its own watchdog supervises it.
-		if _, restarting := pm.iceRestartTimers[mobileDeviceID]; restarting {
-			return
-		}
-		peer.mu.Lock()
-		answered := peer.remoteDescSet
-		peer.mu.Unlock()
-		if !answered {
+		if peer.conn.CurrentRemoteDescription() == nil {
 			pm.logger.Warn("no SDP answer for initial offer, closing peer", "mobile", mobileDeviceID)
 			pm.scheduleCleanup(peer)
 		}
@@ -963,20 +954,14 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 		pm.logger.Debug("using cached TURN credentials", "age", time.Since(pm.turnCacheTime).Round(time.Second))
 		return cached, nil
 	}
-	if time.Since(pm.turnFailTime) < turnFailBackoff {
-		pm.mu.Unlock()
-		return nil, fmt.Errorf("TURN credentials recently failed; skipping fetch")
-	}
 	pm.mu.Unlock()
 
 	servers, err := pm.requestTurnCredentials()
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if err != nil {
-		pm.turnFailTime = time.Now()
 		return nil, err
 	}
-	pm.turnFailTime = time.Time{}
 	pm.turnCache = servers
 	pm.turnCacheTime = time.Now()
 	return servers, nil

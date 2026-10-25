@@ -78,10 +78,13 @@ func IsAgentProcess(pid int) bool {
 		return false
 	}
 	argv, err := procArgs(pid)
-	if err != nil || len(argv) < 3 {
+	n := len(argv)
+	if err != nil || n < 3 || argv[n-2] != "agent" || argv[n-1] != "run" {
 		return false
 	}
-	return filepath.Base(argv[0]) == "pmux" && argv[1] == "agent" && argv[2] == "run"
+	// Match from the tail and rejoin the rest: the darwin reader splits on
+	// whitespace, so an executable path with spaces arrives as several fields.
+	return filepath.Base(strings.Join(argv[:n-2], " ")) == "pmux"
 }
 
 // RemovePIDFile removes the PID file at the given path.

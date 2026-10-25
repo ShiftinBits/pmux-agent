@@ -334,6 +334,12 @@ func (sc *SignalingClient) Send(msg SignalingMessage) error {
 	sc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	err = sc.conn.WriteMessage(websocket.TextMessage, data)
 	sc.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		// A failed write leaves the gorilla writer permanently broken. Close the
+		// socket so the readLoop errors out and Run reconnects now, instead of
+		// staying "connected" until the read deadline expires.
+		sc.conn.Close()
+	}
 	return err
 }
 

@@ -190,6 +190,8 @@ func TestIsAgentProcess(t *testing.T) {
 	}{
 		{name: "matching argv", pid: os.Getpid(), argv: []string{"/opt/homebrew/bin/pmux", "agent", "run"}, want: true},
 		{name: "argv[0] base not pmux", pid: os.Getpid(), argv: []string{"/usr/bin/sleep", "agent", "run"}, want: false},
+		{name: "path with spaces split by ps", pid: os.Getpid(), argv: []string{"/Users/x/My", "Tools/pmux", "agent", "run"}, want: true},
+		{name: "extra trailing arg", pid: os.Getpid(), argv: []string{"/usr/local/bin/pmux", "agent", "run", "x"}, want: false},
 		{name: "missing run", pid: os.Getpid(), argv: []string{"/usr/local/bin/pmux", "agent"}, want: false},
 		{name: "procArgs error", pid: os.Getpid(), argsErr: errors.New("no such process"), want: false},
 		{name: "dead PID", pid: 999999999, argv: []string{"/usr/local/bin/pmux", "agent", "run"}, want: false},

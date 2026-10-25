@@ -355,10 +355,12 @@ func TestPeerManager_InitialOfferAnswerWatchdog(t *testing.T) {
 		name        string
 		failOffer   bool
 		answer      bool
+		iceRestart  bool // simulate the ICE-restart window: remoteDescSet cleared, no restart watchdog yet
 		wantPresent bool
 	}{
 		{name: "unanswered offer closes peer", wantPresent: false},
 		{name: "answered offer keeps peer", answer: true, wantPresent: true},
+		{name: "answered offer survives ICE-restart window", answer: true, iceRestart: true, wantPresent: true},
 		{name: "unsent offer closes peer immediately", failOffer: true, wantPresent: false},
 	}
 
@@ -410,6 +412,13 @@ func TestPeerManager_InitialOfferAnswerWatchdog(t *testing.T) {
 					t.Fatalf("set local desc: %v", err)
 				}
 				pm.HandleSignalingMessage(SignalingMessage{Type: "sdp_answer", TargetDeviceID: id, AttemptID: testAttemptA, SDP: answer.SDP})
+			}
+
+			if tt.iceRestart {
+				p := getPeer(pm, id)
+				p.mu.Lock()
+				p.remoteDescSet = false
+				p.mu.Unlock()
 			}
 
 			if !tt.wantPresent {
@@ -3105,65 +3114,24 @@ func TestPeerManager_ConnectRequestAttemptIDValidation(t *testing.T) {
 	}
 }
 
-func TestPeerManager_FetchTurnCredentialsNegativeCache(t *testing.T) {
-	logger := testLogger()
-	sender := &mockSender{}
-
-	t.Run("hung server fails within timeout and is not retried", func(t *testing.T) {
-		release := make(chan struct{})
-		var mu sync.Mutex
-		requests := 0
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			requests++
-			mu.Unlock()
-			<-release
-		}))
-		t.Cleanup(func() {
-			close(release)
-			srv.Close()
-		})
-
-		pm := NewPeerManager(logger, sender, srv.URL, func() string { return "test-jwt" }, nil, "")
-		start := time.Now()
-		if _, err := pm.fetchTurnCredentials(); err == nil {
-			t.Fatal("expected error from hung TURN server")
-		}
-		if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
-			t.Errorf("first fetch took %v, want <= 3.5s", elapsed)
-		}
-
-		start = time.Now()
-		if _, err := pm.fetchTurnCredentials(); err == nil {
-			t.Fatal("expected error from negative cache")
-		}
-		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-			t.Errorf("second fetch took %v, want < 100ms", elapsed)
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if requests != 1 {
-			t.Errorf("server saw %d requests, want 1", requests)
-		}
+func TestPeerManager_FetchTurnCredentialsTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
 	})
 
-	t.Run("retries after backoff elapses", func(t *testing.T) {
-		srv := mockTurnServer(t)
-		defer srv.Close()
-
-		pm := NewPeerManager(logger, sender, srv.URL, func() string { return "test-jwt" }, nil, "")
-		pm.turnFailTime = time.Now().Add(-turnFailBackoff - time.Second)
-		servers, err := pm.fetchTurnCredentials()
-		if err != nil {
-			t.Fatalf("fetchTurnCredentials() error: %v", err)
-		}
-		if len(servers) == 0 {
-			t.Fatal("expected at least one ICE server")
-		}
-		if len(pm.turnCache) == 0 || !pm.turnFailTime.IsZero() {
-			t.Error("expected success to populate cache and clear failure time")
-		}
-	})
+	pm := NewPeerManager(testLogger(), &mockSender{}, srv.URL, func() string { return "test-jwt" }, nil, "")
+	start := time.Now()
+	if _, err := pm.fetchTurnCredentials(); err == nil {
+		t.Fatal("expected error from hung TURN server")
+	}
+	if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
+		t.Errorf("fetch took %v, want <= 3.5s", elapsed)
+	}
 }
 
 func TestPeerManager_GetSharedSecret(t *testing.T) {

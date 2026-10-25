@@ -940,7 +940,9 @@ func TestSignalingClient_SendBoundedWhenServerStopsReading(t *testing.T) {
 	id, logger := testSetup(t)
 
 	release := make(chan struct{})
+	var connectCount atomic.Int32
 	server := mockWSServer(t, func(conn *websocket.Conn) {
+		connectCount.Add(1)
 		conn.ReadMessage() // auth
 		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
 		<-release // stop reading so the client's send buffers fill
@@ -969,6 +971,20 @@ func TestSignalingClient_SendBoundedWhenServerStopsReading(t *testing.T) {
 	}
 	if elapsed > 6*time.Second {
 		t.Errorf("erroring Send took %v, want <= 6s", elapsed)
+	}
+	var ne net.Error
+	if !errors.As(sendErr, &ne) || !ne.Timeout() {
+		t.Errorf("Send error = %v, want a write timeout", sendErr)
+	}
+
+	// The failed write closes the socket, so the client reconnects promptly
+	// instead of waiting out the read deadline.
+	deadline := time.Now().Add(5 * time.Second)
+	for connectCount.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("client did not reconnect within 5s of the failed write")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
