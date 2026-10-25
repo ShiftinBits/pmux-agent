@@ -2935,6 +2935,177 @@ func TestPeerManager_CloseAll_Empty(t *testing.T) {
 	pm.CloseAll()
 }
 
+// newBarePeer returns a tracked-shape Peer with no PeerConnection, for tests
+// that only exercise the manager's bookkeeping.
+func newBarePeer(deviceID string) *Peer {
+	return &Peer{DeviceID: deviceID, logger: testLogger(), sendReady: make(chan struct{}, 1), done: make(chan struct{})}
+}
+
+// TestPeerManager_CloseAllFiresDisconnectPerPeer checks that CloseAll runs the
+// disconnect handler exactly once for every tracked peer, before that peer is
+// closed, so pane teardown never waits on a slow Pion close.
+func TestPeerManager_CloseAllFiresDisconnectPerPeer(t *testing.T) {
+	pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+	ids := []string{"mobile-a", "mobile-b", "mobile-c"}
+	peers := make(map[string]*Peer, len(ids))
+	pm.mu.Lock()
+	for _, id := range ids {
+		peers[id] = newBarePeer(id)
+		pm.peers[id] = peers[id]
+	}
+	pm.mu.Unlock()
+
+	var mu sync.Mutex
+	var fired, closedAtFire []string
+	pm.OnPeerDisconnect = func(id string) {
+		p := peers[id]
+		p.mu.Lock()
+		closed := p.closed
+		p.mu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
+		fired = append(fired, id)
+		if closed {
+			closedAtFire = append(closedAtFire, id)
+		}
+	}
+
+	pm.CloseAll()
+
+	mu.Lock()
+	gotFired := slices.Sorted(slices.Values(fired))
+	gotClosedAtFire := append([]string(nil), closedAtFire...)
+	mu.Unlock()
+	if !slices.Equal(gotFired, ids) {
+		t.Errorf("OnPeerDisconnect fired for %v, want each of %v once", gotFired, ids)
+	}
+	if len(gotClosedAtFire) > 0 {
+		t.Errorf("OnPeerDisconnect ran after Close for %v, want it before", gotClosedAtFire)
+	}
+	for id, p := range peers {
+		select {
+		case <-p.done:
+		default:
+			t.Errorf("peer %s was not closed", id)
+		}
+	}
+	if n := pm.PeerCount(); n != 0 {
+		t.Errorf("%d peers tracked after CloseAll, want 0", n)
+	}
+}
+
+// TestPeerManager_CloseAllAndReopen checks that a reload's close reopens the
+// manager, so peers that connect afterwards still get cleanup and an ICE
+// restart watchdog, while a shutdown's CloseAll leaves it closed.
+func TestPeerManager_CloseAllAndReopen(t *testing.T) {
+	tests := []struct {
+		name   string
+		reopen bool
+	}{
+		{name: "CloseAll stays closed", reopen: false},
+		{name: "CloseAllAndReopen reopens", reopen: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const deviceID = "mobile-reopen"
+			const strayID = "mobile-reopen-stray"
+			sender := &mockSender{}
+			pm := newAuthTestManager(t, sender, deviceID, nil)
+			defer pm.CloseAll()
+
+			var mu sync.Mutex
+			var fired []string
+			pm.OnPeerDisconnect = func(id string) {
+				mu.Lock()
+				defer mu.Unlock()
+				fired = append(fired, id)
+			}
+			firedFor := func(id string) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return slices.Contains(fired, id)
+			}
+
+			connectTestMobile(t, pm, sender, deviceID, true)
+			if tt.reopen {
+				pm.CloseAllAndReopen()
+			} else {
+				pm.CloseAll()
+			}
+			pm.mu.Lock()
+			closed := pm.closed
+			pm.mu.Unlock()
+			if closed == tt.reopen {
+				t.Fatalf("closed = %v after close, want %v", closed, !tt.reopen)
+			}
+
+			// A peer connecting after the close: an ICE restart arms its
+			// watchdog only while the manager is open.
+			connectTestMobile(t, pm, sender, deviceID, true)
+			if getPeer(pm, deviceID) == nil {
+				t.Fatal("peer not installed after close")
+			}
+			pm.attemptICERestart(deviceID)
+			pm.mu.Lock()
+			_, armed := pm.iceRestartTimers[deviceID]
+			pm.mu.Unlock()
+			if armed != tt.reopen {
+				t.Errorf("ICE restart watchdog armed = %v, want %v", armed, tt.reopen)
+			}
+
+			// scheduleCleanup spawns the teardown only while the manager is open.
+			stray := newBarePeer(strayID)
+			pm.mu.Lock()
+			pm.peers[strayID] = stray
+			pm.scheduleCleanup(stray)
+			pm.mu.Unlock()
+			pm.cleanupWg.Wait()
+			if got := firedFor(strayID); got != tt.reopen {
+				t.Errorf("scheduleCleanup fired OnPeerDisconnect = %v, want %v", got, tt.reopen)
+			}
+			if removed := getPeer(pm, strayID) == nil; removed != tt.reopen {
+				t.Errorf("scheduleCleanup removed the peer = %v, want %v", removed, tt.reopen)
+			}
+		})
+	}
+}
+
+// TestPeerManager_CloseAllConcurrentWithCleanup races reload closes against
+// the signaling paths that spawn tracked cleanup (a replacing connect_request
+// and peer_unavailable). Under -race this catches a cleanupWg.Add racing
+// closeAll's Wait, which would also panic the WaitGroup.
+func TestPeerManager_CloseAllConcurrentWithCleanup(t *testing.T) {
+	const deviceID = "mobile-close-race"
+	sender := &mockSender{}
+	pm := newAuthTestManager(t, sender, deviceID, nil)
+	pm.OnPeerDisconnect = func(string) {}
+
+	stop := make(chan struct{})
+	reloads := make(chan struct{})
+	go func() {
+		defer close(reloads)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			pm.CloseAllAndReopen()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// One goroutine, like the signaling readLoop.
+	for range 15 {
+		pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+		pm.HandleSignalingMessage(SignalingMessage{Type: "connect_request", TargetDeviceID: deviceID})
+		pm.HandleSignalingMessage(SignalingMessage{Type: "peer_unavailable", DeviceID: deviceID})
+	}
+	close(stop)
+	<-reloads
+	pm.CloseAll()
+}
+
 func TestPeerManager_ICECandidateBufferCapped(t *testing.T) {
 	sender := &mockSender{}
 	logger := testLogger()

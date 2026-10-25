@@ -139,7 +139,8 @@ type PeerManager struct {
 	iceRestartTimers map[string]*time.Timer // ICE-restart answer watchdogs (kept apart from grace timers, SB-1008)
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
 	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
-	closed           bool                   // true after CloseAll() returns
+	closed           bool                   // true while closeAll runs, and after CloseAll; cleared by CloseAllAndReopen
+	shutDown         bool                   // set by CloseAll; keeps an overlapping CloseAllAndReopen from reopening
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
 	turnCache        []webrtc.ICEServer     // cached TURN credentials
 	turnCacheTime    time.Time              // when turnCache was last populated
@@ -361,10 +362,28 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 	// Close off the signaling read loop: a Pion close can stall, and the
 	// mobile's retry is about to arrive on this same loop.
 	pm.logger.Info("closing half-built peer after peer_unavailable", "mobile", deviceID)
-	pm.cleanupWg.Add(1)
+	pm.goCleanup(func() { pm.ClosePeerIfCurrent(deviceID, peer) })
+}
+
+// goCleanup runs fn in a background goroutine, tracked by cleanupWg while the
+// manager is open. The Add happens under pm.mu behind the closed check, as in
+// scheduleCleanup, so it can never race closeAll's cleanupWg.Wait. Once closed,
+// fn still runs, untracked, as closeViaManager does: the peer fn tears down may
+// be missing from closeAll's snapshot (removed from the map first, or added
+// after the snapshot), so skipping it would leak the peer. Caller must not hold
+// pm.mu.
+func (pm *PeerManager) goCleanup(fn func()) {
+	pm.mu.Lock()
+	tracked := !pm.closed
+	if tracked {
+		pm.cleanupWg.Add(1)
+	}
+	pm.mu.Unlock()
 	go func() {
-		defer pm.cleanupWg.Done()
-		pm.ClosePeerIfCurrent(deviceID, peer)
+		if tracked {
+			defer pm.cleanupWg.Done()
+		}
+		fn()
 	}()
 }
 
@@ -426,15 +445,37 @@ func (pm *PeerManager) stopTimersLocked(deviceID string) {
 	delete(pm.disconnectTimes, deviceID)
 }
 
-// CloseAll closes all peer connections and waits for background cleanup
-// goroutines (from state change handlers) to finish.
+// CloseAll closes all peer connections for agent shutdown and waits for
+// background cleanup goroutines (from state change handlers) to finish. The
+// manager stays closed: no further cleanup is scheduled.
 func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
-	pm.closed = true
-	peers := make([]*Peer, 0, len(pm.peers))
-	for _, p := range pm.peers {
-		peers = append(peers, p)
+	pm.shutDown = true
+	pm.mu.Unlock()
+	pm.closeAll()
+}
+
+// CloseAllAndReopen closes all peer connections, as CloseAll does, then reopens
+// the manager so peers that connect afterwards get the normal cleanup and ICE
+// restart handling. Used when the pairing state is reloaded. Reusing cleanupWg
+// is safe because closeAll has returned from cleanupWg.Wait and new Adds only
+// happen once closed is cleared. A CloseAll that overlaps the reload wins and
+// the manager stays closed.
+func (pm *PeerManager) CloseAllAndReopen() {
+	pm.closeAll()
+	pm.mu.Lock()
+	if !pm.shutDown {
+		pm.closed = false
 	}
+	pm.mu.Unlock()
+}
+
+// closeAll marks the manager closed, notifies the disconnect handler and closes
+// every tracked peer, then waits for the tracked cleanup goroutines.
+func (pm *PeerManager) closeAll() {
+	pm.mu.Lock()
+	pm.closed = true
+	peers := pm.peers
 	closedCount := len(peers)
 	pm.peers = make(map[string]*Peer)
 
@@ -452,13 +493,20 @@ func (pm *PeerManager) CloseAll() {
 
 	// Close peers in parallel so one stuck Pion DTLS shutdown doesn't
 	// block cleanup of other peers (each Close can take 30s+ if unreachable).
+	// The disconnect handler runs first, without pm.mu held: it restores the
+	// pane and releases the pipe, and must finish even when Close outlasts the
+	// shutdown bound. The map is already cleared, so the Closed state callback
+	// does not fire the handler a second time.
 	var closeWg sync.WaitGroup
-	for _, p := range peers {
+	for deviceID, p := range peers {
 		closeWg.Add(1)
-		go func(peer *Peer) {
+		go func() {
 			defer closeWg.Done()
-			peer.Close()
-		}(p)
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			p.Close()
+		}()
 	}
 	closeWg.Wait()
 
@@ -633,12 +681,10 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		// keying handler state by peer identity would remove that ceiling.
 		if pm.OnPeerDisconnect != nil {
 			torn := make(chan struct{})
-			pm.cleanupWg.Add(1)
-			go func() {
-				defer pm.cleanupWg.Done()
+			pm.goCleanup(func() {
 				defer close(torn)
 				pm.OnPeerDisconnect(mobileDeviceID)
-			}()
+			})
 			select {
 			case <-torn:
 			case <-time.After(replacementTeardownTimeout):
@@ -650,14 +696,12 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		oldState := oldPeer.conn.ConnectionState().String()
 		pm.logger.Info("closing old peer for reconnect (async)",
 			"mobile", mobileDeviceID, "oldPcState", oldState)
-		pm.cleanupWg.Add(1)
-		go func() {
-			defer pm.cleanupWg.Done()
+		pm.goCleanup(func() {
 			start := time.Now()
 			oldPeer.Close()
 			pm.logger.Info("old peer closed",
 				"mobile", mobileDeviceID, "elapsed", time.Since(start).Round(time.Millisecond))
-		}()
+		})
 	}
 
 	// Fetch TURN credentials (skipped when custom API is set, e.g. in tests)

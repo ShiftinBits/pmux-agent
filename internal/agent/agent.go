@@ -283,14 +283,14 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 				if err != nil {
 					logger.Warn("failed to reload paired device, rejecting all connections", "error", err)
 					peerManager.SetAllowedDeviceID("!invalid-load-error")
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 				} else if device == nil {
 					peerManager.SetAllowedDeviceID("!unpaired")
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 					logger.Info("unpair complete: all peers closed")
 				} else {
 					peerManager.SetAllowedDeviceID(device.DeviceID)
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 					logger.Info("pairing reloaded, peers closed for re-auth", "device", device.DeviceID)
 				}
 			}

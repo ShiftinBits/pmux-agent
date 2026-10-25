@@ -43,8 +43,10 @@ Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstal
 | Signal | Effect |
 |--------|--------|
 | SIGUSR1 | Activity ping from CLI — wakes signaling from dormancy (`SignalActivity()`) |
-| SIGUSR2 | Reload pairing state, close all peers (sent by `pmux pair`) |
-| SIGTERM/SIGINT | Graceful stop (10s cap); second signal → `os.Exit(1)` |
+| SIGUSR2 | Reload pairing state, close all peers, then reopen the `PeerManager` for new connections (`CloseAllAndReopen`; sent by `pmux pair`) |
+| SIGTERM/SIGINT | Graceful stop (10s cap; `CloseAll` leaves the `PeerManager` closed); second signal → `os.Exit(1)` |
+
+Both closes run `OnPeerDisconnect` for each peer before its Pion `Close` (which can block 30s+), so pane teardown (window-size restore, pipe release) finishes within the shutdown cap.
 
 ### Files (`~/.config/pmux/`, hardcoded via `os.UserHomeDir`, not XDG)
 
