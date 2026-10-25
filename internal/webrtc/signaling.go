@@ -63,6 +63,10 @@ var stableConnectionThreshold = 30 * time.Second
 // error reply or a 4001 close), as opposed to a timeout or transport failure.
 var errAuthRejected = errors.New("auth failed")
 
+// errSuspended is returned by connectAndServe when Suspend ran while the
+// connection was still authenticating.
+var errSuspended = errors.New("signaling suspended during connect")
+
 // jitter returns d scaled by a random factor in [1, 1.5] so agents retrying
 // after a shared server outage don't reconnect in lockstep. The result is
 // deliberately not capped at maxBackoff: capping would re-synchronize every
@@ -243,6 +247,12 @@ func (sc *SignalingClient) Run(ctx context.Context) error {
 		if err == nil || ctx.Err() != nil {
 			// Context canceled — actual graceful shutdown.
 			return ctx.Err()
+		}
+
+		// Suspended mid-connect: go straight to the suspend wait without
+		// counting a failure or backing off.
+		if errors.Is(err, errSuspended) {
+			continue
 		}
 
 		// HMAC rejection is permanent — stop retrying immediately.
@@ -451,8 +461,18 @@ func (sc *SignalingClient) connectAndServe(ctx context.Context) (connected bool,
 		return false, authErr
 	}
 
-	// Now authenticated — make visible to other goroutines.
+	// Now authenticated — make visible to other goroutines, unless Suspend ran
+	// while auth was pending (it could not see this conn). Send a best-effort
+	// close frame so the server marks the host offline immediately; the deferred
+	// conn.Close() releases the socket.
 	sc.mu.Lock()
+	if sc.suspended {
+		sc.mu.Unlock()
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(2*time.Second))
+		return false, errSuspended
+	}
 	sc.conn = conn
 	sc.mu.Unlock()
 	connectedAt := time.Now()

@@ -1194,6 +1194,114 @@ func TestResume_WakesRunLoopFromSuspend(t *testing.T) {
 	}
 }
 
+func TestSuspendDuringAuth_ClosesConnection(t *testing.T) {
+	id, logger := testSetup(t)
+
+	type firstConnResult struct {
+		messages int
+		err      error
+	}
+	var connCount atomic.Int32
+	authPending := make(chan struct{})
+	releaseAuth := make(chan struct{})
+	firstDone := make(chan firstConnResult, 1)
+	secondConnected := make(chan struct{}, 1)
+
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // auth
+		if connCount.Add(1) == 1 {
+			close(authPending)
+			<-releaseAuth
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+			var res firstConnResult
+			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			for {
+				_, _, err := conn.ReadMessage()
+				if err != nil {
+					res.err = err
+					break
+				}
+				res.messages++
+			}
+			firstDone <- res
+			return
+		}
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth","status":"ok"}`))
+		select {
+		case secondConnected <- struct{}{}:
+		default:
+		}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	sc := NewSignalingClient(id, server.URL, "", nil, logger, "")
+	sc.HTTPClient = server.Client()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-authPending:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client never started authenticating")
+	}
+
+	sc.Suspend()
+	close(releaseAuth)
+
+	select {
+	case res := <-firstDone:
+		var closeErr *websocket.CloseError
+		if !errors.As(res.err, &closeErr) || closeErr.Code != websocket.CloseNormalClosure {
+			t.Errorf("first connection ended with %v, want normal close frame", res.err)
+		}
+		if res.messages != 0 {
+			t.Errorf("server received %d messages after auth, want none", res.messages)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not see the connection close after suspend mid-auth")
+	}
+
+	// Run must be paused, not reconnecting.
+	select {
+	case <-secondConnected:
+		t.Fatal("client reconnected while suspended")
+	case <-time.After(200 * time.Millisecond):
+	}
+	sc.mu.Lock()
+	if sc.conn != nil {
+		t.Error("sc.conn set after suspended mid-auth connect")
+	}
+	if !sc.failureStart.IsZero() {
+		t.Error("suspend mid-auth counted as a connection failure")
+	}
+	sc.mu.Unlock()
+
+	sc.Resume()
+	select {
+	case <-secondConnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not reconnect after Resume()")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Error("Run() did not return after cancel")
+	}
+}
+
 func TestSignalingClient_OversizedFrameRejected(t *testing.T) {
 	oversized := make([]byte, maxSignalingMessageSize+1)
 	for i := range oversized {
