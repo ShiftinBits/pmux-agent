@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,14 +52,36 @@ func ReadPIDFile(path string) (int, error) {
 	return pid, nil
 }
 
+// procArgs reads a process's argv. Package var so tests can fake an agent.
+var procArgs = readProcArgs
+
 // IsProcessRunning checks whether a process with the given PID is alive.
 // Uses kill(pid, 0) — signal 0 does not send a signal but checks for process existence.
+//
+// It does not check what the process is. A PID read from agent.pid may have
+// been reused by an unrelated process, so callers that signal that PID (or
+// spawn based on the result) must use IsAgentProcess instead.
 func IsProcessRunning(pid int) bool {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
 	return process.Signal(syscall.Signal(0)) == nil
+}
+
+// IsAgentProcess reports whether the process with the given PID is alive and
+// is a Pocketmux agent, i.e. its argv is `<...>/pmux agent run` as exec'd by
+// spawn. Only the base name of argv[0] is compared: after an update the
+// original executable path may be deleted or re-pointed by the package manager.
+func IsAgentProcess(pid int) bool {
+	if !IsProcessRunning(pid) {
+		return false
+	}
+	argv, err := procArgs(pid)
+	if err != nil || len(argv) < 3 {
+		return false
+	}
+	return filepath.Base(argv[0]) == "pmux" && argv[1] == "agent" && argv[2] == "run"
 }
 
 // RemovePIDFile removes the PID file at the given path.

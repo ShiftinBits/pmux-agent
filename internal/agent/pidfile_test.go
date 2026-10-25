@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -163,6 +164,61 @@ func TestIsProcessRunning_PID1(t *testing.T) {
 	// our own agent processes.
 	// Just verify it doesn't panic.
 	_ = IsProcessRunning(1)
+}
+
+// fakeAgentArgs makes procArgs report pid as a running `pmux agent run`, so a
+// test process can stand in for the agent. Other PIDs use the real argv.
+func fakeAgentArgs(t *testing.T, pid int) {
+	t.Helper()
+	orig := procArgs
+	t.Cleanup(func() { procArgs = orig })
+	procArgs = func(p int) ([]string, error) {
+		if p == pid {
+			return []string{"/usr/local/bin/pmux", "agent", "run"}, nil
+		}
+		return readProcArgs(p)
+	}
+}
+
+func TestIsAgentProcess(t *testing.T) {
+	tests := []struct {
+		name    string
+		pid     int
+		argv    []string
+		argsErr error
+		want    bool
+	}{
+		{name: "matching argv", pid: os.Getpid(), argv: []string{"/opt/homebrew/bin/pmux", "agent", "run"}, want: true},
+		{name: "argv[0] base not pmux", pid: os.Getpid(), argv: []string{"/usr/bin/sleep", "agent", "run"}, want: false},
+		{name: "missing run", pid: os.Getpid(), argv: []string{"/usr/local/bin/pmux", "agent"}, want: false},
+		{name: "procArgs error", pid: os.Getpid(), argsErr: errors.New("no such process"), want: false},
+		{name: "dead PID", pid: 999999999, argv: []string{"/usr/local/bin/pmux", "agent", "run"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := procArgs
+			t.Cleanup(func() { procArgs = orig })
+			procArgs = func(int) ([]string, error) { return tt.argv, tt.argsErr }
+
+			if got := IsAgentProcess(tt.pid); got != tt.want {
+				t.Errorf("IsAgentProcess(%d) = %v, want %v", tt.pid, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadProcArgs_CurrentProcess(t *testing.T) {
+	argv, err := readProcArgs(os.Getpid())
+	if err != nil {
+		t.Fatalf("readProcArgs: %v", err)
+	}
+	if len(argv) == 0 {
+		t.Fatal("readProcArgs returned an empty argv")
+	}
+	if got, want := filepath.Base(argv[0]), filepath.Base(os.Args[0]); got != want {
+		t.Errorf("argv[0] base = %q, want %q", got, want)
+	}
 }
 
 func TestRemovePIDFile_ExistingFile(t *testing.T) {

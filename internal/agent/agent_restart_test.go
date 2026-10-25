@@ -192,6 +192,7 @@ func TestRunAgentRestart_Running_StopsThenStarts(t *testing.T) {
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0600); err != nil {
 		t.Fatalf("write PID file: %v", err)
 	}
+	fakeAgentArgs(t, cmd.Process.Pid)
 
 	var buf bytes.Buffer
 	if err := RunAgentRestart(paths, store, &buf); err != nil {

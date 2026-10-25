@@ -29,7 +29,7 @@ func RunAgentStop(paths config.Paths, w io.Writer) error {
 		return ErrAgentNotRunning
 	}
 
-	if !IsProcessRunning(pid) {
+	if !IsAgentProcess(pid) {
 		fmt.Fprintln(w, "Agent is not running (stale PID file cleaned up)")
 		RemovePIDFile(pidFile)
 		return nil

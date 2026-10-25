@@ -36,7 +36,7 @@ CI (`.github/workflows/`): `build.yml` = vet + build; `test.yml` = unit tests + 
 
 Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstall [--keep-config] [-y]`, `update`, `agent`, `--version/-v`, `--help/-h`. `agent` subcommands: `start`, `stop`, `restart`, `status`, and internal `run` (what `spawn()` execs). Everything else (and no args) → `ensureAgent()` then `proxy.ExecTmux()`.
 
-**There is no OS service layer** (no launchd/systemd install). The agent is spawned by `EnsureRunning()` on any `pmux` command: `flock` on `agent.pid` → if alive send SIGUSR1, else spawn `pmux agent run` with `Setsid`. On macOS a launchd-spawned agent is faceless and never auto-allowed by the Application Firewall, forcing TURN relay.
+**There is no OS service layer** (no launchd/systemd install). The agent is spawned by `EnsureRunning()` on any `pmux` command: `flock` on `agent.pid` → if the PID is the agent (alive and its argv is `pmux agent run`, `IsAgentProcess`) send SIGUSR1; otherwise the pid file is treated as stale and a new `pmux agent run` is spawned with `Setsid`. On macOS a launchd-spawned agent is faceless and never auto-allowed by the Application Firewall, forcing TURN relay.
 
 ### Signals (agent process)
 

@@ -14,7 +14,7 @@ import (
 func RunAgentStart(paths config.Paths, store auth.SecretStore, w io.Writer) error {
 	// Check if already running
 	pidFile := PIDFilePath(paths)
-	if pid, err := ReadPIDFile(pidFile); err == nil && IsProcessRunning(pid) {
+	if pid, err := ReadPIDFile(pidFile); err == nil && IsAgentProcess(pid) {
 		fmt.Fprintf(w, "Agent is already running (PID %d)\n", pid)
 		return nil
 	}

@@ -61,6 +61,7 @@ func TestRunAgentStop_ProcessRunning_SIGTERMSent(t *testing.T) {
 	})
 
 	pid := cmd.Process.Pid
+	fakeAgentArgs(t, pid)
 
 	// Write a PID file pointing to our subprocess
 	pidPath := filepath.Join(paths.ConfigDir, pidFileName)

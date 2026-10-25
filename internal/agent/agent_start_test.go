@@ -20,6 +20,7 @@ func TestRunAgentStart_AlreadyRunning(t *testing.T) {
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
 		t.Fatalf("write PID file: %v", err)
 	}
+	fakeAgentArgs(t, os.Getpid())
 
 	var buf bytes.Buffer
 	err := RunAgentStart(paths, nil, &buf)
