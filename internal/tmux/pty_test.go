@@ -522,3 +522,87 @@ func TestAttachPane_SecondAttachDisplacesFirst(t *testing.T) {
 	}
 	readUntil(t, second, "DISPLACE_SURVIVES", 5*time.Second)
 }
+
+// TestAttachPane_PaneLockScope checks that a pane's lock serializes only that
+// pane's pipe-pane changes: while pane A's lock is held, an attach to pane B
+// completes, and an attach to pane A waits until the lock is released.
+func TestAttachPane_PaneLockScope(t *testing.T) {
+	skipIfNoTmux(t)
+	const socket = "pmux-pane-lock-test"
+	kill := func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() }
+	kill()
+	t.Cleanup(kill)
+	c := NewClient(socket)
+
+	if _, err := c.CreateSession("panelock", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneA := sessions[0].Windows[0].Panes[0].ID
+	if out, err := c.run("split-window", "-t", paneA); err != nil {
+		t.Fatalf("split-window: %v: %s", err, out)
+	}
+	sessions, err = c.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll after split: %v", err)
+	}
+	panes := sessions[0].Windows[0].Panes
+	if len(panes) != 2 {
+		t.Fatalf("expected 2 panes, got %d", len(panes))
+	}
+	paneB := panes[0].ID
+	if paneB == paneA {
+		paneB = panes[1].ID
+	}
+
+	tests := []struct {
+		name     string
+		target   string
+		waitsFor bool // whether the attach must wait for pane A's lock
+	}{
+		{"other pane", paneB, false},
+		{"same pane", paneA, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mu := c.lockPane(paneA)
+			held := true
+			t.Cleanup(func() {
+				if held {
+					mu.Unlock()
+				}
+			})
+
+			done := make(chan error, 1)
+			go func() {
+				bridge, err := c.AttachPane(tt.target, 80, 24)
+				if err == nil {
+					err = bridge.Close()
+				}
+				done <- err
+			}()
+
+			if tt.waitsFor {
+				select {
+				case err := <-done:
+					t.Fatalf("attach to %s finished while its lock was held (err %v)", tt.target, err)
+				case <-time.After(200 * time.Millisecond):
+				}
+				mu.Unlock()
+				held = false
+			}
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("AttachPane+Close on %s: %v", tt.target, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("attach to %s did not finish within 2s", tt.target)
+			}
+		})
+	}
+}

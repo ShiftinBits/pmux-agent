@@ -119,25 +119,28 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 	// This prevents command injection even if the path contained $(...)
 	// or backtick sequences.
 	//
-	// The pipe and the ownership record change together under pipesMu, so
-	// the record always names the bridge whose pipe tmux has open. A bridge
-	// this replaces is told so, since its FIFO will get no more output.
-	c.pipesMu.Lock()
+	// The pipe and the ownership record change together under the pane's
+	// lock, so the record always names the bridge whose pipe tmux has open.
+	// Attaches to other panes are not held up by this pane's pipe-pane. A
+	// bridge this replaces is told so, since its FIFO will get no more output.
+	mu := c.lockPane(paneID)
 	if _, err := c.run("pipe-pane", "-t", paneID,
 		fmt.Sprintf("exec sh -c 'cat > \"$0\"' %s", shellQuote(fifoPath))); err != nil {
-		c.pipesMu.Unlock()
+		mu.Unlock()
 		pipeR.Close()
 		pipeW.Close()
 		syscall.Close(fd)
 		os.RemoveAll(dir) //nolint:errcheck
 		return nil, fmt.Errorf("start pipe-pane: %w", err)
 	}
+	c.pipesMu.Lock()
 	if c.pipes == nil {
 		c.pipes = make(map[string]*PaneBridge)
 	}
 	prev := c.pipes[paneID]
 	c.pipes[paneID] = pb
 	c.pipesMu.Unlock()
+	mu.Unlock()
 	if prev != nil {
 		prev.displace()
 	}
@@ -351,15 +354,41 @@ func (pb *PaneBridge) Close() error {
 
 // releasePipe disables pipe-pane on pb's pane (an empty command removes the
 // pipe), but only while pb owns it: a pipe a newer bridge installed is left
-// running.
+// running. The pane's lock is held from the ownership check through the
+// disable, so a concurrent AttachPane on the pane can't install its pipe in
+// between and have it turned off here.
 func (c *Client) releasePipe(pb *PaneBridge) {
+	mu := c.lockPane(pb.paneID)
+	defer mu.Unlock()
 	c.pipesMu.Lock()
-	defer c.pipesMu.Unlock()
-	if c.pipes[pb.paneID] != pb {
+	owner := c.pipes[pb.paneID] == pb
+	if owner {
+		delete(c.pipes, pb.paneID)
+	}
+	c.pipesMu.Unlock()
+	if !owner {
 		return
 	}
-	delete(c.pipes, pb.paneID)
 	c.run("pipe-pane", "-t", pb.paneID) //nolint:errcheck
+}
+
+// lockPane locks and returns paneID's lock, creating it on first use. Lock
+// order: pipesMu is never held while acquiring a pane lock; a pane lock may be
+// held while briefly taking pipesMu. Entries are never removed, since a tmux
+// server hands out few pane IDs over its lifetime.
+func (c *Client) lockPane(paneID string) *sync.Mutex {
+	c.pipesMu.Lock()
+	if c.paneLocks == nil {
+		c.paneLocks = make(map[string]*sync.Mutex)
+	}
+	mu, ok := c.paneLocks[paneID]
+	if !ok {
+		mu = &sync.Mutex{}
+		c.paneLocks[paneID] = mu
+	}
+	c.pipesMu.Unlock()
+	mu.Lock()
+	return mu
 }
 
 // WindowForPane returns the "session_id:window_id" target for a pane.
