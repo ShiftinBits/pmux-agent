@@ -94,6 +94,17 @@ func TestStartSleepWatcher_Darwin_StartsAndStops(t *testing.T) {
 				cancel()
 			}
 			waitForMessage(t, messages, started, 2*time.Second)
+			if !tt.cancelEarly {
+				// The run loop must block until ctx is cancelled; returning on its
+				// own would mean the notification source was never added.
+				select {
+				case got := <-messages:
+					if got == stopped {
+						t.Fatal("run loop exited before ctx was cancelled")
+					}
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
 			cancel()
 			waitForMessage(t, messages, stopped, 2*time.Second)
 
