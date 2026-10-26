@@ -1581,7 +1581,7 @@ func (p *Peer) handleDataChannelMessage(data []byte) {
 	authed := p.authenticated
 	p.mu.Unlock()
 
-	decoded, err := protocol.Decode(data)
+	decoded, err := protocol.DecodeRequest(data)
 	if err != nil {
 		p.logger.Debug("failed to decode DataChannel message", "error", err)
 		if !authed {
