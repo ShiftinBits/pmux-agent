@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1108,5 +1109,93 @@ func verifyBinaryData(t *testing.T, got []byte, expected []int) {
 		if int(b) != expected[i] {
 			t.Errorf("data[%d] = 0x%02x, want 0x%02x", i, b, expected[i])
 		}
+	}
+}
+
+// --- DecodeRequest: peer-facing decoder ---
+
+func TestDecodeRequestRejectsEvents(t *testing.T) {
+	tests := []Message{
+		&SessionsEvent{Type: "sessions"},
+		&OutputEvent{Type: "output"},
+		&AttachedEvent{Type: "attached"},
+		&DetachedEvent{Type: "detached"},
+		&SessionEndedEvent{Type: "session_ended"},
+		&PaneClosedEvent{Type: "pane_closed"},
+		&SessionCreatedEvent{Type: "session_created"},
+		&AuthChallengeEvent{Type: "auth_challenge"},
+		&AuthConfirmEvent{Type: "auth_confirm"},
+		&ErrorEvent{Type: "error"},
+		&PongEvent{Type: "pong"},
+	}
+	for _, msg := range tests {
+		t.Run(msg.MessageType(), func(t *testing.T) {
+			data, err := Encode(msg)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			got, err := DecodeRequest(data)
+			if err == nil {
+				t.Fatalf("DecodeRequest returned %T, want error", got)
+			}
+			if !strings.Contains(err.Error(), "not accepted from a peer") {
+				t.Errorf("error = %q, want it to contain %q", err, "not accepted from a peer")
+			}
+		})
+	}
+}
+
+func TestDecodeRequestRejectsEventWithArrayField(t *testing.T) {
+	// fixmap(2) {"type": "sessions", "sessions": fixarray(0)}: well-formed, so the
+	// envelope pass succeeds and the rejection must come from the request gate.
+	data := []byte{0x82, 0xa4}
+	data = append(data, "type"...)
+	data = append(data, 0xa8)
+	data = append(data, "sessions"...)
+	data = append(data, 0xa8)
+	data = append(data, "sessions"...)
+	data = append(data, 0x90)
+
+	_, err := DecodeRequest(data)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "decode envelope") {
+		t.Fatalf("rejected by envelope pass, not the request gate: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not accepted from a peer") {
+		t.Fatalf("expected request-gate error, got: %v", err)
+	}
+}
+
+func TestDecodeRequestAcceptsRequests(t *testing.T) {
+	tests := []Message{
+		&ListSessionsRequest{Type: "list_sessions"},
+		&AttachRequest{Type: "attach", PaneID: "%1", Cols: 80, Rows: 24},
+		&DetachRequest{Type: "detach"},
+		&InputRequest{Type: "input", Data: []byte("ls\n")},
+		&ResizeRequest{Type: "resize", Cols: 80, Rows: 24},
+		&KillSessionRequest{Type: "kill_session", Session: "$1"},
+		&PingRequest{Type: "ping"},
+		&CreateSessionRequest{Type: "create_session"},
+		&AuthResponseRequest{Type: "auth_response", Mac: "bWFj", Nonce: "bm9uY2U="},
+	}
+	for _, msg := range tests {
+		t.Run(msg.MessageType(), func(t *testing.T) {
+			data, err := Encode(msg)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			got, err := DecodeRequest(data)
+			if err != nil {
+				t.Fatalf("DecodeRequest: %v", err)
+			}
+			if reflect.TypeOf(got) != reflect.TypeOf(msg) {
+				t.Errorf("got %T, want %T", got, msg)
+			}
+			if !reflect.DeepEqual(got, msg) {
+				t.Errorf("got %+v, want %+v", got, msg)
+			}
+		})
 	}
 }

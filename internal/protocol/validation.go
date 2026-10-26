@@ -25,7 +25,7 @@ const (
 	// Equal to MaxMessageSize by design (matches @pocketmux/shared): an output
 	// event whose payload exceeds this is rejected by the envelope size check
 	// in Decode() before Validate() can run, so OutputEvent.Validate() is
-	// defense-in-depth (output events are also dropped by the IsRequest gate).
+	// defense-in-depth (peer-sent output events are also rejected by DecodeRequest).
 	MaxOutputSize = 1 << 20
 	// MinDimension is the smallest allowed terminal dimension.
 	MinDimension = 1

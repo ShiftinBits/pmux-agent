@@ -5,12 +5,16 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 )
@@ -709,4 +713,37 @@ func TestPairSession(t *testing.T) {
 			t.Errorf("legacy session sent %s, want nothing", data)
 		}
 	})
+}
+
+func TestConnErrorSanitizesControlChars(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "fallthrough url error",
+			err: &url.Error{Op: "Post", URL: "https://signal.pmux.io/x",
+				Err: errors.New("x509: certificate is valid for \x1b[2Kfake\x07, not signal.pmux.io")},
+			want: "fake",
+		},
+		{
+			name: "op error formatted",
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("\x1b]0;x\x07refused")},
+			want: "refused",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := connError(tt.err)
+			for _, r := range got {
+				if !unicode.IsPrint(r) {
+					t.Errorf("connError() contains non-printable rune %U in %q", r, got)
+				}
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("connError() = %q, want it to contain %q", got, tt.want)
+			}
+		})
+	}
 }

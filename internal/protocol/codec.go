@@ -31,6 +31,18 @@ func Encode(msg Message) ([]byte, error) {
 // It inspects the "type" field first, then decodes into the correct Go struct.
 // Returns an error if the message exceeds MaxMessageSize.
 func Decode(data []byte) (Message, error) {
+	return decode(data, false)
+}
+
+// DecodeRequest decodes only Mobile-to-Host message types (requests plus
+// auth_response) and rejects every Host-to-Mobile event type before
+// unmarshalling, so slice-of-struct fields supplied by a peer are never
+// decoded. It is the decoder for the agent's DataChannel receive path.
+func DecodeRequest(data []byte) (Message, error) {
+	return decode(data, true)
+}
+
+func decode(data []byte, requestsOnly bool) (Message, error) {
 	if len(data) > MaxMessageSize {
 		return nil, fmt.Errorf("decode: message size %d exceeds maximum %d", len(data), MaxMessageSize)
 	}
@@ -92,6 +104,12 @@ func Decode(data []byte) (Message, error) {
 
 	default:
 		return nil, fmt.Errorf("decode: unknown message type %q", env.Type)
+	}
+
+	if requestsOnly && !IsRequest(msg) {
+		if _, isAuth := msg.(*AuthResponseRequest); !isAuth {
+			return nil, fmt.Errorf("decode: message type %q is not accepted from a peer", env.Type)
+		}
 	}
 
 	if err := msgpack.Unmarshal(data, msg); err != nil {
