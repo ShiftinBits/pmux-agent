@@ -3016,17 +3016,23 @@ func TestPeerManager_CloseAllFiresDisconnectPerPeer(t *testing.T) {
 	pm.mu.Unlock()
 
 	var mu sync.Mutex
-	var fired, closedAtFire []string
+	var fired, closedAtFire, dispatchingAtFire []string
 	pm.OnPeerDisconnect = func(id string) {
 		p := peers[id]
 		p.mu.Lock()
 		closed := p.closed
 		p.mu.Unlock()
+		p.dispatchMu.Lock()
+		stopped := p.dispatchStopped
+		p.dispatchMu.Unlock()
 		mu.Lock()
 		defer mu.Unlock()
 		fired = append(fired, id)
 		if closed {
 			closedAtFire = append(closedAtFire, id)
+		}
+		if !stopped {
+			dispatchingAtFire = append(dispatchingAtFire, id)
 		}
 	}
 
@@ -3035,12 +3041,16 @@ func TestPeerManager_CloseAllFiresDisconnectPerPeer(t *testing.T) {
 	mu.Lock()
 	gotFired := slices.Sorted(slices.Values(fired))
 	gotClosedAtFire := append([]string(nil), closedAtFire...)
+	gotDispatchingAtFire := append([]string(nil), dispatchingAtFire...)
 	mu.Unlock()
 	if !slices.Equal(gotFired, ids) {
 		t.Errorf("OnPeerDisconnect fired for %v, want each of %v once", gotFired, ids)
 	}
 	if len(gotClosedAtFire) > 0 {
 		t.Errorf("OnPeerDisconnect ran after Close for %v, want it before", gotClosedAtFire)
+	}
+	if len(gotDispatchingAtFire) > 0 {
+		t.Errorf("OnPeerDisconnect ran while %v still dispatched requests, want dispatch stopped first", gotDispatchingAtFire)
 	}
 	for id, p := range peers {
 		select {
@@ -3051,6 +3061,101 @@ func TestPeerManager_CloseAllFiresDisconnectPerPeer(t *testing.T) {
 	}
 	if n := pm.PeerCount(); n != 0 {
 		t.Errorf("%d peers tracked after CloseAll, want 0", n)
+	}
+}
+
+// encodeTestAttach returns an encoded attach request that passes validation.
+func encodeTestAttach(t *testing.T) []byte {
+	t.Helper()
+	data, err := protocol.Encode(&protocol.AttachRequest{Type: "attach", PaneID: "%1", Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("encode attach: %v", err)
+	}
+	return data
+}
+
+// newDispatchTestPeer returns an authenticated bare peer whose handler is h.
+func newDispatchTestPeer(h ProtocolHandler) *Peer {
+	p := newBarePeer("mobile-dispatch")
+	p.authenticated = true
+	p.handler = h
+	return p
+}
+
+// TestPeer_StopDispatch checks that a request reaches the handler until
+// stopDispatch is called, and never after.
+func TestPeer_StopDispatch(t *testing.T) {
+	tests := []struct {
+		name          string
+		stopFirst     bool
+		wantDelivered bool
+	}{
+		{name: "before stopDispatch reaches the handler", stopFirst: false, wantDelivered: true},
+		{name: "after stopDispatch is dropped", stopFirst: true, wantDelivered: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []protocol.Message
+			p := newDispatchTestPeer(func(_ string, msg protocol.Message) { got = append(got, msg) })
+			if tt.stopFirst {
+				p.stopDispatch()
+			}
+
+			p.handleDataChannelMessage(encodeTestAttach(t))
+
+			if !tt.wantDelivered {
+				if len(got) != 0 {
+					t.Errorf("handler received %d messages after stopDispatch, want 0", len(got))
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("handler received %d messages, want 1", len(got))
+			}
+			if req, ok := got[0].(*protocol.AttachRequest); !ok || req.PaneID != "%1" {
+				t.Errorf("handler received %#v, want the attach request for %%1", got[0])
+			}
+		})
+	}
+}
+
+// TestPeer_StopDispatchWaitsForInFlightHandler checks that stopDispatch does
+// not return while a handler call is still running, so the disconnect handler
+// that follows it never overlaps a request.
+func TestPeer_StopDispatchWaitsForInFlightHandler(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFn)
+
+	p := newDispatchTestPeer(func(string, protocol.Message) {
+		close(entered)
+		<-release
+	})
+	go p.handleDataChannelMessage(encodeTestAttach(t))
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was never called")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		p.stopDispatch()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stopDispatch returned while a handler call was in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseFn()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopDispatch did not return after the handler call finished")
 	}
 }
 

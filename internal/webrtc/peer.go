@@ -172,6 +172,17 @@ type Peer struct {
 	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
 	silenced      bool                      // when true, OnICECandidate stops sending; set synchronously on reconnect
 
+	// dispatchMu serializes inbound DataChannel message handling with
+	// stopDispatch: handleDataChannelMessage holds it across the whole
+	// dispatch, including the handler call. Once dispatchStopped is set no
+	// further request reaches the handler, so the disconnect handler cannot
+	// race a late request that rebuilds handler state. Separate from silenced
+	// (ICE only) and closed. dispatchMu is taken only there and in
+	// stopDispatch, never while holding pm.mu or p.mu, so the order is
+	// dispatchMu before pm.mu before p.mu (a handler send takes both).
+	dispatchMu      sync.Mutex
+	dispatchStopped bool // guarded by dispatchMu
+
 	// Mutual key-possession proof, bound to the DTLS session. The peer must
 	// prove it holds the pairing shared secret before any request is processed,
 	// and the host proves it back with auth_confirm. Set at creation; auth state
@@ -545,13 +556,15 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 	// The disconnect handler runs first, without pm.mu held: it restores the
 	// pane and releases the pipe, and must finish even when Close outlasts the
 	// shutdown bound. The map is already cleared, so the Closed state callback
-	// does not fire the handler a second time.
+	// does not fire the handler a second time. Dispatch stops first, so a
+	// request arriving mid-teardown cannot rebuild the handler state.
 	var notifyWg, closeWg sync.WaitGroup
 	for deviceID, p := range peers {
 		notifyWg.Add(1)
 		closeWg.Add(1)
 		go func() {
 			defer closeWg.Done()
+			p.stopDispatch()
 			if pm.OnPeerDisconnect != nil {
 				pm.OnPeerDisconnect(deviceID)
 			}
@@ -602,6 +615,9 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 	pm.cleanupWg.Add(1)
 	go func() {
 		defer pm.cleanupWg.Done()
+		// The peer is closed either way, so stop its dispatch before the
+		// handler teardown.
+		peer.stopDispatch()
 		pm.mu.Lock()
 		current := pm.peers[deviceID] == peer
 		pm.mu.Unlock()
@@ -765,6 +781,9 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 			torn := make(chan struct{})
 			pm.goTeardown(func() {
 				defer close(torn)
+				// Here, not beside silence(): that runs under pm.mu, and
+				// this can wait on an in-flight request.
+				oldPeer.stopDispatch()
 				pm.OnPeerDisconnect(mobileDeviceID)
 			})
 			select {
@@ -1495,45 +1514,75 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 					"stack", string(debug.Stack()))
 			}
 		}()
-
-		p.mu.Lock()
-		authed := p.authenticated
-		p.mu.Unlock()
-
-		decoded, err := protocol.Decode(msg.Data)
-		if err != nil {
-			p.logger.Debug("failed to decode DataChannel message", "error", err)
-			if !authed {
-				// A pre-auth message that doesn't decode (e.g. an outdated
-				// app's v1 auth_response) can never authenticate: free the
-				// peer slot now instead of at the auth timeout.
-				p.failAuth("undecodable message before authentication")
-			}
-			return
-		}
-
-		// Key-possession gate (SB-992): until the peer proves it holds the
-		// pairing shared secret, the only message accepted is the auth
-		// response. This authenticates the peer independently of the
-		// (untrusted) signaling server.
-		if !authed {
-			p.verifyAuthResponse(decoded)
-			return
-		}
-
-		// Only accept request-direction messages from mobile. (auth_response
-		// is deliberately excluded from IsRequest, so a post-auth replay is
-		// dropped here.)
-		if !protocol.IsRequest(decoded) {
-			p.logger.Debug("ignoring non-request message from mobile",
-				"type", decoded.MessageType(), "device", p.DeviceID)
-			return
-		}
-
-		if p.handler != nil {
-			p.handler(p.DeviceID, decoded)
-		}
+		p.handleDataChannelMessage(msg.Data)
 	})
+}
+
+// handleDataChannelMessage decodes one inbound DataChannel message and
+// dispatches it: the auth response before authentication, requests to the
+// handler afterwards. It runs under dispatchMu so stopDispatch can wait out an
+// in-flight call, and drops the message once dispatch is stopped. Pion
+// delivers OnMessage serially per DataChannel, so only stopDispatch contends
+// for the lock. failAuth and closeViaManager only spawn the teardown, which
+// takes dispatchMu after this returns, so calling them here cannot deadlock.
+func (p *Peer) handleDataChannelMessage(data []byte) {
+	p.dispatchMu.Lock()
+	defer p.dispatchMu.Unlock()
+	if p.dispatchStopped {
+		p.logger.Debug("dropping DataChannel message: dispatch stopped", "device", p.DeviceID)
+		return
+	}
+
+	p.mu.Lock()
+	authed := p.authenticated
+	p.mu.Unlock()
+
+	decoded, err := protocol.Decode(data)
+	if err != nil {
+		p.logger.Debug("failed to decode DataChannel message", "error", err)
+		if !authed {
+			// A pre-auth message that doesn't decode (e.g. an outdated
+			// app's v1 auth_response) can never authenticate: free the
+			// peer slot now instead of at the auth timeout.
+			p.failAuth("undecodable message before authentication")
+		}
+		return
+	}
+
+	// Key-possession gate (SB-992): until the peer proves it holds the
+	// pairing shared secret, the only message accepted is the auth
+	// response. This authenticates the peer independently of the
+	// (untrusted) signaling server.
+	if !authed {
+		p.verifyAuthResponse(decoded)
+		return
+	}
+
+	// Only accept request-direction messages from mobile. (auth_response
+	// is deliberately excluded from IsRequest, so a post-auth replay is
+	// dropped here.)
+	if !protocol.IsRequest(decoded) {
+		p.logger.Debug("ignoring non-request message from mobile",
+			"type", decoded.MessageType(), "device", p.DeviceID)
+		return
+	}
+
+	if p.handler != nil {
+		p.handler(p.DeviceID, decoded)
+	}
+}
+
+// stopDispatch stops the peer from dispatching DataChannel messages. Because
+// handleDataChannelMessage holds dispatchMu across the dispatch, it also waits
+// out a handler call already in progress. Once it returns no further request
+// reaches the handler, so a following OnPeerDisconnect cannot race a late
+// attach that rebuilds handler state. The wait is at most one handler call
+// (for attach: its tmux subprocesses plus a pre-stream send bounded by the 5s
+// backpressure timeout). Caller must not hold pm.mu or p.mu.
+func (p *Peer) stopDispatch() {
+	p.dispatchMu.Lock()
+	p.dispatchStopped = true
+	p.dispatchMu.Unlock()
 }
 
 // sendAuthChallenge generates a random nonce, sends it to the peer as an
