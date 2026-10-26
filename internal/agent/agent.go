@@ -254,13 +254,15 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 	// Proactively mark the host offline the instant it is about to sleep, so
 	// presence is accurate immediately instead of after the server's idle
 	// timeout. It complements keep_awake: when keep_awake is off (or unable to
-	// block sleep — lid close, etc.) this is the safety net. When keep_awake IS
-	// blocking sleep, the watcher is skipped — the sleeps that can still slip past
-	// a block inhibitor (firmware/kernel suspends, e.g. a direct ACPI or
-	// critical-battery suspend) bypass logind and never fire PrepareForSleep, so
-	// the watcher would hold an idle inhibitor for nothing; the server's freshness
-	// gate is the backstop for that rare case.
-	// Linux-only today; a no-op on other platforms.
+	// block sleep — lid close, etc.) this is the safety net. On Linux, when
+	// keep_awake IS blocking sleep, the watcher is skipped — the sleeps that can
+	// still slip past a block inhibitor (firmware/kernel suspends, e.g. a direct
+	// ACPI or critical-battery suspend) bypass logind and never fire
+	// PrepareForSleep, so the watcher would hold an idle inhibitor for nothing;
+	// the server's freshness gate is the backstop for that rare case. On macOS
+	// the watcher runs regardless, because caffeinate -i doesn't block lid-close
+	// sleep.
+	// Covers Linux (logind) and macOS (IOKit); a no-op on other platforms.
 	startSleepWatcher(ctx, logger, cfg.Power.KeepAwake, signalingClient.Suspend, signalingClient.Resume)
 
 	// Handle SIGUSR1 to wake signaling client from dormancy.
@@ -275,8 +277,10 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 				signal.Stop(usr2Ch)
 				return
 			case <-usr1Ch:
-				logger.Info("SIGUSR1 received, signaling activity")
-				signalingClient.SignalActivity()
+				// A pmux command proves the host is awake, so this also clears a
+				// suspension left by a missed wake notification.
+				logger.Info("SIGUSR1 received, resuming signaling")
+				signalingClient.Resume()
 			case <-usr2Ch:
 				logger.Info("SIGUSR2 received, reloading pairing state")
 				device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
