@@ -1145,23 +1145,26 @@ func TestDecodeRequestRejectsEvents(t *testing.T) {
 	}
 }
 
-func TestDecodeRequestRejectsHugeArrayHeader(t *testing.T) {
-	// fixmap(2) {"type": "sessions", "sessions": array32 len 0xffffffff}, truncated.
-	// Must never reach the permissive Decode: that is a real fatal allocation.
-	data := []byte{0x82}
-	data = append(data, 0xa4)
+func TestDecodeRequestRejectsEventWithArrayField(t *testing.T) {
+	// fixmap(2) {"type": "sessions", "sessions": fixarray(0)}: well-formed, so the
+	// envelope pass succeeds and the rejection must come from the request gate.
+	data := []byte{0x82, 0xa4}
 	data = append(data, "type"...)
 	data = append(data, 0xa8)
 	data = append(data, "sessions"...)
 	data = append(data, 0xa8)
 	data = append(data, "sessions"...)
-	data = append(data, 0xdd, 0xff, 0xff, 0xff, 0xff)
+	data = append(data, 0x90)
 
-	// The payload is truncated, so the envelope pass (which skips the array
-	// without allocating) fails before the event gate is reached. Either way
-	// DecodeRequest must return an error without decoding the array.
-	if _, err := DecodeRequest(data); err == nil {
+	_, err := DecodeRequest(data)
+	if err == nil {
 		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "decode envelope") {
+		t.Fatalf("rejected by envelope pass, not the request gate: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not accepted from a peer") {
+		t.Fatalf("expected request-gate error, got: %v", err)
 	}
 }
 

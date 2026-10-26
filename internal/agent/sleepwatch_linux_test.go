@@ -2,31 +2,36 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/godbus/dbus/v5"
 )
 
-func TestIsFromLogind(t *testing.T) {
+func TestSenderTrusted(t *testing.T) {
+	errLookup := errors.New("lookup failed")
 	tests := []struct {
-		name   string
-		sender string
-		owner  string
-		want   bool
+		name      string
+		sender    string
+		owner     string
+		err       error
+		lastOwner string
+		want      bool
+		wantKnown string
 	}{
-		{"matching unique name", ":1.42", ":1.42", true},
-		{"different sender", ":1.99", ":1.42", false},
-		{"empty owner", ":1.42", "", false},
-		{"empty sender and empty owner", "", "", false},
+		{"lookup ok matching", ":1.42", ":1.42", nil, ":1.1", true, ":1.42"},
+		{"lookup ok mismatch", ":1.99", ":1.42", nil, ":1.42", false, ":1.42"},
+		{"lookup ok empty owner", ":1.42", "", nil, ":1.42", false, ""},
+		{"lookup fails, matches last owner", ":1.42", "", errLookup, ":1.42", true, ":1.42"},
+		{"lookup fails, differs from last owner", ":1.99", "", errLookup, ":1.42", false, ":1.42"},
+		{"lookup fails, no last owner", ":1.42", "", errLookup, "", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sig := &dbus.Signal{Sender: tt.sender}
-			if got := isFromLogind(sig, tt.owner); got != tt.want {
-				t.Errorf("isFromLogind(%q, %q) = %v, want %v", tt.sender, tt.owner, got, tt.want)
+			got, known := senderTrusted(tt.sender, tt.owner, tt.err, tt.lastOwner)
+			if got != tt.want || known != tt.wantKnown {
+				t.Errorf("senderTrusted() = (%v, %q), want (%v, %q)", got, known, tt.want, tt.wantKnown)
 			}
 		})
 	}

@@ -106,8 +106,10 @@ func decode(data []byte, requestsOnly bool) (Message, error) {
 		return nil, fmt.Errorf("decode: unknown message type %q", env.Type)
 	}
 
-	if requestsOnly && IsEvent(msg) {
-		return nil, fmt.Errorf("decode: message type %q is not accepted from a peer", env.Type)
+	if requestsOnly && !IsRequest(msg) {
+		if _, isAuth := msg.(*AuthResponseRequest); !isAuth {
+			return nil, fmt.Errorf("decode: message type %q is not accepted from a peer", env.Type)
+		}
 	}
 
 	if err := msgpack.Unmarshal(data, msg); err != nil {
