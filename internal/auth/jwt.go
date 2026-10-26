@@ -74,9 +74,38 @@ func fetchChallengeContext(ctx context.Context, deviceID, serverURL string, clie
 	return chalResp.Nonce, nil
 }
 
+// withoutRedirects returns a copy of client that hands back 3xx responses
+// instead of following them. The challenge signature is bound to the origin of
+// the configured server URL, so a redirect (which also turns a POST into a GET)
+// would make the server verify against a different origin.
+func withoutRedirects(client *http.Client) *http.Client {
+	cp := *client
+	cp.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &cp
+}
+
+// signedRequestError builds the error for a non-200 response to a request
+// carrying an origin-bound challenge signature. A 401 or 3xx is the
+// signature of an origin mismatch (proxy rewrite or redirect) or of a server
+// that predates origin-bound verification, so those name the signed origin.
+func signedRequestError(statusCode int, body []byte, origin string) error {
+	msg := serverError(statusCode, body)
+	switch {
+	case statusCode == http.StatusUnauthorized:
+		msg += fmt.Sprintf(" (challenge was signed for origin %s: the server must be on a version that verifies origin-bound signatures and must see this exact origin)", origin)
+	case statusCode >= 300 && statusCode < 400:
+		msg += fmt.Sprintf(" (redirects are not followed because the challenge signature is bound to origin %s; point the server URL at the final origin)", origin)
+	}
+	return errors.New(msg)
+}
+
 // ExchangeToken fetches a server-issued nonce, signs the challenge with the identity
 // key, and exchanges it for a JWT.
 // serverURL should be the base URL of the signaling server (e.g., "https://signal.pmux.io").
+//
+// The signature is bound to the server's origin (see Identity.SignChallenge) and
+// the client never falls back to an unbound form, so the server must be
+// deployed with origin-bound verification before agents that use this version.
 func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecret string) (string, error) {
 	return ExchangeTokenContext(context.Background(), id, serverURL, client, hmacSecret)
 }
@@ -88,6 +117,7 @@ func ExchangeTokenContext(ctx context.Context, id *Identity, serverURL string, c
 	if err != nil {
 		return "", fmt.Errorf("canonical server origin: %w", err)
 	}
+	client = withoutRedirects(client)
 	nonce, err := fetchChallengeContext(ctx, id.DeviceID, serverURL, client, hmacSecret)
 	if err != nil {
 		return "", err
@@ -131,7 +161,7 @@ func ExchangeTokenContext(ctx context.Context, id *Identity, serverURL string, c
 		if hmacErr := CheckHMACRejection(resp.StatusCode, respBody, serverURL); hmacErr != nil {
 			return "", hmacErr
 		}
-		return "", errors.New(serverError(resp.StatusCode, respBody))
+		return "", signedRequestError(resp.StatusCode, respBody, origin)
 	}
 
 	var tokenResp tokenResponse

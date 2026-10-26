@@ -41,6 +41,26 @@ func TestInitiatePairing(t *testing.T) {
 		}
 	}
 
+	t.Run("invalid server URL fails before any request", func(t *testing.T) {
+		for _, badURL := range []string{"https://user@host.example", "signal.pmux.io"} {
+			hits := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+			}))
+			defer server.Close()
+
+			client := server.Client()
+			client.Transport = rewriteTransport{target: server.URL}
+			_, err := InitiatePairing(id, "x25519key", badURL, client, "host", "")
+			if err == nil || !strings.Contains(err.Error(), "canonical server origin") {
+				t.Errorf("InitiatePairing(%q) error = %v, want canonical server origin error", badURL, err)
+			}
+			if hits != 0 {
+				t.Errorf("InitiatePairing(%q) sent %d requests, want 0", badURL, hits)
+			}
+		}
+	})
+
 	t.Run("successful initiation", func(t *testing.T) {
 		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/auth/pair/initiate" {

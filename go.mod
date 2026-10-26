@@ -13,6 +13,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/crypto v0.55.0
+	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
 )
 
@@ -37,6 +38,6 @@ require (
 	github.com/pion/turn/v4 v4.1.4 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )

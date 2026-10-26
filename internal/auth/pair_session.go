@@ -83,11 +83,16 @@ type PairCompleteMessage struct {
 // InitiatePairing calls the server to create a pairing session.
 // The name parameter is an optional human-readable host name sent to the server
 // so it can be displayed on paired mobile devices.
+//
+// The challenge signature is bound to the server's origin and never falls back
+// to an unbound form, so the server must verify origin-bound signatures (deploy
+// the server first) before agents that use this version.
 func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client, name string, hmacSecret string) (*PairInitiateResponse, error) {
 	origin, err := canonicalOrigin(serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("canonical server origin: %w", err)
 	}
+	client = withoutRedirects(client)
 	nonce, err := fetchChallenge(id.DeviceID, serverURL, client, hmacSecret)
 	if err != nil {
 		return nil, err
@@ -141,7 +146,7 @@ func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, 
 		if hmacErr := CheckHMACRejection(resp.StatusCode, respBody, serverURL); hmacErr != nil {
 			return nil, hmacErr
 		}
-		return nil, errors.New(serverError(resp.StatusCode, respBody))
+		return nil, signedRequestError(resp.StatusCode, respBody, origin)
 	}
 
 	var result PairInitiateResponse
