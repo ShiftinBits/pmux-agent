@@ -101,7 +101,10 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 				} else {
 					logger.Info("host resumed from sleep, refreshing presence")
 					onResume()
-					// Re-arm the delay inhibitor for the next sleep cycle.
+					// Re-arm the delay inhibitor for the next sleep cycle. Release
+					// any lock still held (a sleep signal that was ignored) so it
+					// can't leak and delay every later suspend.
+					releaseSleepDelay(delayFd)
 					delayFd = takeSleepDelay(ctx, conn, logger)
 				}
 			}
