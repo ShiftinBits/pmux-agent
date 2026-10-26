@@ -815,6 +815,14 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		pm.logger.Info("dropping new peer: peers closed during connect", "mobile", mobileDeviceID)
 		return
 	}
+	// A pairing reload may have changed the allowed device after the early
+	// check (e.g. while TURN credentials were fetched) and already reopened.
+	if pm.allowedDeviceID != mobileDeviceID {
+		pm.mu.Unlock()
+		pc.Close()
+		pm.logger.Info("dropping new peer: device no longer paired", "mobile", mobileDeviceID)
+		return
+	}
 	// Re-check limit under lock to prevent TOCTOU race if HandleSignalingMessage
 	// is called concurrently (the early check above is an unlocked fast path).
 	if _, replacing := pm.peers[mobileDeviceID]; !replacing && len(pm.peers) >= pm.MaxPeers {
@@ -1156,22 +1164,23 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 
 	case webrtc.PeerConnectionStateFailed:
 		// Connection unrecoverable — cancel timers, notify handler, and close.
-		pm.stopTimersLocked(deviceID)
-		// Only cleanup if the tracked peer is the same one that fired.
-		// During reconnect, a stale callback from the old peer may fire after
-		// a new peer is stored under the same device ID.
+		// Only act if the tracked peer is the same one that fired. During
+		// reconnect (or after a reload reopened the manager while the old
+		// peer's Close was still running), a stale callback from the old peer
+		// may fire after a new peer is stored under the same device ID; the
+		// device-keyed timers then belong to the new peer.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
+			pm.stopTimersLocked(deviceID)
 			pm.logger.Info("peer connection failed, closing peer", "mobile", deviceID)
 			pm.scheduleCleanup(peer)
 		}
 
 	case webrtc.PeerConnectionStateClosed:
-		// Peer connection closed — cancel timers and notify handler.
-		pm.stopTimersLocked(deviceID)
-		// Only cleanup if the tracked peer is the same one that fired.
-		// During reconnect, a stale callback from the old peer may fire after
-		// a new peer is stored under the same device ID.
+		// Peer connection closed — cancel timers and notify handler. Same
+		// identity guard as Failed: a stale peer must not stop the new
+		// peer's timers.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
+			pm.stopTimersLocked(deviceID)
 			pm.scheduleCleanup(peer)
 		}
 	}

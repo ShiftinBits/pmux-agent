@@ -154,8 +154,9 @@ func (c *Client) AttachPane(paneID string, cols, rows int) (*PaneBridge, error) 
 }
 
 // waitReadable blocks until the FIFO fd is readable or relayPollInterval
-// elapses, retrying on EINTR. Any other poll error returns immediately so
-// the caller's next read surfaces it.
+// elapses, retrying on EINTR. On any other poll error it waits out the
+// interval (or until Close) instead, so a persistent poll failure can't turn
+// the relay's read/EAGAIN loop into a busy spin.
 func (pb *PaneBridge) waitReadable() {
 	fds := []unix.PollFd{{Fd: int32(pb.fifoFd), Events: unix.POLLIN}}
 	deadline := time.Now().Add(relayPollInterval)
@@ -168,9 +169,19 @@ func (pb *PaneBridge) waitReadable() {
 		if ms < 1 {
 			ms = 1
 		}
-		if _, err := unix.Poll(fds, ms); err != unix.EINTR {
-			return
+		_, err := unix.Poll(fds, ms)
+		if err == unix.EINTR {
+			continue
 		}
+		if err != nil {
+			timer := time.NewTimer(remaining)
+			select {
+			case <-pb.done:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+		return
 	}
 }
 
