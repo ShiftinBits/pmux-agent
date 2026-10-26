@@ -1,6 +1,7 @@
 package webrtc
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -47,10 +48,17 @@ const DataChannelLabel = "terminal"
 // fires the OnBufferedAmountLow callback, enabling backpressure-aware sending.
 const bufferedAmountLowThreshold = 4096
 
-// maxBufferedAmount is the byte threshold above which SendRaw/SendMessage
-// block waiting for the buffer to drain. 512KB is generous for terminal data
-// (typically kilobytes) while preventing unbounded growth.
+// maxBufferedAmount is the byte threshold above which SendRaw and output
+// sends via SendMessage block waiting for the buffer to drain. 512KB is
+// generous for terminal data (typically kilobytes) while preventing unbounded
+// growth.
 const maxBufferedAmount = 512 * 1024
+
+// maxControlBufferedAmount is the hard ceiling for control messages, which do
+// not wait on the output gate: above it they are refused instead of queued, so
+// buffer growth stays bounded during a stall. It sits above maxBufferedAmount
+// so a stall notice still fits behind output parked at the gate.
+const maxControlBufferedAmount = 2 * maxBufferedAmount
 
 // sendReadyTimeout is the maximum time to wait for the DataChannel buffer
 // to drain before returning an error. Prevents permanent deadlock if the
@@ -138,7 +146,8 @@ type PeerManager struct {
 	iceRestartTimers map[string]*time.Timer // ICE-restart answer watchdogs (kept apart from grace timers, SB-1008)
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
 	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
-	closed           bool                   // true after CloseAll() returns
+	closed           bool                   // true while closeAll runs, and after CloseAll; cleared by CloseAllAndReopen
+	shutDown         bool                   // set by CloseAll; keeps an overlapping CloseAllAndReopen from reopening
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
 	turnCache        []webrtc.ICEServer     // cached TURN credentials
 	turnCacheTime    time.Time              // when turnCache was last populated
@@ -360,10 +369,28 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 	// Close off the signaling read loop: a Pion close can stall, and the
 	// mobile's retry is about to arrive on this same loop.
 	pm.logger.Info("closing half-built peer after peer_unavailable", "mobile", deviceID)
-	pm.cleanupWg.Add(1)
+	pm.goCleanup(func() { pm.ClosePeerIfCurrent(deviceID, peer) })
+}
+
+// goCleanup runs fn in a background goroutine, tracked by cleanupWg while the
+// manager is open. The Add happens under pm.mu behind the closed check, as in
+// scheduleCleanup, so it can never race closeAll's cleanupWg.Wait. Once closed,
+// fn still runs, untracked, as closeViaManager does: the peer fn tears down may
+// be missing from closeAll's snapshot (removed from the map first, or added
+// after the snapshot), so skipping it would leak the peer. Caller must not hold
+// pm.mu.
+func (pm *PeerManager) goCleanup(fn func()) {
+	pm.mu.Lock()
+	tracked := !pm.closed
+	if tracked {
+		pm.cleanupWg.Add(1)
+	}
+	pm.mu.Unlock()
 	go func() {
-		defer pm.cleanupWg.Done()
-		pm.ClosePeerIfCurrent(deviceID, peer)
+		if tracked {
+			defer pm.cleanupWg.Done()
+		}
+		fn()
 	}()
 }
 
@@ -425,15 +452,43 @@ func (pm *PeerManager) stopTimersLocked(deviceID string) {
 	delete(pm.disconnectTimes, deviceID)
 }
 
-// CloseAll closes all peer connections and waits for background cleanup
-// goroutines (from state change handlers) to finish.
+// CloseAll closes all peer connections for agent shutdown and waits for
+// background cleanup goroutines (from state change handlers) to finish. The
+// manager stays closed: no further cleanup is scheduled.
 func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
-	pm.closed = true
-	peers := make([]*Peer, 0, len(pm.peers))
-	for _, p := range pm.peers {
-		peers = append(peers, p)
+	pm.shutDown = true
+	pm.mu.Unlock()
+	pm.closeAll(true)
+}
+
+// CloseAllAndReopen closes all peer connections, as CloseAll does, then reopens
+// the manager so peers that connect afterwards get the normal cleanup and ICE
+// restart handling. Used when the pairing state is reloaded. It reopens once
+// the disconnect handlers and cleanup goroutines are done, without waiting for
+// the old peers' Pion Close (30s+ for an unreachable peer): connect requests
+// are dropped while closed, and a re-paired phone connects right away. The old
+// peers are already out of the map, so their Closed callbacks are no-ops.
+// Reusing cleanupWg is safe because closeAll has returned from cleanupWg.Wait
+// and new Adds only happen once closed is cleared. A CloseAll that overlaps the
+// reload wins and the manager stays closed.
+func (pm *PeerManager) CloseAllAndReopen() {
+	pm.closeAll(false)
+	pm.mu.Lock()
+	if !pm.shutDown {
+		pm.closed = false
 	}
+	pm.mu.Unlock()
+}
+
+// closeAll marks the manager closed, notifies the disconnect handler and closes
+// every tracked peer, then waits for the tracked cleanup goroutines. With
+// waitClose false it returns once every disconnect handler has run and leaves
+// the peers' Close running in the background.
+func (pm *PeerManager) closeAll(waitClose bool) {
+	pm.mu.Lock()
+	pm.closed = true
+	peers := pm.peers
 	closedCount := len(peers)
 	pm.peers = make(map[string]*Peer)
 
@@ -451,15 +506,27 @@ func (pm *PeerManager) CloseAll() {
 
 	// Close peers in parallel so one stuck Pion DTLS shutdown doesn't
 	// block cleanup of other peers (each Close can take 30s+ if unreachable).
-	var closeWg sync.WaitGroup
-	for _, p := range peers {
+	// The disconnect handler runs first, without pm.mu held: it restores the
+	// pane and releases the pipe, and must finish even when Close outlasts the
+	// shutdown bound. The map is already cleared, so the Closed state callback
+	// does not fire the handler a second time.
+	var notifyWg, closeWg sync.WaitGroup
+	for deviceID, p := range peers {
+		notifyWg.Add(1)
 		closeWg.Add(1)
-		go func(peer *Peer) {
+		go func() {
 			defer closeWg.Done()
-			peer.Close()
-		}(p)
+			if pm.OnPeerDisconnect != nil {
+				pm.OnPeerDisconnect(deviceID)
+			}
+			notifyWg.Done()
+			p.Close()
+		}()
 	}
-	closeWg.Wait()
+	notifyWg.Wait()
+	if waitClose {
+		closeWg.Wait()
+	}
 
 	// Wait for any in-flight cleanup goroutines spawned by handlePeerStateChange
 	// or attemptICERestart to finish before returning.
@@ -501,6 +568,13 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 	}()
 }
 
+// isClosed reports whether the manager is closed (see the closed field).
+func (pm *PeerManager) isClosed() bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.closed
+}
+
 // PeerCount returns the number of active peer connections.
 func (pm *PeerManager) PeerCount() int {
 	pm.mu.Lock()
@@ -523,7 +597,8 @@ func (pm *PeerManager) PeerStates() map[string]string {
 }
 
 // SendTo sends a protocol message to a specific peer via their DataChannel.
-func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
+// Canceling ctx releases an output send waiting on backpressure.
+func (pm *PeerManager) SendTo(ctx context.Context, deviceID string, msg protocol.Message) error {
 	pm.mu.Lock()
 	peer, ok := pm.peers[deviceID]
 	pm.mu.Unlock()
@@ -532,13 +607,24 @@ func (pm *PeerManager) SendTo(deviceID string, msg protocol.Message) error {
 		return fmt.Errorf("no peer connection for device %s", deviceID)
 	}
 
-	return peer.SendMessage(msg)
+	return peer.SendMessageContext(ctx, msg)
 }
 
 // handleConnectRequest creates a new peer connection and SDP offer for an incoming mobile client.
 func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	requestStart := time.Now()
 	pm.logger.Info("connect_request received", "mobile", mobileDeviceID, "attempt", attemptID)
+
+	// While closed (shutdown, or a pairing reload closing every peer) a new
+	// peer would miss its cleanup and watchdogs, which check closed, and could
+	// hold the single peer slot after the reopen. Drop the request without a
+	// connection_rejected: the mobile treats unknown reasons as not_paired.
+	// It retries after the server's peer_unavailable. The insert below
+	// re-checks under the lock.
+	if pm.isClosed() {
+		pm.logger.Info("ignoring connect_request while peers are closing", "mobile", mobileDeviceID)
+		return
+	}
 
 	// Validate device is the paired device. Fail closed: an empty allowedID
 	// (e.g. an unpaired agent) rejects all connections rather than accepting any.
@@ -632,12 +718,10 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		// keying handler state by peer identity would remove that ceiling.
 		if pm.OnPeerDisconnect != nil {
 			torn := make(chan struct{})
-			pm.cleanupWg.Add(1)
-			go func() {
-				defer pm.cleanupWg.Done()
+			pm.goCleanup(func() {
 				defer close(torn)
 				pm.OnPeerDisconnect(mobileDeviceID)
-			}()
+			})
 			select {
 			case <-torn:
 			case <-time.After(replacementTeardownTimeout):
@@ -649,14 +733,12 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		oldState := oldPeer.conn.ConnectionState().String()
 		pm.logger.Info("closing old peer for reconnect (async)",
 			"mobile", mobileDeviceID, "oldPcState", oldState)
-		pm.cleanupWg.Add(1)
-		go func() {
-			defer pm.cleanupWg.Done()
+		pm.goCleanup(func() {
 			start := time.Now()
 			oldPeer.Close()
 			pm.logger.Info("old peer closed",
 				"mobile", mobileDeviceID, "elapsed", time.Since(start).Round(time.Millisecond))
-		}()
+		})
 	}
 
 	// Fetch TURN credentials (skipped when custom API is set, e.g. in tests)
@@ -727,6 +809,20 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	}
 
 	pm.mu.Lock()
+	if pm.closed {
+		pm.mu.Unlock()
+		pc.Close()
+		pm.logger.Info("dropping new peer: peers closed during connect", "mobile", mobileDeviceID)
+		return
+	}
+	// A pairing reload may have changed the allowed device after the early
+	// check (e.g. while TURN credentials were fetched) and already reopened.
+	if pm.allowedDeviceID != mobileDeviceID {
+		pm.mu.Unlock()
+		pc.Close()
+		pm.logger.Info("dropping new peer: device no longer paired", "mobile", mobileDeviceID)
+		return
+	}
 	// Re-check limit under lock to prevent TOCTOU race if HandleSignalingMessage
 	// is called concurrently (the early check above is an unlocked fast path).
 	if _, replacing := pm.peers[mobileDeviceID]; !replacing && len(pm.peers) >= pm.MaxPeers {
@@ -1068,22 +1164,23 @@ func (pm *PeerManager) handlePeerStateChange(peer *Peer, state webrtc.PeerConnec
 
 	case webrtc.PeerConnectionStateFailed:
 		// Connection unrecoverable — cancel timers, notify handler, and close.
-		pm.stopTimersLocked(deviceID)
-		// Only cleanup if the tracked peer is the same one that fired.
-		// During reconnect, a stale callback from the old peer may fire after
-		// a new peer is stored under the same device ID.
+		// Only act if the tracked peer is the same one that fired. During
+		// reconnect (or after a reload reopened the manager while the old
+		// peer's Close was still running), a stale callback from the old peer
+		// may fire after a new peer is stored under the same device ID; the
+		// device-keyed timers then belong to the new peer.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
+			pm.stopTimersLocked(deviceID)
 			pm.logger.Info("peer connection failed, closing peer", "mobile", deviceID)
 			pm.scheduleCleanup(peer)
 		}
 
 	case webrtc.PeerConnectionStateClosed:
-		// Peer connection closed — cancel timers and notify handler.
-		pm.stopTimersLocked(deviceID)
-		// Only cleanup if the tracked peer is the same one that fired.
-		// During reconnect, a stale callback from the old peer may fire after
-		// a new peer is stored under the same device ID.
+		// Peer connection closed — cancel timers and notify handler. Same
+		// identity guard as Failed: a stale peer must not stop the new
+		// peer's timers.
 		if tracked, ok := pm.peers[deviceID]; ok && tracked == peer {
+			pm.stopTimersLocked(deviceID)
 			pm.scheduleCleanup(peer)
 		}
 	}
@@ -1707,10 +1804,10 @@ func (p *Peer) logSelectedCandidatePair() {
 
 // waitForSendReady blocks if the DataChannel buffer exceeds maxBufferedAmount,
 // waiting for the OnBufferedAmountLow callback to signal that sending can resume.
-// Returns an error if the timeout expires or the peer is closed (done channel
-// is closed by Close()). The dc parameter must be captured under p.mu before
-// calling this method (which runs without the lock held).
-func (p *Peer) waitForSendReady(dc *webrtc.DataChannel) error {
+// Returns an error if the timeout expires, ctx is canceled, or the peer is
+// closed (done channel is closed by Close()). The dc parameter must be captured
+// under p.mu before calling this method (which runs without the lock held).
+func (p *Peer) waitForSendReady(ctx context.Context, dc *webrtc.DataChannel) error {
 	// Drain any stale signal from a prior drain cycle to prevent false
 	// fast-path returns when the buffer has refilled since the last signal.
 	select {
@@ -1728,6 +1825,8 @@ func (p *Peer) waitForSendReady(dc *webrtc.DataChannel) error {
 		return nil
 	case <-p.done:
 		return fmt.Errorf("peer connection closed")
+	case <-ctx.Done():
+		return fmt.Errorf("send canceled: %w", ctx.Err())
 	case <-time.After(sendReadyTimeout):
 		return fmt.Errorf("send timeout: DataChannel buffer full (%d bytes)", dc.BufferedAmount())
 	}
@@ -1754,19 +1853,29 @@ func (p *Peer) SendRaw(data []byte) error {
 	p.mu.Unlock()
 
 	// Wait without holding p.mu so Close() can proceed concurrently.
-	if err := p.waitForSendReady(dc); err != nil {
+	if err := p.waitForSendReady(context.Background(), dc); err != nil {
 		return fmt.Errorf("backpressure: %w", err)
 	}
 	return dc.Send(data)
 }
 
-// SendMessage encodes and sends a protocol message over the DataChannel.
-// Blocks if the send buffer is full, waiting for backpressure to clear.
+// SendMessage is SendMessageContext without cancellation.
+func (p *Peer) SendMessage(msg protocol.Message) error {
+	return p.SendMessageContext(context.Background(), msg)
+}
+
+// SendMessageContext encodes and sends a protocol message over the DataChannel.
+// Output events block while the send buffer is full, waiting for backpressure
+// to clear; canceling ctx ends the wait. Control messages (error, detached,
+// sessions, pong, ...) are small and never wait on the gate, so a stall notice
+// can go out on the same buffer that stalled the output stream; ordered
+// delivery still queues them behind any buffered output. They are refused
+// once the buffer passes maxControlBufferedAmount, keeping growth bounded.
 //
 // Until auth_confirm has been sent, only the handshake messages may go out;
 // anything else is refused rather than queued, so auth_confirm is always the
 // first message the peer receives after the handshake.
-func (p *Peer) SendMessage(msg protocol.Message) error {
+func (p *Peer) SendMessageContext(ctx context.Context, msg protocol.Message) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -1789,8 +1898,12 @@ func (p *Peer) SendMessage(msg protocol.Message) error {
 	}
 
 	// Wait without holding p.mu so Close() can proceed concurrently.
-	if err := p.waitForSendReady(dc); err != nil {
-		return fmt.Errorf("backpressure: %w", err)
+	if _, isOutput := msg.(*protocol.OutputEvent); isOutput {
+		if err := p.waitForSendReady(ctx, dc); err != nil {
+			return fmt.Errorf("backpressure: %w", err)
+		}
+	} else if buffered := dc.BufferedAmount(); buffered > maxControlBufferedAmount {
+		return fmt.Errorf("backpressure: refusing %s: DataChannel buffer full (%d bytes)", msg.MessageType(), buffered)
 	}
 	return dc.Send(data)
 }

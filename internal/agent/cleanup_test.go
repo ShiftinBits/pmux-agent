@@ -34,7 +34,7 @@ func (m *mockPeerCloser) getClosedPeers() []string {
 // testCleanupHandler creates a Handler with no tmux dependency for cleanup testing.
 func testCleanupHandler() *Handler {
 	tc := tmux.NewClient("pmux-cleanup-test-unused")
-	return NewHandler(tc, func(peerID string, msg protocol.Message) error {
+	return NewHandler(tc, func(ctx context.Context, peerID string, msg protocol.Message) error {
 		return nil
 	}, slog.Default(), "test", "")
 }

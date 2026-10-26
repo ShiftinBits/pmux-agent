@@ -6,6 +6,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -41,7 +42,7 @@ type capturedMsg struct {
 	Msg    protocol.Message
 }
 
-func (mc *messageCatcher) Send(peerID string, msg protocol.Message) error {
+func (mc *messageCatcher) Send(_ context.Context, peerID string, msg protocol.Message) error {
 	mc.mu.Lock()
 	mc.messages = append(mc.messages, capturedMsg{PeerID: peerID, Msg: msg})
 	mc.mu.Unlock()

@@ -1,17 +1,22 @@
 package agent
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +45,7 @@ type capturedMsg struct {
 	Msg    protocol.Message
 }
 
-func (mc *messageCatcher) Send(peerID string, msg protocol.Message) error {
+func (mc *messageCatcher) Send(_ context.Context, peerID string, msg protocol.Message) error {
 	mc.mu.Lock()
 	mc.messages = append(mc.messages, capturedMsg{PeerID: peerID, Msg: msg})
 	mc.mu.Unlock()
@@ -486,6 +491,363 @@ func TestHandler_InputWithoutAttach(t *testing.T) {
 	}
 	if errMsg.Code != "not_attached" {
 		t.Errorf("code = %q, want not_attached", errMsg.Code)
+	}
+}
+
+// TestHandler_OutputSendFailureSendsStreamReset verifies that when sending
+// output fails (as on a backpressure stall), the handler detaches the peer and
+// tells it to re-attach with a stream_reset error.
+func TestHandler_OutputSendFailureSendsStreamReset(t *testing.T) {
+	skipIfNoTmux(t)
+
+	const testSocket = "pmux-stream-reset-test"
+	exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	t.Cleanup(func() {
+		exec.Command("tmux", "-L", testSocket, "kill-server").Run() //nolint:errcheck
+	})
+
+	tc := tmux.NewClient(testSocket)
+	catcher := &messageCatcher{}
+	errStalled := errors.New("backpressure: send timeout: DataChannel buffer full")
+	send := func(ctx context.Context, peerID string, msg protocol.Message) error {
+		catcher.Send(ctx, peerID, msg) //nolint:errcheck
+		if _, ok := msg.(*protocol.OutputEvent); ok {
+			return errStalled
+		}
+		return nil
+	}
+	h := NewHandler(tc, send, slog.Default(), "test", "")
+
+	if _, err := tc.CreateSession("stream-reset", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	paneID := sessions[0].Windows[0].Panes[0].ID
+
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type:   "attach",
+		PaneID: paneID,
+		Cols:   80,
+		Rows:   24,
+	})
+	catcher.waitFor(t, "attached", 2*time.Second)
+
+	// Produce output so streamOutput attempts (and fails) a send.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo STREAM_RESET_TEST\n"),
+	})
+
+	errorCodes := func() []string {
+		var codes []string
+		for _, m := range catcher.get() {
+			if ev, ok := m.Msg.(*protocol.ErrorEvent); ok && m.PeerID == "peer1" {
+				codes = append(codes, ev.Code)
+			}
+		}
+		return codes
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !slices.Contains(errorCodes(), errCodeStreamReset) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !slices.Contains(errorCodes(), errCodeStreamReset) {
+		t.Fatalf("error codes sent = %v, want %q", errorCodes(), errCodeStreamReset)
+	}
+
+	h.mu.Lock()
+	_, hasBridge := h.bridges["peer1"]
+	_, hasCancel := h.cancels["peer1"]
+	h.mu.Unlock()
+	if hasBridge || hasCancel {
+		t.Errorf("peer state after stall: bridge=%v cancel=%v, want both removed", hasBridge, hasCancel)
+	}
+
+	// Input after the stall detach must report the peer is no longer attached.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("x"),
+	})
+	codes := errorCodes()
+	if len(codes) == 0 || codes[len(codes)-1] != "not_attached" {
+		t.Errorf("error codes after input = %v, want last to be not_attached", codes)
+	}
+
+	resets := 0
+	for _, c := range codes {
+		if c == errCodeStreamReset {
+			resets++
+		}
+	}
+	if resets != 1 {
+		t.Errorf("stream_reset sent %d times, want 1", resets)
+	}
+}
+
+// newStreamTestHandler returns a handler on a dedicated tmux socket with one
+// session, and that session's pane ID. The server is killed before and after.
+func newStreamTestHandler(t *testing.T, socket string, send SendFunc) (*Handler, string) {
+	t.Helper()
+	skipIfNoTmux(t)
+	kill := func() { exec.Command("tmux", "-L", socket, "kill-server").Run() } //nolint:errcheck
+	kill()
+	t.Cleanup(kill)
+
+	tc := tmux.NewClient(socket)
+	h := NewHandler(tc, send, slog.Default(), "test", "")
+	if _, err := tc.CreateSession("stream-test", ""); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sessions, err := tc.ListAll()
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	return h, sessions[0].Windows[0].Panes[0].ID
+}
+
+// errorCodesFor returns the codes of the error events sent to peerID, in order.
+func errorCodesFor(catcher *messageCatcher, peerID string) []string {
+	var codes []string
+	for _, m := range catcher.get() {
+		if ev, ok := m.Msg.(*protocol.ErrorEvent); ok && m.PeerID == peerID {
+			codes = append(codes, ev.Code)
+		}
+	}
+	return codes
+}
+
+// TestHandler_DetachReleasesStalledOutputSend checks that a detach, re-attach
+// or disconnect does not wait out a stream blocked on backpressure: canceling
+// the stream releases its send, so the caller returns at once, and the
+// cancellation is not reported to the mobile as a stall.
+func TestHandler_DetachReleasesStalledOutputSend(t *testing.T) {
+	tests := []struct {
+		name   string
+		action func(h *Handler, paneID string)
+	}{
+		{name: "detach", action: func(h *Handler, _ string) {
+			h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+		}},
+		{name: "re-attach", action: func(h *Handler, paneID string) {
+			h.HandleMessage("peer1", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+		}},
+		{name: "disconnect", action: func(h *Handler, _ string) {
+			h.PeerDisconnected("peer1")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			catcher := &messageCatcher{}
+			stalled := make(chan struct{}, 1)
+			// Output sends block like a full DataChannel buffer, honoring
+			// cancellation the way Peer.SendMessageContext does.
+			send := func(ctx context.Context, peerID string, msg protocol.Message) error {
+				if _, ok := msg.(*protocol.OutputEvent); ok {
+					select {
+					case stalled <- struct{}{}:
+					default:
+					}
+					select {
+					case <-ctx.Done():
+						return fmt.Errorf("backpressure: send canceled: %w", ctx.Err())
+					case <-time.After(10 * time.Second):
+						return errors.New("backpressure: send timeout")
+					}
+				}
+				return catcher.Send(ctx, peerID, msg)
+			}
+			h, paneID := newStreamTestHandler(t, "pmux-stalled-detach-test", send)
+			t.Cleanup(func() { h.PeerDisconnected("peer1") })
+
+			h.HandleMessage("peer1", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+			catcher.waitFor(t, "attached", 2*time.Second)
+			h.HandleMessage("peer1", &protocol.InputRequest{Type: "input", Data: []byte("echo STALLED_SEND\n")})
+			select {
+			case <-stalled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("output send never started")
+			}
+
+			start := time.Now()
+			tt.action(h, paneID)
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Errorf("%s took %v with a stalled output send, want well under the send timeout", tt.name, elapsed)
+			}
+			if codes := errorCodesFor(catcher, "peer1"); slices.Contains(codes, errCodeStreamReset) {
+				t.Errorf("error codes = %v, want no stream_reset for a canceled stream", codes)
+			}
+		})
+	}
+}
+
+// TestHandler_PreStreamSendFailureSendsStreamReset checks that when the
+// compressed initial content of a re-attach fails to send, the attachment ends
+// with a stream_reset rather than leaving the mobile's inflater out of step
+// with the agent's compressor.
+func TestHandler_PreStreamSendFailureSendsStreamReset(t *testing.T) {
+	catcher := &messageCatcher{}
+	var failOutput atomic.Bool
+	send := func(ctx context.Context, peerID string, msg protocol.Message) error {
+		if _, ok := msg.(*protocol.OutputEvent); ok && failOutput.Load() {
+			return errors.New("backpressure: send timeout")
+		}
+		return catcher.Send(ctx, peerID, msg)
+	}
+	h, paneID := newStreamTestHandler(t, "pmux-prestream-fail-test", send)
+
+	// Put content on the pane so the re-attach has initial content to send.
+	h.HandleMessage("peer1", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+	catcher.waitFor(t, "attached", 2*time.Second)
+	h.HandleMessage("peer1", &protocol.InputRequest{Type: "input", Data: []byte("echo PRESTREAM_MARKER\n")})
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(capturedOutput(catcher, "peer1"), "PRESTREAM_MARKER") {
+		if time.Now().After(deadline) {
+			t.Fatal("marker never reached the pane output")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+
+	failOutput.Store(true)
+	h.HandleMessage("peer1", &protocol.AttachRequest{
+		Type: "attach", PaneID: paneID, Cols: 80, Rows: 24, Reattach: true, Compression: "deflate",
+	})
+
+	codes := errorCodesFor(catcher, "peer1")
+	if !slices.Equal(codes, []string{errCodeStreamReset}) {
+		t.Errorf("error codes = %v, want exactly one %q", codes, errCodeStreamReset)
+	}
+	h.mu.Lock()
+	_, hasBridge := h.bridges["peer1"]
+	_, hasStream := h.streamDone["peer1"]
+	h.mu.Unlock()
+	if hasBridge || hasStream {
+		t.Errorf("after pre-stream failure: bridge=%v stream=%v, want both removed", hasBridge, hasStream)
+	}
+}
+
+// capturedOutput concatenates the uncompressed output sent to peerID.
+func capturedOutput(catcher *messageCatcher, peerID string) string {
+	var sb strings.Builder
+	for _, m := range catcher.get() {
+		if out, ok := m.Msg.(*protocol.OutputEvent); ok && m.PeerID == peerID {
+			sb.Write(out.Data)
+		}
+	}
+	return sb.String()
+}
+
+// TestHandler_ResetStreamSkipsSupersededStream checks that a stream ending on
+// its own sends stream_reset only when no detach is already waiting for it: a
+// waiting re-attach or detach sends its own response, and a stream_reset ahead
+// of it would make the mobile re-attach again.
+func TestHandler_ResetStreamSkipsSupersededStream(t *testing.T) {
+	tests := []struct {
+		name      string
+		waiter    bool
+		wantReset bool
+	}{
+		{name: "no waiting detach", waiter: false, wantReset: true},
+		{name: "detach waiting on the stream", waiter: true, wantReset: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			catcher := &messageCatcher{}
+			h := NewHandler(tmux.NewClient("pmux-reset-stream-unused"), catcher.Send, slog.Default(), "test", "")
+			done := make(chan struct{})
+			h.mu.Lock()
+			h.streamDone["peer1"] = done
+			h.mu.Unlock()
+
+			waiterDone := make(chan struct{})
+			if tt.waiter {
+				go func() {
+					h.detachPeerWait("peer1", true)
+					close(waiterDone)
+				}()
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					h.mu.Lock()
+					marked := h.superseded[done]
+					h.mu.Unlock()
+					if marked {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("waiting detach never marked the stream superseded")
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			} else {
+				close(waiterDone)
+			}
+
+			h.resetStream("peer1", done, "output stream stalled; re-attach")
+			h.endStream("peer1", done)
+			select {
+			case <-waiterDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("waiting detach not released by the stream's exit")
+			}
+
+			gotReset := slices.Contains(errorCodesFor(catcher, "peer1"), errCodeStreamReset)
+			if gotReset != tt.wantReset {
+				t.Errorf("stream_reset sent = %v, want %v", gotReset, tt.wantReset)
+			}
+			h.mu.Lock()
+			leftover := len(h.superseded)
+			h.mu.Unlock()
+			if leftover != 0 {
+				t.Errorf("%d superseded marks left after the stream ended, want 0", leftover)
+			}
+		})
+	}
+}
+
+// TestHandler_DisplacedBridgeSendsStreamReset checks that when another attach
+// on the same pane takes over its pipe, a stream ends with stream_reset (not
+// pane_closed, since the pane is alive) and the newer stream keeps flowing.
+func TestHandler_DisplacedBridgeSendsStreamReset(t *testing.T) {
+	catcher := &messageCatcher{}
+	h, paneID := newStreamTestHandler(t, "pmux-displaced-stream-test", catcher.Send)
+	t.Cleanup(func() {
+		h.PeerDisconnected("peerA")
+		h.PeerDisconnected("peerB")
+	})
+
+	h.HandleMessage("peerA", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+	h.HandleMessage("peerB", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Contains(errorCodesFor(catcher, "peerA"), errCodeStreamReset) {
+		if time.Now().After(deadline) {
+			t.Fatalf("peerA error codes = %v, want %q", errorCodesFor(catcher, "peerA"), errCodeStreamReset)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for _, m := range catcher.get() {
+		if _, ok := m.Msg.(*protocol.PaneClosedEvent); ok {
+			t.Errorf("pane_closed sent to %s for a live pane", m.PeerID)
+		}
+	}
+	h.mu.Lock()
+	_, aAttached := h.bridges["peerA"]
+	_, bAttached := h.bridges["peerB"]
+	h.mu.Unlock()
+	if aAttached || !bAttached {
+		t.Errorf("attached after displacement: peerA=%v peerB=%v, want false/true", aAttached, bAttached)
+	}
+
+	h.HandleMessage("peerB", &protocol.InputRequest{Type: "input", Data: []byte("echo AFTER_DISPLACE\n")})
+	deadline = time.Now().Add(5 * time.Second)
+	for !strings.Contains(capturedOutput(catcher, "peerB"), "AFTER_DISPLACE") {
+		if time.Now().After(deadline) {
+			t.Fatal("peerB output stopped after peerA was displaced")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -1060,23 +1422,37 @@ func TestHandler_AttachWithCompression(t *testing.T) {
 		t.Errorf("PaneID = %q, want %q", attachedEvent.PaneID, paneID)
 	}
 
-	// Verify compressor is tracked
-	h.mu.Lock()
-	compressor := h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor == nil {
-		t.Fatal("expected compressor to be tracked after attach with compression=deflate")
+	// Produce output; the first OutputEvent after attached must be the start
+	// of a deflate stream, so a fresh reader inflates it.
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo DEFLATE_ATTACH_MARKER\n"),
+	})
+	out := waitForOutput(t, catcher, "peer1", 5*time.Second)
+	inflated, err := inflateFresh(out.Data)
+	if err != nil {
+		t.Fatalf("first output did not inflate with a fresh reader: %v", err)
+	}
+	if len(inflated) == 0 {
+		t.Error("first output inflated to no bytes")
 	}
 
-	// Detach — compressor should be cleaned up
+	h.mu.Lock()
+	done := h.streamDone["peer1"]
+	h.mu.Unlock()
+	if done == nil {
+		t.Fatal("expected a running output stream after attach")
+	}
+
+	// Detach waits for the stream to exit, so its done channel (closed after
+	// the stream closes its compressor) is already closed by "detached".
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
 	catcher.waitFor(t, "detached", 2*time.Second)
 
-	h.mu.Lock()
-	compressor = h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor != nil {
-		t.Error("expected compressor to be nil after detach")
+	select {
+	case <-done:
+	default:
+		t.Error("output stream still running after detached was sent")
 	}
 }
 
@@ -1111,15 +1487,57 @@ func TestHandler_AttachWithoutCompression(t *testing.T) {
 		t.Errorf("Compression = %q, want empty string", attachedEvent.Compression)
 	}
 
-	// Verify no compressor is tracked
-	h.mu.Lock()
-	compressor := h.compressors["peer1"]
-	h.mu.Unlock()
-	if compressor != nil {
-		t.Error("expected no compressor when compression was not requested")
+	// Without compression, output is the plain terminal bytes.
+	const marker = "PLAIN_OUTPUT_MARKER"
+	h.HandleMessage("peer1", &protocol.InputRequest{
+		Type: "input",
+		Data: []byte("echo " + marker + "\n"),
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	found := false
+	for time.Now().Before(deadline) && !found {
+		for _, m := range catcher.get() {
+			if out, ok := m.Msg.(*protocol.OutputEvent); ok && strings.Contains(string(out.Data), marker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Errorf("expected plain output containing %q", marker)
 	}
 
 	h.HandleMessage("peer1", &protocol.DetachRequest{Type: "detach"})
+}
+
+// waitForOutput returns the first OutputEvent sent to peerID.
+func waitForOutput(t *testing.T, catcher *messageCatcher, peerID string, timeout time.Duration) *protocol.OutputEvent {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, m := range catcher.get() {
+			if out, ok := m.Msg.(*protocol.OutputEvent); ok && m.PeerID == peerID {
+				return out
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for output to %s", peerID)
+	return nil
+}
+
+// inflateFresh inflates data with a new raw-deflate reader. The agent
+// sync-flushes without ever closing the stream, so the reader ends with
+// io.ErrUnexpectedEOF once it has consumed everything; that is not an error.
+func inflateFresh(data []byte) ([]byte, error) {
+	out, err := io.ReadAll(flate.NewReader(bytes.NewReader(data)))
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return out, err
+	}
+	return out, nil
 }
 
 func TestHandler_CompressedStreamOutput(t *testing.T) {
@@ -1214,7 +1632,7 @@ func TestHandler_SetContext(t *testing.T) {
 func TestHandler_SendMsgError(t *testing.T) {
 	tc := tmux.NewClient("nonexistent-socket")
 	errSend := errors.New("send failed")
-	h := NewHandler(tc, func(peerID string, msg protocol.Message) error {
+	h := NewHandler(tc, func(ctx context.Context, peerID string, msg protocol.Message) error {
 		return errSend
 	}, slog.Default(), "test", "")
 

@@ -169,8 +169,8 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 
 	updateStateFile := update.StateFilePath(paths.ConfigDir)
 
-	handler := NewHandler(tmuxClient, func(peerID string, msg protocol.Message) error {
-		return peerManager.SendTo(peerID, msg)
+	handler := NewHandler(tmuxClient, func(ctx context.Context, peerID string, msg protocol.Message) error {
+		return peerManager.SendTo(ctx, peerID, msg)
 	}, logger, version, updateStateFile)
 
 	hostName := cfg.Name
@@ -283,14 +283,14 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 				if err != nil {
 					logger.Warn("failed to reload paired device, rejecting all connections", "error", err)
 					peerManager.SetAllowedDeviceID("!invalid-load-error")
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 				} else if device == nil {
 					peerManager.SetAllowedDeviceID("!unpaired")
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 					logger.Info("unpair complete: all peers closed")
 				} else {
 					peerManager.SetAllowedDeviceID(device.DeviceID)
-					peerManager.CloseAll()
+					peerManager.CloseAllAndReopen()
 					logger.Info("pairing reloaded, peers closed for re-auth", "device", device.DeviceID)
 				}
 			}
