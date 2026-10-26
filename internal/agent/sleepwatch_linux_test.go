@@ -6,7 +6,31 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/godbus/dbus/v5"
 )
+
+func TestIsFromLogind(t *testing.T) {
+	tests := []struct {
+		name   string
+		sender string
+		owner  string
+		want   bool
+	}{
+		{"matching unique name", ":1.42", ":1.42", true},
+		{"different sender", ":1.99", ":1.42", false},
+		{"empty owner", ":1.42", "", false},
+		{"empty sender and empty owner", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sig := &dbus.Signal{Sender: tt.sender}
+			if got := isFromLogind(sig, tt.owner); got != tt.want {
+				t.Errorf("isFromLogind(%q, %q) = %v, want %v", tt.sender, tt.owner, got, tt.want)
+			}
+		})
+	}
+}
 
 // When keep_awake is blocking sleep, startSleepWatcher must short-circuit
 // without touching D-Bus or invoking the sleep/resume callbacks.

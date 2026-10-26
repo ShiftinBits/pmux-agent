@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -9,7 +10,10 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-const prepareForSleepSignal = "org.freedesktop.login1.Manager.PrepareForSleep"
+const (
+	prepareForSleepSignal = "org.freedesktop.login1.Manager.PrepareForSleep"
+	logindName            = "org.freedesktop.login1"
+)
 
 // startSleepWatcher subscribes to systemd-logind's PrepareForSleep signal so the
 // agent can notify the signaling server right before the host sleeps (onSleep)
@@ -53,6 +57,7 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 		dbus.WithMatchObjectPath("/org/freedesktop/login1"),
 		dbus.WithMatchInterface("org.freedesktop.login1.Manager"),
 		dbus.WithMatchMember("PrepareForSleep"),
+		dbus.WithMatchSender(logindName),
 	); err != nil {
 		logger.Warn("sleep watcher: cannot subscribe to PrepareForSleep", "error", err)
 		conn.Close()
@@ -77,6 +82,15 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 				if sig == nil || sig.Name != prepareForSleepSignal || len(sig.Body) == 0 {
 					continue
 				}
+				owner, err := logindOwner(ctx, conn)
+				if err != nil {
+					logger.Warn("sleep watcher: cannot resolve logind owner; ignoring PrepareForSleep", "error", err)
+					continue
+				}
+				if !isFromLogind(sig, owner) {
+					logger.Warn("sleep watcher: ignoring PrepareForSleep from non-logind sender", "sender", sig.Sender)
+					continue
+				}
 				goingToSleep, _ := sig.Body[0].(bool)
 				if goingToSleep {
 					logger.Info("host is about to sleep, marking offline")
@@ -93,6 +107,27 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 			}
 		}
 	}()
+}
+
+// isFromLogind reports whether sig was sent by the current logind bus owner.
+// The default system-bus policy lets any local user broadcast signals, so a
+// PrepareForSleep must be checked against the owner's unique name.
+func isFromLogind(sig *dbus.Signal, owner string) bool {
+	return owner != "" && sig.Sender == owner
+}
+
+// logindOwner resolves the unique bus name currently owning logind. It is
+// resolved per signal rather than cached so a logind restart can't leave a
+// stale owner. The round-trip is bounded so a stuck bus can't block.
+func logindOwner(ctx context.Context, conn *dbus.Conn) (string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var owner string
+	if err := conn.BusObject().CallWithContext(callCtx, "org.freedesktop.DBus.GetNameOwner", 0, logindName).Store(&owner); err != nil {
+		return "", fmt.Errorf("get name owner of %s: %w", logindName, err)
+	}
+	return owner, nil
 }
 
 // takeSleepDelay acquires a logind "delay" inhibitor on sleep and returns its
