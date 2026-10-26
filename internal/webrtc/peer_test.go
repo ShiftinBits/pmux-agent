@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3159,6 +3160,52 @@ func TestPeer_StopDispatchWaitsForInFlightHandler(t *testing.T) {
 	}
 }
 
+// TestPeer_StopDispatchReleasesBackpressuredSend checks that stopDispatch
+// releases an in-flight request's output send waiting on backpressure instead
+// of waiting out sendReadyTimeout, which is longer than the reconnect's
+// replacementTeardownTimeout, without closing the peer.
+func TestPeer_StopDispatchReleasesBackpressuredSend(t *testing.T) {
+	dc := stalledDataChannel(t, maxBufferedAmount+128*1024)
+	sendErr := make(chan error, 1)
+	var p *Peer
+	p = newDispatchTestPeer(func(string, protocol.Message) {
+		sendErr <- p.SendMessage(&protocol.OutputEvent{Type: "output", Data: []byte("x")})
+	})
+	p.dc = dc
+	p.authConfirmed = true
+
+	go p.handleDataChannelMessage(encodeTestAttach(t))
+	select {
+	case err := <-sendErr:
+		t.Fatalf("output send returned %v while the buffer was full, want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		p.stopDispatch()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stopDispatch waited out the in-flight request's backpressured send")
+	}
+	select {
+	case err := <-sendErr:
+		if err == nil || !strings.Contains(err.Error(), "backpressure") {
+			t.Errorf("output send error = %v, want a backpressure error", err)
+		}
+	default:
+		t.Error("handler call still running after stopDispatch returned")
+	}
+	select {
+	case <-p.done:
+		t.Error("stopDispatch closed the peer, want only its sends released")
+	default:
+	}
+}
+
 // TestPeerManager_CloseAllAndReopen checks that a reload's close reopens the
 // manager, so peers that connect afterwards still get cleanup and an ICE
 // restart watchdog, while a shutdown's CloseAll leaves it closed and drops
@@ -3307,13 +3354,83 @@ func TestPeerManager_ReloadDoesNotWaitForPeerClose(t *testing.T) {
 // already running in the background (failed-peer cleanup or a replaced peer),
 // while a shutdown's CloseAll still waits for that close.
 func TestPeerManager_CloseAllAndReopen_DoesNotWaitForHungClose(t *testing.T) {
+	// Each start hangs one background cleanup step until release is closed.
 	tests := []struct {
 		name            string
-		teardown        bool // register via goTeardown instead of goCleanup
+		start           func(t *testing.T, pm *PeerManager, release <-chan struct{})
 		wantReloadWaits bool
 	}{
-		{name: "hung close", teardown: false, wantReloadWaits: false},
-		{name: "hung teardown", teardown: true, wantReloadWaits: true},
+		{
+			name: "hung close",
+			start: func(_ *testing.T, pm *PeerManager, release <-chan struct{}) {
+				pm.goCleanup(func() { <-release })
+			},
+			wantReloadWaits: false,
+		},
+		{
+			name: "hung teardown",
+			start: func(_ *testing.T, pm *PeerManager, release <-chan struct{}) {
+				pm.mu.Lock()
+				pm.goTeardownLocked(func() { <-release })
+				pm.mu.Unlock()
+			},
+			wantReloadWaits: true,
+		},
+		{
+			// Only the failed-peer cleanup's own OnPeerDisconnect hangs; the
+			// reload's call for the same peer returns, so only teardownWg
+			// holds the reload.
+			name: "failed-peer cleanup, hung teardown",
+			start: func(t *testing.T, pm *PeerManager, release <-chan struct{}) {
+				entered := make(chan struct{})
+				var calls atomic.Int32
+				pm.OnPeerDisconnect = func(string) {
+					if calls.Add(1) == 1 {
+						close(entered)
+						<-release
+					}
+				}
+				peer := newBarePeer("mobile-failed")
+				pm.mu.Lock()
+				pm.peers[peer.DeviceID] = peer
+				pm.scheduleCleanup(peer)
+				pm.mu.Unlock()
+				select {
+				case <-entered:
+				case <-time.After(2 * time.Second):
+					t.Fatal("failed-peer cleanup never ran OnPeerDisconnect")
+				}
+			},
+			wantReloadWaits: true,
+		},
+		{
+			// The teardown finishes at once and the Pion close hangs (Close
+			// blocks on the held peer.mu).
+			name: "failed-peer cleanup, hung close",
+			start: func(t *testing.T, pm *PeerManager, release <-chan struct{}) {
+				pm.OnPeerDisconnect = func(string) {}
+				peer := newBarePeer("mobile-failed")
+				peer.mu.Lock()
+				go func() {
+					<-release
+					peer.mu.Unlock()
+				}()
+				pm.mu.Lock()
+				pm.peers[peer.DeviceID] = peer
+				pm.scheduleCleanup(peer)
+				pm.mu.Unlock()
+				// ClosePeerIfCurrent drops the peer from the map just before
+				// its Close blocks.
+				deadline := time.Now().Add(2 * time.Second)
+				for getPeer(pm, peer.DeviceID) != nil {
+					if time.Now().After(deadline) {
+						t.Fatal("failed-peer cleanup never reached the close")
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			},
+			wantReloadWaits: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3323,12 +3440,7 @@ func TestPeerManager_CloseAllAndReopen_DoesNotWaitForHungClose(t *testing.T) {
 			releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
 			t.Cleanup(releaseFn)
 
-			hung := func() { <-release }
-			if tt.teardown {
-				pm.goTeardown(hung)
-			} else {
-				pm.goCleanup(hung)
-			}
+			tt.start(t, pm, release)
 
 			reopened := make(chan struct{})
 			go func() {
@@ -3379,6 +3491,79 @@ func TestPeerManager_CloseAllAndReopen_DoesNotWaitForHungClose(t *testing.T) {
 			case <-shutDown:
 			case <-time.After(2 * time.Second):
 				t.Fatal("CloseAll did not return after the background close finished")
+			}
+		})
+	}
+}
+
+// TestPeerManager_DisconnectPeer checks the ConnectionCleaner's teardown: a
+// tracked peer stops dispatching before the disconnect handler runs, then is
+// closed and dropped, and an untracked device is reported as such so the
+// caller cleans its leftover handler state.
+func TestPeerManager_DisconnectPeer(t *testing.T) {
+	tests := []struct {
+		name        string
+		tracked     bool
+		wantTracked bool
+	}{
+		{name: "tracked peer", tracked: true, wantTracked: true},
+		{name: "untracked device", tracked: false, wantTracked: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+			peer := newBarePeer("mobile-idle")
+			if tt.tracked {
+				pm.mu.Lock()
+				pm.peers[peer.DeviceID] = peer
+				pm.mu.Unlock()
+			}
+			var mu sync.Mutex
+			var fired []string
+			var dispatchingAtFire, closedAtFire bool
+			pm.OnPeerDisconnect = func(id string) {
+				peer.dispatchMu.Lock()
+				stopped := peer.dispatchStopped
+				peer.dispatchMu.Unlock()
+				peer.mu.Lock()
+				closed := peer.closed
+				peer.mu.Unlock()
+				mu.Lock()
+				defer mu.Unlock()
+				fired = append(fired, id)
+				dispatchingAtFire = dispatchingAtFire || !stopped
+				closedAtFire = closedAtFire || closed
+			}
+
+			if got := pm.DisconnectPeer(peer.DeviceID); got != tt.wantTracked {
+				t.Fatalf("DisconnectPeer = %v, want %v", got, tt.wantTracked)
+			}
+			pm.cleanupWg.Wait()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tt.tracked {
+				if len(fired) != 0 {
+					t.Errorf("OnPeerDisconnect fired for %v, want no call for an untracked device", fired)
+				}
+				return
+			}
+			if !slices.Equal(fired, []string{peer.DeviceID}) {
+				t.Errorf("OnPeerDisconnect fired for %v, want [%s]", fired, peer.DeviceID)
+			}
+			if dispatchingAtFire {
+				t.Error("OnPeerDisconnect ran while the peer still dispatched requests")
+			}
+			if closedAtFire {
+				t.Error("OnPeerDisconnect ran after Close, want it before")
+			}
+			if getPeer(pm, peer.DeviceID) != nil {
+				t.Error("peer still tracked after DisconnectPeer's cleanup")
+			}
+			select {
+			case <-peer.done:
+			default:
+				t.Error("peer was not closed")
 			}
 		})
 	}

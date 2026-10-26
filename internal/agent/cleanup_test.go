@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -11,16 +12,32 @@ import (
 	"github.com/shiftinbits/pmux-agent/internal/tmux"
 )
 
-// mockPeerCloser records which peers were closed.
+// mockPeerCloser records which peers were disconnected. Like PeerManager it
+// runs the disconnect handler (handler.PeerDisconnected, which agent.go wires
+// as OnPeerDisconnect) for a tracked peer when handler is set. With untracked
+// set it reports no peer, leaving the handler state to the cleaner.
 type mockPeerCloser struct {
-	mu     sync.Mutex
-	closed []string
+	mu        sync.Mutex
+	closed    []string
+	handler   *Handler
+	untracked bool
 }
 
-func (m *mockPeerCloser) ClosePeer(deviceID string) {
+func newMockPeerCloser(h *Handler) *mockPeerCloser {
+	return &mockPeerCloser{handler: h}
+}
+
+func (m *mockPeerCloser) DisconnectPeer(deviceID string) bool {
 	m.mu.Lock()
 	m.closed = append(m.closed, deviceID)
 	m.mu.Unlock()
+	if m.untracked {
+		return false
+	}
+	if m.handler != nil {
+		m.handler.PeerDisconnected(deviceID)
+	}
+	return true
 }
 
 func (m *mockPeerCloser) getClosedPeers() []string {
@@ -41,7 +58,7 @@ func testCleanupHandler() *Handler {
 
 func TestConnectionCleaner_IdlePeerDetectedAndClosed(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 
 	// Simulate a peer that pinged 90 seconds ago (stale with 60s timeout)
 	h.mu.Lock()
@@ -87,7 +104,7 @@ func TestConnectionCleaner_IdlePeerDetectedAndClosed(t *testing.T) {
 
 func TestConnectionCleaner_ActivePeerKeptAlive(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 
 	// Simulate a peer that pinged recently (not stale)
 	h.mu.Lock()
@@ -123,7 +140,7 @@ func TestConnectionCleaner_ActivePeerKeptAlive(t *testing.T) {
 
 func TestConnectionCleaner_RunsPeriodically(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 
 	// Start with no stale peers
 	cleaner := NewConnectionCleaner(h, closer, slog.Default()).
@@ -165,7 +182,7 @@ func TestConnectionCleaner_RunsPeriodically(t *testing.T) {
 
 func TestConnectionCleaner_MixedPeers(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 
 	now := time.Now()
 	h.mu.Lock()
@@ -219,7 +236,7 @@ func TestGetStalePeers_EmptyMap(t *testing.T) {
 // --- PeerStateChecker safety-net tests ---
 
 // mockStateChecker returns peer states for testing. Thread-safe so it can
-// be mutated (e.g., removing entries to simulate ClosePeer) while the
+// be mutated (e.g., removing entries to simulate DisconnectPeer) while the
 // cleaner goroutine reads it.
 type mockStateChecker struct {
 	mu     sync.Mutex
@@ -244,7 +261,7 @@ func (m *mockStateChecker) remove(deviceID string) {
 
 func TestConnectionCleaner_SweepClosesFailedPCState(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 	checker := &mockStateChecker{
 		states: map[string]string{
 			"failed-peer": "failed",
@@ -282,7 +299,7 @@ func TestConnectionCleaner_SweepClosesFailedPCState(t *testing.T) {
 
 func TestConnectionCleaner_SweepIgnoresConnectedPCState(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 	checker := &mockStateChecker{
 		states: map[string]string{
 			"connected-peer":    "connected",
@@ -320,9 +337,9 @@ func TestConnectionCleaner_SweepNoDoubleClose(t *testing.T) {
 	}
 
 	// Use a closer that removes the peer from the state checker when closed,
-	// simulating real PeerManager behavior where ClosePeer removes the peer.
+	// simulating real PeerManager behavior where DisconnectPeer removes the peer.
 	closer := &mockPeerCloserWithStateCleanup{
-		mockPeerCloser: mockPeerCloser{},
+		mockPeerCloser: newMockPeerCloser(h),
 		checker:        checker,
 	}
 
@@ -363,18 +380,19 @@ func TestConnectionCleaner_SweepNoDoubleClose(t *testing.T) {
 // mockPeerCloserWithStateCleanup wraps mockPeerCloser and removes peers from
 // the state checker when closed, simulating real PeerManager behavior.
 type mockPeerCloserWithStateCleanup struct {
-	mockPeerCloser
+	*mockPeerCloser
 	checker *mockStateChecker
 }
 
-func (m *mockPeerCloserWithStateCleanup) ClosePeer(deviceID string) {
-	m.mockPeerCloser.ClosePeer(deviceID)
+func (m *mockPeerCloserWithStateCleanup) DisconnectPeer(deviceID string) bool {
+	tracked := m.mockPeerCloser.DisconnectPeer(deviceID)
 	m.checker.remove(deviceID)
+	return tracked
 }
 
 func TestConnectionCleaner_WithoutStateChecker(t *testing.T) {
 	h := testCleanupHandler()
-	closer := &mockPeerCloser{}
+	closer := newMockPeerCloser(h)
 
 	// No stale peers, no state checker — should close nothing.
 	cleaner := NewConnectionCleaner(h, closer, slog.Default()).
@@ -392,5 +410,46 @@ func TestConnectionCleaner_WithoutStateChecker(t *testing.T) {
 	closed := closer.getClosedPeers()
 	if len(closed) != 0 {
 		t.Errorf("expected no peers closed without state checker, got %v", closed)
+	}
+}
+
+// TestConnectionCleaner_SweepTearsDownThroughPeerManager checks that a tracked
+// stale peer's handler state is torn down by the peer manager (which stops the
+// peer's dispatch first), never by the cleaner directly, while an untracked
+// device's leftover handler state is still cleaned by the cleaner.
+func TestConnectionCleaner_SweepTearsDownThroughPeerManager(t *testing.T) {
+	tests := []struct {
+		name             string
+		untracked        bool
+		mockRunsTeardown bool
+		wantCleaned      bool
+	}{
+		{name: "tracked peer torn down by the manager", mockRunsTeardown: true, wantCleaned: true},
+		{name: "tracked peer not torn down by the cleaner", mockRunsTeardown: false, wantCleaned: false},
+		{name: "untracked device cleaned by the cleaner", untracked: true, wantCleaned: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := testCleanupHandler()
+			closer := &mockPeerCloser{untracked: tt.untracked}
+			if tt.mockRunsTeardown {
+				closer.handler = h
+			}
+			h.mu.Lock()
+			h.lastPingTime["stale-peer"] = time.Now().Add(-90 * time.Second)
+			h.mu.Unlock()
+
+			NewConnectionCleaner(h, closer, slog.Default()).WithTimeout(60 * time.Second).sweep()
+
+			if got := closer.getClosedPeers(); !slices.Equal(got, []string{"stale-peer"}) {
+				t.Errorf("DisconnectPeer called for %v, want [stale-peer]", got)
+			}
+			h.mu.Lock()
+			_, exists := h.lastPingTime["stale-peer"]
+			h.mu.Unlock()
+			if cleaned := !exists; cleaned != tt.wantCleaned {
+				t.Errorf("handler state cleaned = %v, want %v", cleaned, tt.wantCleaned)
+			}
+		})
 	}
 }

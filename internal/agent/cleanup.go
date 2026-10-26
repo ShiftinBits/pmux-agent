@@ -15,9 +15,13 @@ const (
 	DefaultIdleTimeout = 60 * time.Second
 )
 
-// PeerCloser closes a specific peer connection by device ID.
+// PeerCloser tears down a specific peer connection by device ID.
 type PeerCloser interface {
-	ClosePeer(deviceID string)
+	// DisconnectPeer tears the peer down in the background: it stops the
+	// peer's request dispatch, runs the disconnect handler (which cleans the
+	// Handler's state for it) and closes the peer. It reports whether a peer
+	// was tracked under deviceID.
+	DisconnectPeer(deviceID string) bool
 }
 
 // PeerStateChecker provides PeerConnection state information for safety-net
@@ -102,16 +106,7 @@ func (cc *ConnectionCleaner) sweep() {
 	stale := cc.handler.GetStalePeers(cc.timeout)
 	for _, peerID := range stale {
 		cc.logger.Info("closing idle peer", "peer", peerID, "timeout", cc.timeout)
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					cc.logger.Error("panic in PeerDisconnected during sweep",
-						"recover", r, "peer", peerID)
-				}
-			}()
-			cc.handler.PeerDisconnected(peerID)
-		}()
-		cc.closer.ClosePeer(peerID)
+		cc.disconnect(peerID)
 	}
 
 	// Safety net: close peers with dead PeerConnection state.
@@ -131,17 +126,25 @@ func (cc *ConnectionCleaner) sweep() {
 			if state == "failed" || state == "closed" {
 				cc.logger.Info("closing peer with dead PC state (safety net)",
 					"peer", peerID, "pcState", state)
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							cc.logger.Error("panic in PeerDisconnected during sweep",
-								"recover", r, "peer", peerID)
-						}
-					}()
-					cc.handler.PeerDisconnected(peerID)
-				}()
-				cc.closer.ClosePeer(peerID)
+				cc.disconnect(peerID)
 			}
 		}
 	}
+}
+
+// disconnect tears a peer down through the peer manager, so its request
+// dispatch stops before the handler teardown and a late attach cannot rebuild
+// the state afterwards. A peer the manager no longer tracks has no dispatch
+// left, so only its leftover handler state is cleaned here.
+func (cc *ConnectionCleaner) disconnect(peerID string) {
+	if cc.closer.DisconnectPeer(peerID) {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			cc.logger.Error("panic in PeerDisconnected during sweep",
+				"recover", r, "peer", peerID)
+		}
+	}()
+	cc.handler.PeerDisconnected(peerID)
 }
