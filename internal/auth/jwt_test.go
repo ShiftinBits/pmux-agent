@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,20 @@ func challengeHandler(nonce string, tokenHandler http.HandlerFunc) http.HandlerF
 			tokenHandler(w, r)
 		}
 	}
+}
+
+// rewriteTransport sends every request to target, ignoring the request URL.
+type rewriteTransport struct{ target string }
+
+func (rt rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	u, err := url.Parse(rt.target)
+	if err != nil {
+		return nil, err
+	}
+	req = req.Clone(req.Context())
+	req.URL.Scheme = u.Scheme
+	req.URL.Host = u.Host
+	return http.DefaultTransport.RoundTrip(req)
 }
 
 func TestExchangeToken(t *testing.T) {
@@ -64,12 +79,16 @@ func TestExchangeToken(t *testing.T) {
 				t.Error("signature is empty")
 			}
 
-			// Verify signature is over deviceID + "|" + nonce
+			// Verify signature is over the origin-bound challenge message
 			sigBytes, err := base64.StdEncoding.DecodeString(body.Signature)
 			if err != nil {
 				t.Fatalf("decode signature: %v", err)
 			}
-			message := []byte(body.DeviceID + "|" + body.Nonce)
+			origin, err := canonicalOrigin("http://" + r.Host)
+			if err != nil {
+				t.Fatalf("canonicalOrigin: %v", err)
+			}
+			message := []byte("pocketmux-auth-v1|" + origin + "|" + body.DeviceID + "|" + body.Nonce)
 			if !ed25519.Verify(id.Ed25519PublicKey, message, sigBytes) {
 				t.Error("signature verification failed")
 			}
@@ -109,6 +128,47 @@ func TestExchangeToken(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid server URL fails before any request", func(t *testing.T) {
+		for _, badURL := range []string{"https://user@host.example", "signal.pmux.io"} {
+			hits := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+			}))
+			defer server.Close()
+
+			// Route requests to the counting server regardless of the URL.
+			client := server.Client()
+			client.Transport = rewriteTransport{target: server.URL}
+			_, err := ExchangeToken(id, badURL, client, "")
+			if err == nil || !strings.Contains(err.Error(), "canonical server origin") {
+				t.Errorf("ExchangeToken(%q) error = %v, want canonical server origin error", badURL, err)
+			}
+			if hits != 0 {
+				t.Errorf("ExchangeToken(%q) sent %d requests, want 0", badURL, hits)
+			}
+		}
+	})
+
+	t.Run("redirect is not followed and names the signed origin", func(t *testing.T) {
+		followed := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			followed = true
+		}))
+		defer target.Close()
+		server := httptest.NewServer(challengeHandler(testNonce, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+"/auth/token", http.StatusTemporaryRedirect)
+		}))
+		defer server.Close()
+
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
+		if err == nil || !strings.Contains(err.Error(), "bound to origin") {
+			t.Fatalf("error = %v, want redirect origin diagnostic", err)
+		}
+		if followed {
+			t.Error("redirect was followed")
+		}
+	})
+
 	t.Run("server returns error on token request", func(t *testing.T) {
 		server := httptest.NewServer(challengeHandler(testNonce, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -122,6 +182,42 @@ func TestExchangeToken(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "server error (401)") {
 			t.Errorf("error = %q, want substring %q", err.Error(), "server error (401)")
+		}
+		if !strings.Contains(err.Error(), "signed for origin "+server.URL) {
+			t.Errorf("error = %q, want origin diagnostic for %s", err.Error(), server.URL)
+		}
+	})
+
+	t.Run("non-signature 401 has no origin diagnostic", func(t *testing.T) {
+		server := httptest.NewServer(challengeHandler(testNonce, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"Invalid or expired challenge"}`))
+		}))
+		defer server.Close()
+
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
+		if err == nil || strings.Contains(err.Error(), "signed for origin") {
+			t.Errorf("error = %v, want 401 without origin diagnostic", err)
+		}
+	})
+
+	t.Run("redirect on challenge is not followed and explains why", func(t *testing.T) {
+		followed := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			followed = true
+		}))
+		defer target.Close()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusMovedPermanently)
+		}))
+		defer server.Close()
+
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
+		if err == nil || !strings.Contains(err.Error(), "redirects are not followed") {
+			t.Fatalf("error = %v, want redirect diagnostic", err)
+		}
+		if followed {
+			t.Error("redirect was followed")
 		}
 	})
 

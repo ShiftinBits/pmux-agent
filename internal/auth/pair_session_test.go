@@ -41,6 +41,26 @@ func TestInitiatePairing(t *testing.T) {
 		}
 	}
 
+	t.Run("invalid server URL fails before any request", func(t *testing.T) {
+		for _, badURL := range []string{"https://user@host.example", "signal.pmux.io"} {
+			hits := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+			}))
+			defer server.Close()
+
+			client := server.Client()
+			client.Transport = rewriteTransport{target: server.URL}
+			_, err := InitiatePairing(id, "x25519key", badURL, client, "host", "")
+			if err == nil || !strings.Contains(err.Error(), "canonical server origin") {
+				t.Errorf("InitiatePairing(%q) error = %v, want canonical server origin error", badURL, err)
+			}
+			if hits != 0 {
+				t.Errorf("InitiatePairing(%q) sent %d requests, want 0", badURL, hits)
+			}
+		}
+	})
+
 	t.Run("successful initiation", func(t *testing.T) {
 		server := httptest.NewServer(pairHandler(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/auth/pair/initiate" {
@@ -80,7 +100,7 @@ func TestInitiatePairing(t *testing.T) {
 				t.Error("signature is empty")
 			}
 
-			// Verify the signature is over deviceID + "|" + nonce
+			// Verify the signature is over the origin-bound challenge message
 			pubKeyBytes, err := base64.StdEncoding.DecodeString(body.Ed25519PublicKey)
 			if err != nil {
 				t.Fatalf("decode publicKey: %v", err)
@@ -89,7 +109,11 @@ func TestInitiatePairing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode signature: %v", err)
 			}
-			message := []byte(body.DeviceID + "|" + body.Nonce)
+			origin, err := canonicalOrigin("http://" + r.Host)
+			if err != nil {
+				t.Fatalf("canonicalOrigin: %v", err)
+			}
+			message := []byte("pocketmux-auth-v1|" + origin + "|" + body.DeviceID + "|" + body.Nonce)
 			if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), message, sigBytes) {
 				t.Error("signature verification failed")
 			}

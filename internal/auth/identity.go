@@ -10,9 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -161,10 +167,101 @@ func HasIdentity(keysDir string, store SecretStore) bool {
 	return CheckIdentity(keysDir, store) == nil
 }
 
-// SignChallenge signs the token exchange challenge: deviceId + "|" + nonce.
+// challengeMessagePrefix versions the origin-bound token exchange challenge.
+const challengeMessagePrefix = "pocketmux-auth-v1"
+
+// canonicalOrigin reduces serverURL to scheme://host[:port], matching the
+// WHATWG URL origin the server signs against: scheme and host lowercased,
+// internationalized hosts converted to punycode, IPv6 hosts compressed and
+// bracketed, port normalized (leading zeros dropped, default 443 for https and
+// 80 for http omitted), and path, query and fragment dropped. URLs carrying
+// userinfo are rejected. The result must match the server's and mobile's
+// derivation.
+func canonicalOrigin(serverURL string) (string, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("parse server URL: %w", err)
+	}
+	if u.Scheme == "" {
+		return "", errors.New("server URL has no scheme")
+	}
+	if u.User != nil {
+		return "", errors.New("server URL must not contain userinfo")
+	}
+	rawHost := u.Hostname()
+	if rawHost == "" {
+		return "", errors.New("server URL has no host")
+	}
+	host, err := canonicalHost(rawHost)
+	if err != nil {
+		return "", err
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port, err := canonicalPort(scheme, u.Port())
+	if err != nil {
+		return "", err
+	}
+	if port != "" {
+		return scheme + "://" + host + ":" + port, nil
+	}
+	return scheme + "://" + host, nil
+}
+
+// canonicalHost lowercases an ASCII host, converts a non-ASCII host to
+// punycode, and renders an IPv6 literal in its compressed, bracketed form.
+func canonicalHost(host string) (string, error) {
+	if strings.Contains(host, ":") {
+		addr, err := netip.ParseAddr(host)
+		if err != nil || addr.Zone() != "" {
+			return "", fmt.Errorf("invalid IPv6 host %q", host)
+		}
+		if addr.Is4In6() {
+			// WHATWG serializes IPv4-mapped addresses as two hex groups.
+			b := addr.As16()
+			return fmt.Sprintf("[::ffff:%x:%x]", uint16(b[12])<<8|uint16(b[13]), uint16(b[14])<<8|uint16(b[15])), nil
+		}
+		return "[" + addr.String() + "]", nil
+	}
+	ascii := true
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return strings.ToLower(host), nil
+	}
+	converted, err := idna.New(idna.MapForLookup(), idna.BidiRule(), idna.StrictDomainName(false), idna.CheckHyphens(false)).ToASCII(host)
+	if err != nil {
+		return "", fmt.Errorf("convert host to ASCII: %w", err)
+	}
+	return converted, nil
+}
+
+// canonicalPort normalizes a URL port: numeric only, leading zeros dropped,
+// and the scheme's default port reported as empty.
+func canonicalPort(scheme, port string) (string, error) {
+	if port == "" {
+		return "", nil
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return "", fmt.Errorf("invalid port %q: %w", port, err)
+	}
+	if (scheme == "https" && n == 443) || (scheme == "http" && n == 80) {
+		return "", nil
+	}
+	return strconv.FormatUint(n, 10), nil
+}
+
+// SignChallenge signs the origin-bound token exchange challenge:
+// "pocketmux-auth-v1|" + origin + "|" + deviceID + "|" + nonce, where origin is
+// the canonical server origin (see canonicalOrigin). Binding the origin stops a
+// signature obtained from one server from being replayed against another.
 // Returns the base64-encoded signature.
-func (id *Identity) SignChallenge(deviceID string, nonce string) string {
-	message := []byte(deviceID + "|" + nonce)
+func (id *Identity) SignChallenge(origin, deviceID, nonce string) string {
+	message := []byte(challengeMessagePrefix + "|" + origin + "|" + deviceID + "|" + nonce)
 	sig := ed25519.Sign(id.PrivateKey, message)
 	return base64.StdEncoding.EncodeToString(sig)
 }

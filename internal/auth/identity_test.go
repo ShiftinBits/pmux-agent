@@ -304,7 +304,8 @@ func TestSignChallenge(t *testing.T) {
 
 	deviceID := id.DeviceID
 	nonce := "abc123nonce"
-	sig := id.SignChallenge(deviceID, nonce)
+	const origin = "https://signal.pmux.io"
+	sig := id.SignChallenge(origin, deviceID, nonce)
 
 	t.Run("returns base64-encoded signature", func(t *testing.T) {
 		sigBytes, err := base64.StdEncoding.DecodeString(sig)
@@ -316,9 +317,9 @@ func TestSignChallenge(t *testing.T) {
 		}
 	})
 
-	t.Run("signature verifies with public key over deviceID|nonce", func(t *testing.T) {
+	t.Run("signature verifies with public key over origin-bound message", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
-		message := []byte(deviceID + "|" + nonce)
+		message := []byte("pocketmux-auth-v1|" + origin + "|" + deviceID + "|" + nonce)
 		if !ed25519.Verify(id.Ed25519PublicKey, message, sigBytes) {
 			t.Error("signature verification failed")
 		}
@@ -326,18 +327,81 @@ func TestSignChallenge(t *testing.T) {
 
 	t.Run("signature fails with wrong message", func(t *testing.T) {
 		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
-		wrongMessage := []byte("wrong-device-id" + "|" + nonce)
+		wrongMessage := []byte("pocketmux-auth-v1|" + origin + "|wrong-device-id|" + nonce)
 		if ed25519.Verify(id.Ed25519PublicKey, wrongMessage, sigBytes) {
 			t.Error("signature should not verify with wrong message")
 		}
 	})
 
+	t.Run("legacy deviceID|nonce form does not verify", func(t *testing.T) {
+		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
+		if ed25519.Verify(id.Ed25519PublicKey, []byte(deviceID+"|"+nonce), sigBytes) {
+			t.Error("signature must not verify over the legacy message")
+		}
+	})
+
+	t.Run("signature for origin A does not verify for origin B", func(t *testing.T) {
+		sigBytes, _ := base64.StdEncoding.DecodeString(sig)
+		other := []byte("pocketmux-auth-v1|https://evil.example|" + deviceID + "|" + nonce)
+		if ed25519.Verify(id.Ed25519PublicKey, other, sigBytes) {
+			t.Error("signature should not verify for a different origin")
+		}
+		if id.SignChallenge("https://evil.example", deviceID, nonce) == sig {
+			t.Error("different origins should produce different signatures")
+		}
+	})
+
 	t.Run("different nonces produce different signatures", func(t *testing.T) {
-		sig2 := id.SignChallenge(deviceID, "differentnonce")
+		sig2 := id.SignChallenge(origin, deviceID, "differentnonce")
 		if sig == sig2 {
 			t.Error("different nonces should produce different signatures")
 		}
 	})
+}
+
+func TestCanonicalOrigin(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"trailing slash", "https://signal.pmux.io/", "https://signal.pmux.io", false},
+		{"uppercase scheme and host", "HTTPS://Signal.PMUX.io", "https://signal.pmux.io", false},
+		{"default https port", "https://signal.pmux.io:443", "https://signal.pmux.io", false},
+		{"explicit port ip", "http://192.168.1.5:8787", "http://192.168.1.5:8787", false},
+		{"default http port with path", "http://localhost:80/v1", "http://localhost", false},
+		{"non-default port with path", "https://example.com:8443/path", "https://example.com:8443", false},
+		{"ipv6 with port", "http://[FD00::1]:8787", "http://[fd00::1]:8787", false},
+		{"ipv6 default port", "https://[FD00::1]:443/", "https://[fd00::1]", false},
+		{"ipv6 no port", "https://[FD00::1]", "https://[fd00::1]", false},
+		{"query and fragment dropped", "https://example.com/a?b=c#d", "https://example.com", false},
+		{"idn host", "https://Bücher.example/", "https://xn--bcher-kva.example", false},
+		{"idn host with port", "https://bücher.example:8443", "https://xn--bcher-kva.example:8443", false},
+		{"idn host with leading hyphen", "https://-bücher.example", "https://xn---bcher-4ya.example", false},
+		{"ipv6 compressed", "http://[2001:0db8:0000:0000:0000:0000:0000:0001]:8787", "http://[2001:db8::1]:8787", false},
+		{"ipv6 loopback expanded", "http://[0:0:0:0:0:0:0:1]", "http://[::1]", false},
+		{"ipv4-mapped ipv6", "http://[::ffff:1.2.3.4]", "http://[::ffff:102:304]", false},
+		{"port leading zeros default", "https://example.com:0443", "https://example.com", false},
+		{"port leading zeros non-default", "http://example.com:08787", "http://example.com:8787", false},
+		{"port out of range", "https://example.com:70000", "", true},
+		{"ipv6 zone rejected", "http://[fe80::1%25eth0]", "", true},
+		{"userinfo rejected", "https://user@signal.pmux.io", "", true},
+		{"unparsable url", "http://[::1", "", true},
+		{"missing scheme", "signal.pmux.io", "", true},
+		{"empty host", "https://", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := canonicalOrigin(tt.in)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("canonicalOrigin(%q) error = %v, wantErr %v", tt.in, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("canonicalOrigin(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestEd25519PublicKeyBase64(t *testing.T) {
