@@ -82,10 +82,13 @@ type Client struct {
 	inputSeq atomic.Uint64
 
 	// pipes records, per pane, the bridge whose pipe-pane is the pane's
-	// current pipe (tmux allows one). Guarded by pipesMu; created lazily so a
-	// Client literal works.
-	pipesMu sync.Mutex
-	pipes   map[string]*PaneBridge
+	// current pipe (tmux allows one). paneLocks holds each pane's lock, which
+	// serializes pipe-pane changes and ownership-record updates for that
+	// pane. pipesMu guards only these two maps and is never held across a
+	// subprocess. Both maps are created lazily so a Client literal works.
+	pipesMu   sync.Mutex
+	pipes     map[string]*PaneBridge
+	paneLocks map[string]*sync.Mutex
 }
 
 // NewClient creates a tmux client targeting the given socket.

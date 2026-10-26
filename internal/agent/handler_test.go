@@ -1926,3 +1926,78 @@ func TestHandler_ToProtocolSessions(t *testing.T) {
 		t.Errorf("Pane cols = %d, want 80", proto[0].Windows[0].Panes[0].Size.Cols)
 	}
 }
+
+// TestHandler_PreStreamPanicReleasesDetach checks that a panic during the
+// pre-stream sends, once the attachment is registered, detaches the peer and
+// closes the stream's done channel before the panic reaches the peer's message
+// recovery, so no bridge is left for input and resize, and a later detach does
+// not wait on done forever.
+func TestHandler_PreStreamPanicReleasesDetach(t *testing.T) {
+	catcher := &messageCatcher{}
+	var panicOnAttached atomic.Bool
+	var registeredAtPanic atomic.Bool
+	var h *Handler
+	send := func(ctx context.Context, peerID string, msg protocol.Message) error {
+		if _, ok := msg.(*protocol.AttachedEvent); ok && panicOnAttached.Load() {
+			h.mu.Lock()
+			_, hasStream := h.streamDone[peerID]
+			_, hasBridge := h.bridges[peerID]
+			h.mu.Unlock()
+			registeredAtPanic.Store(hasStream && hasBridge)
+			panic("send exploded")
+		}
+		return catcher.Send(ctx, peerID, msg)
+	}
+	h, paneID := newStreamTestHandler(t, "pmux-prestream-panic-test", send)
+
+	panicOnAttached.Store(true)
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }() // peer.go recovers this in production
+		h.HandleMessage("peer1", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24, Compression: "deflate"})
+	}()
+	if recovered == nil {
+		t.Fatal("attach did not panic; the test no longer reaches the pre-stream sends")
+	}
+	if !registeredAtPanic.Load() {
+		t.Fatal("attach panicked before registering its stream and bridge")
+	}
+
+	h.mu.Lock()
+	_, hasStream := h.streamDone["peer1"]
+	_, hasBridge := h.bridges["peer1"]
+	_, hasCancel := h.cancels["peer1"]
+	_, hasPane := h.paneForPeer["peer1"]
+	h.mu.Unlock()
+	if hasStream || hasBridge || hasCancel || hasPane {
+		t.Errorf("attachment state left after a pre-stream panic: streamDone=%v bridge=%v cancel=%v pane=%v",
+			hasStream, hasBridge, hasCancel, hasPane)
+	}
+	out, err := exec.Command("tmux", "-L", "pmux-prestream-panic-test", "display-message", "-p", "-t", paneID, "#{pane_pipe}").Output()
+	if err != nil {
+		t.Fatalf("query pane_pipe: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "0" {
+		t.Errorf("pane_pipe = %q after a pre-stream panic, want 0 (pipe released)", got)
+	}
+	reset := false
+	for _, m := range catcher.get() {
+		if e, ok := m.Msg.(*protocol.ErrorEvent); ok && m.PeerID == "peer1" && e.Code == errCodeStreamReset {
+			reset = true
+		}
+	}
+	if !reset {
+		t.Error("no stream_reset sent after a pre-stream panic; the mobile would sit on a dead attachment")
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		h.detachPeer("peer1")
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detachPeer blocked after a pre-stream panic")
+	}
+}

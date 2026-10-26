@@ -280,6 +280,33 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	done := make(chan struct{})
 
+	// Until streamOutput takes ownership, this function owns the compressor
+	// and done, and releases both on every exit path, so a concurrent detach
+	// waiting on done is never stranded. A panic during the pre-stream sends
+	// ends the attachment as a pre-stream failure does: the peer is detached
+	// and, since the mobile may already have its attached event, sent a
+	// stream_reset so it does not sit on a dead stream. The panic is then
+	// re-raised for the peer's message recovery to log.
+	var compressor *protocol.OutputCompressor
+	streamOwned := false
+	defer func() {
+		if streamOwned {
+			return
+		}
+		if compressor != nil {
+			compressor.Close()
+		}
+		r := recover()
+		// A canceled ctx means a concurrent detach owns the cleanup.
+		if r != nil && ctx.Err() == nil {
+			h.resetStream(peerID, done, "attach failed; re-attach")
+		}
+		h.endStream(peerID, done)
+		if r != nil {
+			panic(r)
+		}
+	}()
+
 	h.mu.Lock()
 	h.bridges[peerID] = bridge
 	h.cancels[peerID] = cancel
@@ -295,7 +322,6 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		Type:   "attached",
 		PaneID: req.PaneID,
 	}
-	var compressor *protocol.OutputCompressor
 	if req.Compression == "deflate" {
 		compressor = protocol.NewOutputCompressor()
 		attachedEvent.Compression = "deflate"
@@ -307,16 +333,13 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	// attached{compression:deflate}, and a compressed chunk that fails to
 	// send would desynchronize the mobile's inflater, so either failure ends
 	// the attachment as a stream failure would (failPreStream). The stream
-	// never started, so failPreStream closes its done channel and compressor.
+	// never started, so the deferred guard above closes its compressor and
+	// done channel when handleAttach returns.
 	failPreStream := func(reason string) {
-		if compressor != nil {
-			compressor.Close()
-		}
 		// A canceled ctx means a concurrent detach owns the cleanup.
 		if ctx.Err() == nil {
 			h.resetStream(peerID, done, reason)
 		}
-		h.endStream(peerID, done)
 	}
 	sendPreStream := func(data []byte) bool {
 		if compressor != nil {
@@ -390,6 +413,7 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 
 	// Start streaming output in background with context for lifecycle
 	// management. streamOutput owns the compressor and closes done on exit.
+	streamOwned = true
 	go h.streamOutput(ctx, peerID, bridge, compressor, done)
 
 	// Start pane existence watcher — detects pane closure when the process exits

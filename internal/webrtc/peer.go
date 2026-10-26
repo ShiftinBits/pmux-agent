@@ -145,7 +145,8 @@ type PeerManager struct {
 	disconnectTimers map[string]*time.Timer // grace timers for disconnected peers
 	iceRestartTimers map[string]*time.Timer // ICE-restart answer watchdogs (kept apart from grace timers, SB-1008)
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
-	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
+	cleanupWg        sync.WaitGroup         // tracks every background cleanup unit: handler teardown and Pion Close
+	teardownWg       sync.WaitGroup         // tracks only the OnPeerDisconnect (handler teardown) part of background cleanup
 	closed           bool                   // true while closeAll runs, and after CloseAll; cleared by CloseAllAndReopen
 	shutDown         bool                   // set by CloseAll; keeps an overlapping CloseAllAndReopen from reopening
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
@@ -170,6 +171,25 @@ type Peer struct {
 	iceCandidates []webrtc.ICECandidateInit // buffered candidates received before remote desc
 	forceRelay    bool                      // relay-only mode active (for diagnostics logging)
 	silenced      bool                      // when true, OnICECandidate stops sending; set synchronously on reconnect
+
+	// dispatchMu serializes inbound DataChannel message handling with
+	// stopDispatch: handleDataChannelMessage holds it across the whole
+	// dispatch, including the handler call. Once dispatchStopped is set no
+	// further request reaches the handler, so the disconnect handler cannot
+	// race a late request that rebuilds handler state. Separate from silenced
+	// (ICE only) and closed. dispatchMu is taken only there and in
+	// stopDispatch, never while holding pm.mu or p.mu, so the order is
+	// dispatchMu before pm.mu before p.mu (a handler send takes both).
+	dispatchMu      sync.Mutex
+	dispatchStopped bool // guarded by dispatchMu
+
+	// sendStop is closed by stopDispatch to release an output send waiting on
+	// backpressure, so a teardown never waits out sendReadyTimeout for the
+	// request in flight. Unlike done it is closed without p.mu, which a hung
+	// Close holds. Created on first use so a zero-value Peer works; guarded by
+	// sendStopMu, a leaf lock never held with another.
+	sendStopMu sync.Mutex
+	sendStop   chan struct{}
 
 	// Mutual key-possession proof, bound to the DTLS session. The peer must
 	// prove it holds the pairing shared secret before any request is processed,
@@ -373,12 +393,13 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 }
 
 // goCleanup runs fn in a background goroutine, tracked by cleanupWg while the
-// manager is open. The Add happens under pm.mu behind the closed check, as in
-// scheduleCleanup, so it can never race closeAll's cleanupWg.Wait. Once closed,
-// fn still runs, untracked, as closeViaManager does: the peer fn tears down may
-// be missing from closeAll's snapshot (removed from the map first, or added
-// after the snapshot), so skipping it would leak the peer. Caller must not hold
-// pm.mu.
+// manager is open. It is for Pion closes: CloseAll waits for them, a reload
+// (CloseAllAndReopen) does not. The Add happens under pm.mu behind the closed
+// check, as in scheduleCleanup, so it can never race closeAll's
+// cleanupWg.Wait. Once closed, fn still runs, untracked, as closeViaManager
+// does: the peer fn tears down may be missing from closeAll's snapshot (removed
+// from the map first, or added after the snapshot), so skipping it would leak
+// the peer. Caller must not hold pm.mu.
 func (pm *PeerManager) goCleanup(fn func()) {
 	pm.mu.Lock()
 	tracked := !pm.closed
@@ -389,6 +410,29 @@ func (pm *PeerManager) goCleanup(fn func()) {
 	go func() {
 		if tracked {
 			defer pm.cleanupWg.Done()
+		}
+		fn()
+	}()
+}
+
+// goTeardownLocked is goCleanup for handler teardown (OnPeerDisconnect): while
+// the manager is open, fn is tracked by teardownWg as well as cleanupWg, so a
+// reload waits for it but not for background Pion closes. Caller must hold
+// pm.mu, and must call it in the same hold that removes the torn-down peer
+// from the map: a closeAll whose snapshot misses that peer then still waits
+// for fn. Once closed, fn runs untracked, as with goCleanup; the
+// reconnect-replace path never sees that, because a peer still in the map
+// means closeAll has not yet cleared it and set closed.
+func (pm *PeerManager) goTeardownLocked(fn func()) {
+	tracked := !pm.closed
+	if tracked {
+		pm.teardownWg.Add(1)
+		pm.cleanupWg.Add(1)
+	}
+	go func() {
+		if tracked {
+			defer pm.cleanupWg.Done()
+			defer pm.teardownWg.Done()
 		}
 		fn()
 	}()
@@ -452,9 +496,9 @@ func (pm *PeerManager) stopTimersLocked(deviceID string) {
 	delete(pm.disconnectTimes, deviceID)
 }
 
-// CloseAll closes all peer connections for agent shutdown and waits for
-// background cleanup goroutines (from state change handlers) to finish. The
-// manager stays closed: no further cleanup is scheduled.
+// CloseAll closes all peer connections for agent shutdown and waits for every
+// peer's Close and all background cleanup (handler teardown and Pion closes) to
+// finish. The manager stays closed: no further cleanup is scheduled.
 func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
 	pm.shutDown = true
@@ -465,13 +509,22 @@ func (pm *PeerManager) CloseAll() {
 // CloseAllAndReopen closes all peer connections, as CloseAll does, then reopens
 // the manager so peers that connect afterwards get the normal cleanup and ICE
 // restart handling. Used when the pairing state is reloaded. It reopens once
-// the disconnect handlers and cleanup goroutines are done, without waiting for
-// the old peers' Pion Close (30s+ for an unreachable peer): connect requests
-// are dropped while closed, and a re-paired phone connects right away. The old
-// peers are already out of the map, so their Closed callbacks are no-ops.
-// Reusing cleanupWg is safe because closeAll has returned from cleanupWg.Wait
-// and new Adds only happen once closed is cleared. A CloseAll that overlaps the
-// reload wins and the manager stays closed.
+// the disconnect handlers and background handler teardowns are done, without
+// waiting for any Pion Close (30s+ for an unreachable peer): neither the old
+// peers' nor those already running in the background from failed-peer cleanup
+// or a replaced peer. Connect requests are dropped while closed, so a re-paired
+// phone connects right away. The old peers are already out of the map, so
+// their Closed callbacks are no-ops.
+//
+// Reopening can leave cleanupWg nonzero. That is safe: Adds to either group
+// happen only under pm.mu while the manager is open, and Waits on either group
+// run only while it is closed, so an Add never races a Wait. teardownWg is
+// zero when the reload's Wait returns. A later CloseAll's cleanupWg.Wait also
+// covers background closes (goCleanup, scheduleCleanup) still running from
+// before an earlier reload, within the agent's 10s shutdown cap. The reload's
+// own peers' Close calls are tracked only by closeAll's local group, so no
+// later CloseAll waits for them. A CloseAll that overlaps the reload wins and
+// the manager stays closed.
 func (pm *PeerManager) CloseAllAndReopen() {
 	pm.closeAll(false)
 	pm.mu.Lock()
@@ -482,9 +535,11 @@ func (pm *PeerManager) CloseAllAndReopen() {
 }
 
 // closeAll marks the manager closed, notifies the disconnect handler and closes
-// every tracked peer, then waits for the tracked cleanup goroutines. With
-// waitClose false it returns once every disconnect handler has run and leaves
-// the peers' Close running in the background.
+// every tracked peer, then waits for the background handler teardowns
+// (teardownWg). With waitClose true it also waits for every peer's Close and
+// all background cleanup (cleanupWg). With waitClose false it returns once the
+// handler teardowns are done and leaves every Pion Close, the peers' own and
+// those already running in the background, to finish on its own.
 func (pm *PeerManager) closeAll(waitClose bool) {
 	pm.mu.Lock()
 	pm.closed = true
@@ -509,13 +564,15 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 	// The disconnect handler runs first, without pm.mu held: it restores the
 	// pane and releases the pipe, and must finish even when Close outlasts the
 	// shutdown bound. The map is already cleared, so the Closed state callback
-	// does not fire the handler a second time.
+	// does not fire the handler a second time. Dispatch stops first, so a
+	// request arriving mid-teardown cannot rebuild the handler state.
 	var notifyWg, closeWg sync.WaitGroup
 	for deviceID, p := range peers {
 		notifyWg.Add(1)
 		closeWg.Add(1)
 		go func() {
 			defer closeWg.Done()
+			p.stopDispatch()
 			if pm.OnPeerDisconnect != nil {
 				pm.OnPeerDisconnect(deviceID)
 			}
@@ -524,13 +581,16 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 		}()
 	}
 	notifyWg.Wait()
+
+	// Wait for in-flight handler teardowns from scheduleCleanup or a replaced
+	// peer: the disconnect handler must finish before closeAll returns.
+	pm.teardownWg.Wait()
+
 	if waitClose {
 		closeWg.Wait()
+		// Wait for the rest of the background cleanup, the Pion closes.
+		pm.cleanupWg.Wait()
 	}
-
-	// Wait for any in-flight cleanup goroutines spawned by handlePeerStateChange
-	// or attemptICERestart to finish before returning.
-	pm.cleanupWg.Wait()
 
 	if closedCount > 0 {
 		pm.logger.Info("all peers closed",
@@ -545,6 +605,10 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 // the teardown runs asynchronously in the spawned goroutine.
 // Caller must hold pm.mu.
 //
+// The whole unit is tracked by cleanupWg, and the handler step alone by
+// teardownWg, released before the Pion close, so a reload waits for the
+// teardown but not the close.
+//
 // A reconnect may replace this peer under the same device ID between the call
 // site and the goroutine running. If so, only the stale peer is closed:
 // firing OnPeerDisconnect or evicting the map slot would tear down the *new*
@@ -554,18 +618,56 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 	if pm.closed {
 		return
 	}
-	deviceID := peer.DeviceID
+	pm.teardownWg.Add(1)
 	pm.cleanupWg.Add(1)
 	go func() {
 		defer pm.cleanupWg.Done()
-		pm.mu.Lock()
-		current := pm.peers[deviceID] == peer
-		pm.mu.Unlock()
-		if current && pm.OnPeerDisconnect != nil {
-			pm.OnPeerDisconnect(deviceID)
-		}
-		pm.ClosePeerIfCurrent(deviceID, peer)
+		func() {
+			defer pm.teardownWg.Done()
+			pm.teardownIfCurrent(peer)
+		}()
+		pm.ClosePeerIfCurrent(peer.DeviceID, peer)
 	}()
+}
+
+// teardownIfCurrent stops the peer's dispatch, then runs the disconnect
+// handler if the peer is still the one tracked under its device ID. The peer
+// is closed next either way, so dispatch stops unconditionally. A panic in the
+// disconnect handler is logged, not propagated, so the peer is still closed
+// and the agent keeps running (the ConnectionCleaner sweep relied on this
+// before it tore peers down through here). Caller must not hold pm.mu.
+func (pm *PeerManager) teardownIfCurrent(peer *Peer) {
+	peer.stopDispatch()
+	pm.mu.Lock()
+	current := pm.peers[peer.DeviceID] == peer
+	pm.mu.Unlock()
+	if !current || pm.OnPeerDisconnect == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			pm.logger.Error("panic in disconnect handler",
+				"recover", r, "mobile", peer.DeviceID,
+				"stack", string(debug.Stack()))
+		}
+	}()
+	pm.OnPeerDisconnect(peer.DeviceID)
+}
+
+// DisconnectPeer tears down the peer tracked under deviceID as failed-peer
+// cleanup does (scheduleCleanup): in the background, tracked for reloads and
+// shutdown, it stops the peer's dispatch, runs the disconnect handler and
+// closes the peer. It reports whether a peer was tracked; when none is, the
+// caller owns any handler state left for deviceID. Used by the
+// ConnectionCleaner sweep.
+func (pm *PeerManager) DisconnectPeer(deviceID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	peer, ok := pm.peers[deviceID]
+	if ok {
+		pm.scheduleCleanup(peer)
+	}
+	return ok
 }
 
 // isClosed reports whether the manager is closed (see the closed field).
@@ -691,6 +793,15 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 	//
 	// Lock ordering: pm.mu is always acquired before a Peer's p.mu (e.g.
 	// oldPeer.silence() below). Never take pm.mu while holding a p.mu.
+	//
+	// The old session's handler state (pane bridge, output stream) is torn
+	// down before the new peer is inserted. Handler state is keyed by device
+	// ID, so a teardown that ran after the insert would destroy the new peer's
+	// session instead (see scheduleCleanup). The teardown is registered in the
+	// same lock hold that removes the old peer, so a closeAll whose snapshot no
+	// longer holds it still waits for it; it runs in its own goroutine, without
+	// pm.mu held, because stopping dispatch can wait on an in-flight request.
+	var torn chan struct{}
 	pm.mu.Lock()
 	oldPeer, hadOld := pm.peers[mobileDeviceID]
 	if hadOld {
@@ -701,27 +812,24 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		oldPeer.silence()
 		delete(pm.peers, mobileDeviceID)
 		pm.recordReplacedAttemptLocked(oldPeer.attemptID)
+		if pm.OnPeerDisconnect != nil {
+			torn = make(chan struct{})
+			pm.goTeardownLocked(func() {
+				defer close(torn)
+				oldPeer.stopDispatch()
+				pm.OnPeerDisconnect(mobileDeviceID)
+			})
+		}
 	}
 	pm.stopTimersLocked(mobileDeviceID)
 	pm.mu.Unlock()
 
 	if hadOld {
-		// Tear down the old session's handler state (pane bridge, output
-		// stream) synchronously, before the new peer is inserted. Handler state
-		// is keyed by device ID, so a teardown that ran after the insert would
-		// destroy the new peer's session instead (see scheduleCleanup). Called
-		// without pm.mu held.
-		//
 		// ponytail: the wait is bounded so a wedged tmux can't freeze this
 		// signaling readLoop. Past the bound the teardown finishes in the
 		// background and can still hit the new session's device-keyed state;
 		// keying handler state by peer identity would remove that ceiling.
-		if pm.OnPeerDisconnect != nil {
-			torn := make(chan struct{})
-			pm.goCleanup(func() {
-				defer close(torn)
-				pm.OnPeerDisconnect(mobileDeviceID)
-			})
+		if torn != nil {
 			select {
 			case <-torn:
 			case <-time.After(replacementTeardownTimeout):
@@ -1450,45 +1558,102 @@ func (p *Peer) setupDataChannelHandlers(dc *webrtc.DataChannel) {
 					"stack", string(debug.Stack()))
 			}
 		}()
-
-		p.mu.Lock()
-		authed := p.authenticated
-		p.mu.Unlock()
-
-		decoded, err := protocol.Decode(msg.Data)
-		if err != nil {
-			p.logger.Debug("failed to decode DataChannel message", "error", err)
-			if !authed {
-				// A pre-auth message that doesn't decode (e.g. an outdated
-				// app's v1 auth_response) can never authenticate: free the
-				// peer slot now instead of at the auth timeout.
-				p.failAuth("undecodable message before authentication")
-			}
-			return
-		}
-
-		// Key-possession gate (SB-992): until the peer proves it holds the
-		// pairing shared secret, the only message accepted is the auth
-		// response. This authenticates the peer independently of the
-		// (untrusted) signaling server.
-		if !authed {
-			p.verifyAuthResponse(decoded)
-			return
-		}
-
-		// Only accept request-direction messages from mobile. (auth_response
-		// is deliberately excluded from IsRequest, so a post-auth replay is
-		// dropped here.)
-		if !protocol.IsRequest(decoded) {
-			p.logger.Debug("ignoring non-request message from mobile",
-				"type", decoded.MessageType(), "device", p.DeviceID)
-			return
-		}
-
-		if p.handler != nil {
-			p.handler(p.DeviceID, decoded)
-		}
+		p.handleDataChannelMessage(msg.Data)
 	})
+}
+
+// handleDataChannelMessage decodes one inbound DataChannel message and
+// dispatches it: the auth response before authentication, requests to the
+// handler afterwards. It runs under dispatchMu so stopDispatch can wait out an
+// in-flight call, and drops the message once dispatch is stopped. Pion
+// delivers OnMessage serially per DataChannel, so only stopDispatch contends
+// for the lock. failAuth and closeViaManager only spawn the teardown, which
+// takes dispatchMu after this returns, so calling them here cannot deadlock.
+func (p *Peer) handleDataChannelMessage(data []byte) {
+	p.dispatchMu.Lock()
+	defer p.dispatchMu.Unlock()
+	if p.dispatchStopped {
+		p.logger.Debug("dropping DataChannel message: dispatch stopped", "device", p.DeviceID)
+		return
+	}
+
+	p.mu.Lock()
+	authed := p.authenticated
+	p.mu.Unlock()
+
+	decoded, err := protocol.Decode(data)
+	if err != nil {
+		p.logger.Debug("failed to decode DataChannel message", "error", err)
+		if !authed {
+			// A pre-auth message that doesn't decode (e.g. an outdated
+			// app's v1 auth_response) can never authenticate: free the
+			// peer slot now instead of at the auth timeout.
+			p.failAuth("undecodable message before authentication")
+		}
+		return
+	}
+
+	// Key-possession gate (SB-992): until the peer proves it holds the
+	// pairing shared secret, the only message accepted is the auth
+	// response. This authenticates the peer independently of the
+	// (untrusted) signaling server.
+	if !authed {
+		p.verifyAuthResponse(decoded)
+		return
+	}
+
+	// Only accept request-direction messages from mobile. (auth_response
+	// is deliberately excluded from IsRequest, so a post-auth replay is
+	// dropped here.)
+	if !protocol.IsRequest(decoded) {
+		p.logger.Debug("ignoring non-request message from mobile",
+			"type", decoded.MessageType(), "device", p.DeviceID)
+		return
+	}
+
+	if p.handler != nil {
+		p.handler(p.DeviceID, decoded)
+	}
+}
+
+// stopDispatch stops the peer from dispatching DataChannel messages. Because
+// handleDataChannelMessage holds dispatchMu across the dispatch, it also waits
+// out a handler call already in progress. Once it returns no further request
+// reaches the handler, so a following OnPeerDisconnect cannot race a late
+// attach that rebuilds handler state. It first releases any output send
+// waiting on backpressure, so the wait is one handler call's tmux subprocesses
+// rather than the 5s backpressure timeout; every caller closes the peer next,
+// so no later output is lost. Caller must not hold pm.mu or p.mu.
+func (p *Peer) stopDispatch() {
+	p.sendStopMu.Lock()
+	stop := p.sendStopLocked()
+	select {
+	case <-stop:
+	default:
+		close(stop)
+	}
+	p.sendStopMu.Unlock()
+
+	p.dispatchMu.Lock()
+	p.dispatchStopped = true
+	p.dispatchMu.Unlock()
+}
+
+// sendStopped returns the channel stopDispatch closes to release output sends
+// waiting on backpressure.
+func (p *Peer) sendStopped() <-chan struct{} {
+	p.sendStopMu.Lock()
+	defer p.sendStopMu.Unlock()
+	return p.sendStopLocked()
+}
+
+// sendStopLocked returns sendStop, creating it on first use. Caller must hold
+// sendStopMu.
+func (p *Peer) sendStopLocked() chan struct{} {
+	if p.sendStop == nil {
+		p.sendStop = make(chan struct{})
+	}
+	return p.sendStop
 }
 
 // sendAuthChallenge generates a random nonce, sends it to the peer as an
@@ -1805,7 +1970,8 @@ func (p *Peer) logSelectedCandidatePair() {
 // waitForSendReady blocks if the DataChannel buffer exceeds maxBufferedAmount,
 // waiting for the OnBufferedAmountLow callback to signal that sending can resume.
 // Returns an error if the timeout expires, ctx is canceled, or the peer is
-// closed (done channel is closed by Close()). The dc parameter must be captured
+// closed (done channel is closed by Close()) or being torn down (stopDispatch
+// was called). The dc parameter must be captured
 // under p.mu before calling this method (which runs without the lock held).
 func (p *Peer) waitForSendReady(ctx context.Context, dc *webrtc.DataChannel) error {
 	// Drain any stale signal from a prior drain cycle to prevent false
@@ -1825,6 +1991,8 @@ func (p *Peer) waitForSendReady(ctx context.Context, dc *webrtc.DataChannel) err
 		return nil
 	case <-p.done:
 		return fmt.Errorf("peer connection closed")
+	case <-p.sendStopped():
+		return fmt.Errorf("peer connection closing")
 	case <-ctx.Done():
 		return fmt.Errorf("send canceled: %w", ctx.Err())
 	case <-time.After(sendReadyTimeout):
