@@ -1926,3 +1926,42 @@ func TestHandler_ToProtocolSessions(t *testing.T) {
 		t.Errorf("Pane cols = %d, want 80", proto[0].Windows[0].Panes[0].Size.Cols)
 	}
 }
+
+// TestHandler_PreStreamPanicReleasesDetach checks that a panic during the
+// pre-stream sends still closes the stream's done channel, so a later detach
+// does not wait on it forever.
+func TestHandler_PreStreamPanicReleasesDetach(t *testing.T) {
+	catcher := &messageCatcher{}
+	var panicOnAttached atomic.Bool
+	send := func(ctx context.Context, peerID string, msg protocol.Message) error {
+		if _, ok := msg.(*protocol.AttachedEvent); ok && panicOnAttached.Load() {
+			panic("send exploded")
+		}
+		return catcher.Send(ctx, peerID, msg)
+	}
+	h, paneID := newStreamTestHandler(t, "pmux-prestream-panic-test", send)
+
+	panicOnAttached.Store(true)
+	func() {
+		defer func() { _ = recover() }() // peer.go recovers this in production
+		h.HandleMessage("peer1", &protocol.AttachRequest{Type: "attach", PaneID: paneID, Cols: 80, Rows: 24})
+	}()
+
+	returned := make(chan struct{})
+	go func() {
+		h.detachPeer("peer1")
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detachPeer blocked after a pre-stream panic")
+	}
+
+	h.mu.Lock()
+	_, hasStream := h.streamDone["peer1"]
+	h.mu.Unlock()
+	if hasStream {
+		t.Error("streamDone entry still present after detach")
+	}
+}

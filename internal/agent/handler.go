@@ -280,6 +280,17 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	done := make(chan struct{})
 
+	// Until streamOutput takes ownership, this function closes done on every
+	// exit path (including a panic during the pre-stream sends, which the
+	// peer's message recovery otherwise swallows), so a concurrent detach
+	// waiting on done is never stranded.
+	streamOwned := false
+	defer func() {
+		if !streamOwned {
+			h.endStream(peerID, done)
+		}
+	}()
+
 	h.mu.Lock()
 	h.bridges[peerID] = bridge
 	h.cancels[peerID] = cancel
@@ -307,7 +318,8 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	// attached{compression:deflate}, and a compressed chunk that fails to
 	// send would desynchronize the mobile's inflater, so either failure ends
 	// the attachment as a stream failure would (failPreStream). The stream
-	// never started, so failPreStream closes its done channel and compressor.
+	// never started, so failPreStream closes its compressor and the deferred
+	// guard above closes the done channel when handleAttach returns.
 	failPreStream := func(reason string) {
 		if compressor != nil {
 			compressor.Close()
@@ -316,7 +328,6 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		if ctx.Err() == nil {
 			h.resetStream(peerID, done, reason)
 		}
-		h.endStream(peerID, done)
 	}
 	sendPreStream := func(data []byte) bool {
 		if compressor != nil {
@@ -390,6 +401,7 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 
 	// Start streaming output in background with context for lifecycle
 	// management. streamOutput owns the compressor and closes done on exit.
+	streamOwned = true
 	go h.streamOutput(ctx, peerID, bridge, compressor, done)
 
 	// Start pane existence watcher — detects pane closure when the process exits
