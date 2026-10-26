@@ -42,7 +42,7 @@ Intercepted in `main()`: `init`, `pair`, `config`, `status`, `unpair`, `uninstal
 
 | Signal | Effect |
 |--------|--------|
-| SIGUSR1 | Activity ping from CLI — wakes signaling from dormancy and clears a sleep suspension (`Resume()`) |
+| SIGUSR1 | Activity ping from CLI — wakes signaling from dormancy (`SignalActivity()`) |
 | SIGUSR2 | Reload pairing state, close all peers, then reopen the `PeerManager` for new connections (`CloseAllAndReopen`; sent by `pmux pair`) |
 | SIGTERM/SIGINT | Graceful stop (10s cap; `CloseAll` leaves the `PeerManager` closed); second signal → `os.Exit(1)` |
 
@@ -85,7 +85,7 @@ Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `tr
 - **Single-pairing**: enforced at runtime by `PeerManager.MaxPeers` (default 1) + `SetAllowedDeviceID`. Re-pairing replaces the old device with confirmation.
 - **Wire limits** in `protocol/validation.go` must match `@pocketmux/shared` `src/codec.ts`. `TestCrossLanguageFixtures` reads `packages/shared/src/__tests__/fixtures` (skips if shared isn't cloned alongside).
 - **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`; each output stream owns its compressor. A compression error, or a failed send of compressed output (including the pre-stream initial content), ends the stream and sends `stream_reset` so the mobile can re-attach (needs mobile handling).
-- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` and by macOS IOKit `IORegisterForSystemPower` (purego, no cgo). On macOS, Resume after `HasPoweredOn` is delayed 10s and cancelled by a following `WillSleep` (DarkWake). SIGUSR1 calls `Resume`.
+- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` and by macOS IOKit `IORegisterForSystemPower` (purego, no cgo). The kernel hides DarkWakes from `IORegisterForSystemPower` clients, so macOS needs no wake debounce. SIGUSR1 never clears a suspension; only the watcher's `Resume` does.
 - **ICE recovery** (`peer.go`): `disconnectTimers` (10s grace, rescheduled if fired early after sleep) → `attemptICERestart` → separate `iceRestartTimers` 20s watchdog closes the peer if not Connected.
 - **TURN**: `fetchTurnCredentials` (JWT + HMAC), cached 10m, falls back to STUN-only on failure.
 - **Updates**: `update.Detect()` order: ldflag `dev` → `/snap/` → `/Caskroom/`, `/Cellar/` or `/opt/homebrew/` → `dpkg -s` → `rpm -q` → github. Only the github method self-replaces (`minio/selfupdate`, SHA256-verified, host allow-list); homebrew runs `brew upgrade`; deb/rpm/snap install nothing and return `*ErrElevationRequired{Command}` — `pmux update` prints the command and leaves update state untouched. The CLI banner and mobile `SessionsEvent.UpdateAvailable` are gated on `State.IsStale(runningVersion)`, so state written by an older binary is ignored. Release builds leave `installMethod` empty. `Checker.Check` no-ops when version is `dev`.

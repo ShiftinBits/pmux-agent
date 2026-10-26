@@ -16,12 +16,6 @@ const (
 	iokitPath          = "/System/Library/Frameworks/IOKit.framework/IOKit"
 	coreFoundationPath = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 
-	// IOKit system power messages: iokit_common_msg(x) = 0xE0000000 | x
-	// (IOKit/IOMessage.h).
-	kIOMessageCanSystemSleep     = 0xE0000270
-	kIOMessageSystemWillSleep    = 0xE0000280
-	kIOMessageSystemHasPoweredOn = 0xE0000300
-
 	// runLoopStopRetry is how often shutdown re-issues CFRunLoopStop until the
 	// run loop has exited. A stop sent before CFRunLoopRun starts is discarded,
 	// so a single call could leave the run loop blocked forever.
@@ -109,23 +103,16 @@ func loadIOKitPower() (*iokitPower, error) {
 // IOKit flow: IORegisterForSystemPower connects to the root power domain and
 // creates a notification port whose run-loop source is added to a dedicated,
 // OS-thread-locked run loop (CFRunLoopRun). The kernel then delivers power
-// messages to the callback on that thread:
-//   - kIOMessageCanSystemSleep: an idle sleep is proposed. Acknowledged at once
-//     with IOAllowPowerChange; the agent never vetoes sleep.
-//   - kIOMessageSystemWillSleep: sleep is committed. onSleep runs (bounded by
-//     Suspend's write deadline), then IOAllowPowerChange lets sleep proceed.
-//   - kIOMessageSystemHasPoweredOn: the host woke; onResume is scheduled.
+// messages to the callback on that thread, which hands them to
+// handlePowerMessage: CanSystemSleep is acknowledged at once, WillSleep runs
+// onSleep (bounded by Suspend's write deadline) before acknowledging, and
+// HasPoweredOn runs onResume.
 //
-// IOAllowPowerChange is required for both CanSystemSleep and WillSleep: an
-// unacknowledged message makes the kernel wait up to 30s before sleeping
-// anyway. Holding the WillSleep acknowledgement until onSleep returns is what
-// lets the offline notice flush before the process freezes.
-//
-// Wakes go through wakeDebouncer: a DarkWake (Power Nap / maintenance wake)
-// powers on briefly and sleeps again before the resume delay elapses, so the
-// pending Resume is cancelled and the agent stays suspended with no reconnect
-// churn. Accepted limitation: a pmux command run during a DarkWake sends
-// SIGUSR1, which resumes signaling immediately.
+// DarkWakes (Power Nap / maintenance wakes) need no special handling: the
+// kernel only sends IORegisterForSystemPower (app power-state interest) clients
+// WillSleep on the transition out of full wake and HasPoweredOn on the
+// transition into full wake, so a DarkWake between two sleeps is never seen and
+// onResume only runs when the host is really back.
 //
 // keepAwake is ignored, unlike on Linux. keep_awake on macOS is a caffeinate -i
 // idle-sleep assertion; lid close, low battery and forced sleeps still happen
@@ -145,8 +132,6 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, _ bool, onSleep
 			"relying on the server idle timeout for offline detection", "error", err)
 		return
 	}
-
-	d := newWakeDebouncer(wakeResumeDelay, onSleep, onResume)
 
 	// ready carries the run loop ref once the watcher is running, or 0 if
 	// registration failed. Buffered so the run-loop goroutine never blocks on it.
@@ -173,17 +158,7 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, _ bool, onSleep
 			}
 		}
 		callback := purego.NewCallback(func(_, _ uintptr, messageType uint32, messageArgument uintptr) uintptr {
-			switch messageType {
-			case kIOMessageCanSystemSleep:
-				allow(messageArgument)
-			case kIOMessageSystemWillSleep:
-				logger.Info("host is about to sleep, marking offline")
-				d.sleep()
-				allow(messageArgument)
-			case kIOMessageSystemHasPoweredOn:
-				logger.Info("host powered on, refreshing presence after resume delay", "delay", wakeResumeDelay)
-				d.wake()
-			}
+			handlePowerMessage(messageType, messageArgument, onSleep, onResume, allow, logger)
 			return 0
 		})
 
@@ -210,9 +185,6 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, _ bool, onSleep
 		exited = true
 		mu.Unlock()
 
-		// The callback only runs inside CFRunLoopRun, so once it has returned no
-		// wake can re-arm the debouncer; cancel any pending Resume.
-		d.stop()
 		api.deregisterForSystemPower(&notifier)
 		api.serviceClose(root)
 		api.notificationPortDestroy(port)
@@ -221,7 +193,6 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, _ bool, onSleep
 
 	go func() {
 		<-ctx.Done()
-		d.stop()
 		rl := <-ready
 		if rl == 0 {
 			return

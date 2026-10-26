@@ -277,10 +277,8 @@ func Run(ctx context.Context, paths config.Paths, hmacSecret, version, installMe
 				signal.Stop(usr2Ch)
 				return
 			case <-usr1Ch:
-				// A pmux command proves the host is awake, so this also clears a
-				// suspension left by a missed wake notification.
-				logger.Info("SIGUSR1 received, resuming signaling")
-				signalingClient.Resume()
+				logger.Info("SIGUSR1 received, signaling activity")
+				signalingClient.SignalActivity()
 			case <-usr2Ch:
 				logger.Info("SIGUSR2 received, reloading pairing state")
 				device, err := auth.LoadPairedDevice(paths.PairedDevices, store)
