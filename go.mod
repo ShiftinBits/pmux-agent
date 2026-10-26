@@ -3,6 +3,7 @@ module github.com/shiftinbits/pmux-agent
 go 1.25.13
 
 require (
+	github.com/ebitengine/purego v0.11.1
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/minio/selfupdate v0.6.0

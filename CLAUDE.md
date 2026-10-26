@@ -22,7 +22,7 @@ CI (`.github/workflows/`): `build.yml` = vet + build; `test.yml` = unit tests + 
 | Package | Purpose |
 |---------|---------|
 | `cmd/pmux/main.go` | CLI routing, ldflag vars (`version`, `hmacSecret`, `installMethod`), `runAgent()` exit-code handling |
-| `internal/agent/` | `Run()` (agent main loop), `EnsureRunning()`/`spawn()` (supervisor.go), `Handler` (DataChannel request handling), tmux monitor, PID file, keep-awake, Linux sleep watcher, `pmux init/pair/status/unpair/uninstall` impls |
+| `internal/agent/` | `Run()` (agent main loop), `EnsureRunning()`/`spawn()` (supervisor.go), `Handler` (DataChannel request handling), tmux monitor, PID file, keep-awake, sleep watcher (Linux logind, macOS IOKit via purego), `pmux init/pair/status/unpair/uninstall` impls |
 | `internal/auth/` | Ed25519 identity, JWT exchange, X25519 pairing, `SecretStore` (keyring/file), build HMAC request signing (hmac.go), server pairing session (pair_session.go) |
 | `internal/config/` | TOML config + env overrides, `DefaultPaths()` |
 | `internal/firewall/` | Detect-only host firewall probe (macOS `socketfilterfw`, Linux ufw/firewalld); never modifies settings |
@@ -85,7 +85,7 @@ Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `tr
 - **Single-pairing**: enforced at runtime by `PeerManager.MaxPeers` (default 1) + `SetAllowedDeviceID`. Re-pairing replaces the old device with confirmation.
 - **Wire limits** in `protocol/validation.go` must match `@pocketmux/shared` `src/codec.ts`. `TestCrossLanguageFixtures` reads `packages/shared/src/__tests__/fixtures` (skips if shared isn't cloned alongside).
 - **Compression**: one stateful raw-deflate stream per peer (window persists across messages); negotiated via `AttachRequest.Compression == "deflate"`; each output stream owns its compressor. A compression error, or a failed send of compressed output (including the pre-stream initial content), ends the stream and sends `stream_reset` so the mobile can re-attach (needs mobile handling).
-- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` (no macOS sleep hook).
+- **Signaling** (`signaling.go`): reconnect backoff with jitter (×1–1.5, intentionally not capped), reset only after a connection stays up for `stableConnectionThreshold` (30s); `DormancyTimeout` 5m stops retrying until SIGUSR1. Presence interval capped at 45s (server reaper is 90s). `Suspend`/`Resume` driven by Linux logind `PrepareForSleep` and by macOS IOKit `IORegisterForSystemPower` (purego, no cgo). The kernel hides DarkWakes from `IORegisterForSystemPower` clients, so macOS needs no wake debounce. SIGUSR1 never clears a suspension; only the watcher's `Resume` does.
 - **ICE recovery** (`peer.go`): `disconnectTimers` (10s grace, rescheduled if fired early after sleep) → `attemptICERestart` → separate `iceRestartTimers` 20s watchdog closes the peer if not Connected.
 - **TURN**: `fetchTurnCredentials` (JWT + HMAC), cached 10m, falls back to STUN-only on failure.
 - **Updates**: `update.Detect()` order: ldflag `dev` → `/snap/` → `/Caskroom/`, `/Cellar/` or `/opt/homebrew/` → `dpkg -s` → `rpm -q` → github. Only the github method self-replaces (`minio/selfupdate`, SHA256-verified, host allow-list); homebrew runs `brew upgrade`; deb/rpm/snap install nothing and return `*ErrElevationRequired{Command}` — `pmux update` prints the command and leaves update state untouched. The CLI banner and mobile `SessionsEvent.UpdateAvailable` are gated on `State.IsStale(runningVersion)`, so state written by an older binary is ignored. Release builds leave `installMethod` empty. `Checker.Check` no-ops when version is `dev`.
@@ -104,7 +104,7 @@ Load order: `Defaults()` → file → env (`LoadConfig`). Booleans from env: `tr
 
 ## Release Pipeline
 
-`.goreleaser.yaml` (tag `v*` → `release.yml`): linux amd64/arm64 + darwin universal, `CGO_ENABLED=0`, built through `scripts/garble.sh`.
+`.goreleaser.yaml` (tag `v*` → `release.yml`): linux amd64/arm64 + darwin universal, `CGO_ENABLED=0`, built through `scripts/garble.sh`. Darwin stays `CGO_ENABLED=0` because IOKit is reached through purego.
 - **garble** obfuscates literals to protect the embedded HMAC secret. `GOGARBLE` is limited to this module — obfuscating godbus/go-keyring breaks D-Bus type assertions and panics on Linux.
 - Archive names must match `githubUpdater.matchArchiveName` or self-update breaks.
 - `checksums.txt` GPG-signed; macOS sign/notarize gated on `MACOS_SIGN_P12`.
