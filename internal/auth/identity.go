@@ -232,7 +232,7 @@ func canonicalHost(host string) (string, error) {
 	if ascii {
 		return strings.ToLower(host), nil
 	}
-	converted, err := idna.New(idna.MapForLookup(), idna.BidiRule(), idna.StrictDomainName(false)).ToASCII(host)
+	converted, err := idna.New(idna.MapForLookup(), idna.BidiRule(), idna.StrictDomainName(false), idna.CheckHyphens(false)).ToASCII(host)
 	if err != nil {
 		return "", fmt.Errorf("convert host to ASCII: %w", err)
 	}

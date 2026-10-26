@@ -57,7 +57,11 @@ func fetchChallengeContext(ctx context.Context, deviceID, serverURL string, clie
 		if hmacErr := CheckHMACRejection(resp.StatusCode, respBody, serverURL); hmacErr != nil {
 			return "", hmacErr
 		}
-		return "", errors.New(serverError(resp.StatusCode, respBody))
+		msg := serverError(resp.StatusCode, respBody)
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			msg += " (redirects are not followed because the challenge signature is bound to the configured server origin; point the server URL at the final origin)"
+		}
+		return "", errors.New(msg)
 	}
 
 	var chalResp struct {
@@ -84,14 +88,23 @@ func withoutRedirects(client *http.Client) *http.Client {
 	return &cp
 }
 
+// signatureFailedMsg is the server's 401 error when no accepted form of the
+// challenge signature verifies, e.g. because it was bound to another origin.
+const signatureFailedMsg = "Signature verification failed"
+
 // signedRequestError builds the error for a non-200 response to a request
-// carrying an origin-bound challenge signature. A 401 or 3xx is the
-// signature of an origin mismatch (proxy rewrite or redirect) or of a server
-// that predates origin-bound verification, so those name the signed origin.
+// carrying an origin-bound challenge signature. A signature-verification 401
+// or a 3xx is the signature of an origin mismatch (proxy rewrite or redirect)
+// or of a server that predates origin-bound verification, so those name the
+// signed origin. Other 401s (expired challenge, unknown device) do not.
 func signedRequestError(statusCode int, body []byte, origin string) error {
 	msg := serverError(statusCode, body)
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &parsed)
 	switch {
-	case statusCode == http.StatusUnauthorized:
+	case statusCode == http.StatusUnauthorized && parsed.Error == signatureFailedMsg:
 		msg += fmt.Sprintf(" (challenge was signed for origin %s: the server must be on a version that verifies origin-bound signatures and must see this exact origin)", origin)
 	case statusCode >= 300 && statusCode < 400:
 		msg += fmt.Sprintf(" (redirects are not followed because the challenge signature is bound to origin %s; point the server URL at the final origin)", origin)

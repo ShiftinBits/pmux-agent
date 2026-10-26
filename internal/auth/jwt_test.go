@@ -188,6 +188,39 @@ func TestExchangeToken(t *testing.T) {
 		}
 	})
 
+	t.Run("non-signature 401 has no origin diagnostic", func(t *testing.T) {
+		server := httptest.NewServer(challengeHandler(testNonce, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"Invalid or expired challenge"}`))
+		}))
+		defer server.Close()
+
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
+		if err == nil || strings.Contains(err.Error(), "signed for origin") {
+			t.Errorf("error = %v, want 401 without origin diagnostic", err)
+		}
+	})
+
+	t.Run("redirect on challenge is not followed and explains why", func(t *testing.T) {
+		followed := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			followed = true
+		}))
+		defer target.Close()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusMovedPermanently)
+		}))
+		defer server.Close()
+
+		_, err := ExchangeToken(id, server.URL, server.Client(), "")
+		if err == nil || !strings.Contains(err.Error(), "redirects are not followed") {
+			t.Fatalf("error = %v, want redirect diagnostic", err)
+		}
+		if followed {
+			t.Error("redirect was followed")
+		}
+	})
+
 	t.Run("server returns empty token", func(t *testing.T) {
 		server := httptest.NewServer(challengeHandler(testNonce, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)

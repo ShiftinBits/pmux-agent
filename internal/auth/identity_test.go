@@ -378,6 +378,7 @@ func TestCanonicalOrigin(t *testing.T) {
 		{"query and fragment dropped", "https://example.com/a?b=c#d", "https://example.com", false},
 		{"idn host", "https://Bücher.example/", "https://xn--bcher-kva.example", false},
 		{"idn host with port", "https://bücher.example:8443", "https://xn--bcher-kva.example:8443", false},
+		{"idn host with leading hyphen", "https://-bücher.example", "https://xn---bcher-4ya.example", false},
 		{"ipv6 compressed", "http://[2001:0db8:0000:0000:0000:0000:0000:0001]:8787", "http://[2001:db8::1]:8787", false},
 		{"ipv6 loopback expanded", "http://[0:0:0:0:0:0:0:1]", "http://[::1]", false},
 		{"ipv4-mapped ipv6", "http://[::ffff:1.2.3.4]", "http://[::ffff:102:304]", false},
