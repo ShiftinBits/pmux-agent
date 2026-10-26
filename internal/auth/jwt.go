@@ -84,11 +84,15 @@ func ExchangeToken(id *Identity, serverURL string, client *http.Client, hmacSecr
 // ExchangeTokenContext is ExchangeToken bound to ctx: canceling ctx or hitting
 // its deadline aborts the in-flight challenge or token request.
 func ExchangeTokenContext(ctx context.Context, id *Identity, serverURL string, client *http.Client, hmacSecret string) (string, error) {
+	origin, err := canonicalOrigin(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("canonical server origin: %w", err)
+	}
 	nonce, err := fetchChallengeContext(ctx, id.DeviceID, serverURL, client, hmacSecret)
 	if err != nil {
 		return "", err
 	}
-	signature := id.SignChallenge(id.DeviceID, nonce)
+	signature := id.SignChallenge(origin, id.DeviceID, nonce)
 
 	reqBody := struct {
 		DeviceID  string `json:"deviceId"`

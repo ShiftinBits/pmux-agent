@@ -84,11 +84,15 @@ type PairCompleteMessage struct {
 // The name parameter is an optional human-readable host name sent to the server
 // so it can be displayed on paired mobile devices.
 func InitiatePairing(id *Identity, x25519PubKeyBase64 string, serverURL string, client *http.Client, name string, hmacSecret string) (*PairInitiateResponse, error) {
+	origin, err := canonicalOrigin(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("canonical server origin: %w", err)
+	}
 	nonce, err := fetchChallenge(id.DeviceID, serverURL, client, hmacSecret)
 	if err != nil {
 		return nil, err
 	}
-	signature := id.SignChallenge(id.DeviceID, nonce)
+	signature := id.SignChallenge(origin, id.DeviceID, nonce)
 
 	reqBody := struct {
 		DeviceID         string `json:"deviceId"`

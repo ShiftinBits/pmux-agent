@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -161,10 +164,49 @@ func HasIdentity(keysDir string, store SecretStore) bool {
 	return CheckIdentity(keysDir, store) == nil
 }
 
-// SignChallenge signs the token exchange challenge: deviceId + "|" + nonce.
+// challengeMessagePrefix versions the origin-bound token exchange challenge.
+const challengeMessagePrefix = "pocketmux-auth-v1"
+
+// canonicalOrigin reduces serverURL to scheme://host[:port]: scheme and host
+// lowercased, default ports (443 for https, 80 for http) omitted, IPv6 hosts
+// bracketed, and path, query and fragment dropped. URLs carrying userinfo are
+// rejected. The result must match the server's and mobile's derivation.
+func canonicalOrigin(serverURL string) (string, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("parse server URL: %w", err)
+	}
+	if u.Scheme == "" {
+		return "", errors.New("server URL has no scheme")
+	}
+	if u.User != nil {
+		return "", errors.New("server URL must not contain userinfo")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", errors.New("server URL has no host")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		return scheme + "://" + net.JoinHostPort(host, port), nil
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host, nil
+}
+
+// SignChallenge signs the origin-bound token exchange challenge:
+// "pocketmux-auth-v1|" + origin + "|" + deviceID + "|" + nonce, where origin is
+// the canonical server origin (see canonicalOrigin). Binding the origin stops a
+// signature obtained from one server from being replayed against another.
 // Returns the base64-encoded signature.
-func (id *Identity) SignChallenge(deviceID string, nonce string) string {
-	message := []byte(deviceID + "|" + nonce)
+func (id *Identity) SignChallenge(origin, deviceID, nonce string) string {
+	message := []byte(challengeMessagePrefix + "|" + origin + "|" + deviceID + "|" + nonce)
 	sig := ed25519.Sign(id.PrivateKey, message)
 	return base64.StdEncoding.EncodeToString(sig)
 }

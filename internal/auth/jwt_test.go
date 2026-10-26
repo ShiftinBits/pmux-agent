@@ -64,12 +64,16 @@ func TestExchangeToken(t *testing.T) {
 				t.Error("signature is empty")
 			}
 
-			// Verify signature is over deviceID + "|" + nonce
+			// Verify signature is over the origin-bound challenge message
 			sigBytes, err := base64.StdEncoding.DecodeString(body.Signature)
 			if err != nil {
 				t.Fatalf("decode signature: %v", err)
 			}
-			message := []byte(body.DeviceID + "|" + body.Nonce)
+			origin, err := canonicalOrigin("http://" + r.Host)
+			if err != nil {
+				t.Fatalf("canonicalOrigin: %v", err)
+			}
+			message := []byte("pocketmux-auth-v1|" + origin + "|" + body.DeviceID + "|" + body.Nonce)
 			if !ed25519.Verify(id.Ed25519PublicKey, message, sigBytes) {
 				t.Error("signature verification failed")
 			}
