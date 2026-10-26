@@ -145,7 +145,8 @@ type PeerManager struct {
 	disconnectTimers map[string]*time.Timer // grace timers for disconnected peers
 	iceRestartTimers map[string]*time.Timer // ICE-restart answer watchdogs (kept apart from grace timers, SB-1008)
 	disconnectTimes  map[string]time.Time   // wall-clock time of disconnect (for sleep detection)
-	cleanupWg        sync.WaitGroup         // tracks background cleanup goroutines
+	cleanupWg        sync.WaitGroup         // tracks every background cleanup unit: handler teardown and Pion Close
+	teardownWg       sync.WaitGroup         // tracks only the OnPeerDisconnect (handler teardown) part of background cleanup
 	closed           bool                   // true while closeAll runs, and after CloseAll; cleared by CloseAllAndReopen
 	shutDown         bool                   // set by CloseAll; keeps an overlapping CloseAllAndReopen from reopening
 	replacedAttempts []string               // attempt IDs of peers replaced by a reconnect, oldest first, capped at maxReplacedAttempts
@@ -373,8 +374,10 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 }
 
 // goCleanup runs fn in a background goroutine, tracked by cleanupWg while the
-// manager is open. The Add happens under pm.mu behind the closed check, as in
-// scheduleCleanup, so it can never race closeAll's cleanupWg.Wait. Once closed,
+// manager is open. It is for Pion closes: CloseAll waits for them, a reload
+// (CloseAllAndReopen) does not. The Add happens under pm.mu behind the closed
+// check, as in scheduleCleanup, so it can never race closeAll's
+// cleanupWg.Wait. Once closed,
 // fn still runs, untracked, as closeViaManager does: the peer fn tears down may
 // be missing from closeAll's snapshot (removed from the map first, or added
 // after the snapshot), so skipping it would leak the peer. Caller must not hold
@@ -389,6 +392,30 @@ func (pm *PeerManager) goCleanup(fn func()) {
 	go func() {
 		if tracked {
 			defer pm.cleanupWg.Done()
+		}
+		fn()
+	}()
+}
+
+// goTeardown is goCleanup for handler teardown (OnPeerDisconnect): while the
+// manager is open, fn is tracked by teardownWg as well as cleanupWg, so a
+// reload waits for it but not for background Pion closes. The Add happens
+// under pm.mu behind the closed check, the same invariant as goCleanup. Once
+// closed, fn runs untracked; its only caller, the reconnect-replace path, does
+// not run while closed because handleConnectRequest drops connects then.
+// Caller must not hold pm.mu.
+func (pm *PeerManager) goTeardown(fn func()) {
+	pm.mu.Lock()
+	tracked := !pm.closed
+	if tracked {
+		pm.teardownWg.Add(1)
+		pm.cleanupWg.Add(1)
+	}
+	pm.mu.Unlock()
+	go func() {
+		if tracked {
+			defer pm.cleanupWg.Done()
+			defer pm.teardownWg.Done()
 		}
 		fn()
 	}()
@@ -452,9 +479,9 @@ func (pm *PeerManager) stopTimersLocked(deviceID string) {
 	delete(pm.disconnectTimes, deviceID)
 }
 
-// CloseAll closes all peer connections for agent shutdown and waits for
-// background cleanup goroutines (from state change handlers) to finish. The
-// manager stays closed: no further cleanup is scheduled.
+// CloseAll closes all peer connections for agent shutdown and waits for every
+// peer's Close and all background cleanup (handler teardown and Pion closes) to
+// finish. The manager stays closed: no further cleanup is scheduled.
 func (pm *PeerManager) CloseAll() {
 	pm.mu.Lock()
 	pm.shutDown = true
@@ -465,13 +492,20 @@ func (pm *PeerManager) CloseAll() {
 // CloseAllAndReopen closes all peer connections, as CloseAll does, then reopens
 // the manager so peers that connect afterwards get the normal cleanup and ICE
 // restart handling. Used when the pairing state is reloaded. It reopens once
-// the disconnect handlers and cleanup goroutines are done, without waiting for
-// the old peers' Pion Close (30s+ for an unreachable peer): connect requests
-// are dropped while closed, and a re-paired phone connects right away. The old
-// peers are already out of the map, so their Closed callbacks are no-ops.
-// Reusing cleanupWg is safe because closeAll has returned from cleanupWg.Wait
-// and new Adds only happen once closed is cleared. A CloseAll that overlaps the
-// reload wins and the manager stays closed.
+// the disconnect handlers and background handler teardowns are done, without
+// waiting for any Pion Close (30s+ for an unreachable peer): neither the old
+// peers' nor those already running in the background from failed-peer cleanup
+// or a replaced peer. Connect requests are dropped while closed, so a re-paired
+// phone connects right away. The old peers are already out of the map, so
+// their Closed callbacks are no-ops.
+//
+// Reopening can leave cleanupWg nonzero. That is safe: Adds to either group
+// happen only under pm.mu while the manager is open, and Waits on either group
+// run only while it is closed, so an Add never races a Wait. teardownWg is
+// zero when the reload's Wait returns. A later CloseAll's cleanupWg.Wait also
+// covers closes left running by an earlier reload, within the agent's 10s
+// shutdown cap. A CloseAll that overlaps the reload wins and the manager stays
+// closed.
 func (pm *PeerManager) CloseAllAndReopen() {
 	pm.closeAll(false)
 	pm.mu.Lock()
@@ -482,9 +516,11 @@ func (pm *PeerManager) CloseAllAndReopen() {
 }
 
 // closeAll marks the manager closed, notifies the disconnect handler and closes
-// every tracked peer, then waits for the tracked cleanup goroutines. With
-// waitClose false it returns once every disconnect handler has run and leaves
-// the peers' Close running in the background.
+// every tracked peer, then waits for the background handler teardowns
+// (teardownWg). With waitClose true it also waits for every peer's Close and
+// all background cleanup (cleanupWg). With waitClose false it returns once the
+// handler teardowns are done and leaves every Pion Close, the peers' own and
+// those already running in the background, to finish on its own.
 func (pm *PeerManager) closeAll(waitClose bool) {
 	pm.mu.Lock()
 	pm.closed = true
@@ -524,13 +560,16 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 		}()
 	}
 	notifyWg.Wait()
+
+	// Wait for in-flight handler teardowns from scheduleCleanup or a replaced
+	// peer: the disconnect handler must finish before closeAll returns.
+	pm.teardownWg.Wait()
+
 	if waitClose {
 		closeWg.Wait()
+		// Wait for the rest of the background cleanup, the Pion closes.
+		pm.cleanupWg.Wait()
 	}
-
-	// Wait for any in-flight cleanup goroutines spawned by handlePeerStateChange
-	// or attemptICERestart to finish before returning.
-	pm.cleanupWg.Wait()
 
 	if closedCount > 0 {
 		pm.logger.Info("all peers closed",
@@ -545,6 +584,10 @@ func (pm *PeerManager) closeAll(waitClose bool) {
 // the teardown runs asynchronously in the spawned goroutine.
 // Caller must hold pm.mu.
 //
+// The whole unit is tracked by cleanupWg, and the handler step alone by
+// teardownWg, released before the Pion close, so a reload waits for the
+// teardown but not the close.
+//
 // A reconnect may replace this peer under the same device ID between the call
 // site and the goroutine running. If so, only the stale peer is closed:
 // firing OnPeerDisconnect or evicting the map slot would tear down the *new*
@@ -555,6 +598,7 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 		return
 	}
 	deviceID := peer.DeviceID
+	pm.teardownWg.Add(1)
 	pm.cleanupWg.Add(1)
 	go func() {
 		defer pm.cleanupWg.Done()
@@ -564,6 +608,7 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 		if current && pm.OnPeerDisconnect != nil {
 			pm.OnPeerDisconnect(deviceID)
 		}
+		pm.teardownWg.Done()
 		pm.ClosePeerIfCurrent(deviceID, peer)
 	}()
 }
@@ -718,7 +763,7 @@ func (pm *PeerManager) handleConnectRequest(mobileDeviceID, attemptID string) {
 		// keying handler state by peer identity would remove that ceiling.
 		if pm.OnPeerDisconnect != nil {
 			torn := make(chan struct{})
-			pm.goCleanup(func() {
+			pm.goTeardown(func() {
 				defer close(torn)
 				pm.OnPeerDisconnect(mobileDeviceID)
 			})

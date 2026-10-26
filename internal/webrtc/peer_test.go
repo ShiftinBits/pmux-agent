@@ -3197,6 +3197,88 @@ func TestPeerManager_ReloadDoesNotWaitForPeerClose(t *testing.T) {
 	pm.CloseAll()
 }
 
+// TestPeerManager_CloseAllAndReopen_DoesNotWaitForHungClose checks that a
+// reload waits for a background handler teardown but not for a Pion close
+// already running in the background (failed-peer cleanup or a replaced peer),
+// while a shutdown's CloseAll still waits for that close.
+func TestPeerManager_CloseAllAndReopen_DoesNotWaitForHungClose(t *testing.T) {
+	tests := []struct {
+		name            string
+		teardown        bool // register via goTeardown instead of goCleanup
+		wantReloadWaits bool
+	}{
+		{name: "hung close", teardown: false, wantReloadWaits: false},
+		{name: "hung teardown", teardown: true, wantReloadWaits: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pm := NewPeerManager(testLogger(), &mockSender{}, "http://localhost:1", func() string { return "jwt" }, nil, "")
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseFn)
+
+			hung := func() { <-release }
+			if tt.teardown {
+				pm.goTeardown(hung)
+			} else {
+				pm.goCleanup(hung)
+			}
+
+			reopened := make(chan struct{})
+			go func() {
+				pm.CloseAllAndReopen()
+				close(reopened)
+			}()
+
+			if tt.wantReloadWaits {
+				select {
+				case <-reopened:
+					t.Fatal("CloseAllAndReopen returned before the handler teardown finished")
+				case <-time.After(200 * time.Millisecond):
+				}
+				releaseFn()
+				select {
+				case <-reopened:
+				case <-time.After(2 * time.Second):
+					t.Fatal("CloseAllAndReopen did not return after the handler teardown finished")
+				}
+				if pm.isClosed() {
+					t.Error("manager still closed after CloseAllAndReopen returned")
+				}
+				pm.CloseAll()
+				return
+			}
+
+			select {
+			case <-reopened:
+			case <-time.After(time.Second):
+				t.Fatal("CloseAllAndReopen waited for a background Pion close")
+			}
+			if pm.isClosed() {
+				t.Error("manager still closed after CloseAllAndReopen returned")
+			}
+
+			shutDown := make(chan struct{})
+			go func() {
+				pm.CloseAll()
+				close(shutDown)
+			}()
+			select {
+			case <-shutDown:
+				t.Fatal("CloseAll returned while a background Pion close was still running")
+			case <-time.After(200 * time.Millisecond):
+			}
+			releaseFn()
+			select {
+			case <-shutDown:
+			case <-time.After(2 * time.Second):
+				t.Fatal("CloseAll did not return after the background close finished")
+			}
+		})
+	}
+}
+
 // TestPeerManager_CloseAllConcurrentWithCleanup races reload closes against
 // the signaling paths that spawn tracked cleanup (a replacing connect_request
 // and peer_unavailable). Under -race this catches a cleanupWg.Add racing
