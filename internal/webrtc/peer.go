@@ -1172,15 +1172,6 @@ func (pm *PeerManager) fetchTurnCredentials() ([]webrtc.ICEServer, error) {
 }
 
 // requestTurnCredentials performs the HTTP request for TURN credentials.
-// truncateForError caps an untrusted server response body embedded in an error.
-func truncateForError(s string) string {
-	const maxLen = 256
-	if len(s) > maxLen {
-		return s[:maxLen] + "..."
-	}
-	return s
-}
-
 func (pm *PeerManager) requestTurnCredentials() ([]webrtc.ICEServer, error) {
 	url := pm.serverURL + "/turn/credentials"
 	req, err := http.NewRequest("GET", url, nil)
@@ -1202,7 +1193,7 @@ func (pm *PeerManager) requestTurnCredentials() ([]webrtc.ICEServer, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("TURN credentials failed (%d): %s", resp.StatusCode, auth.SanitizeDisplayString(truncateForError(string(body))))
+		return nil, fmt.Errorf("TURN credentials failed (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var creds TurnCredentials

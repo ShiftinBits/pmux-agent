@@ -71,9 +71,6 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 	delayFd := takeSleepDelay(ctx, conn, logger)
 	logger.Info("sleep watcher started: will notify the signaling server before the host sleeps")
 
-	// Seed the last known owner so a later lookup failure still has a reference.
-	lastOwner, _ := logindOwner(ctx, conn)
-
 	go func() {
 		defer conn.Close()
 		for {
@@ -87,11 +84,10 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 				}
 				owner, err := logindOwner(ctx, conn)
 				if err != nil {
-					logger.Warn("sleep watcher: cannot resolve logind owner; using last known owner", "error", err)
+					logger.Warn("sleep watcher: cannot resolve logind owner; ignoring PrepareForSleep", "error", err)
+					continue
 				}
-				trusted, known := senderTrusted(sig.Sender, owner, err, lastOwner)
-				lastOwner = known
-				if !trusted {
+				if !isFromLogind(sig, owner) {
 					logger.Warn("sleep watcher: ignoring PrepareForSleep from non-logind sender", "sender", sig.Sender)
 					continue
 				}
@@ -113,20 +109,11 @@ func startSleepWatcher(ctx context.Context, logger *slog.Logger, keepAwake bool,
 	}()
 }
 
-// senderTrusted decides whether a PrepareForSleep sender may be acted on and
-// returns the owner to remember for the next signal. A successful lookup is
-// authoritative. When the lookup fails (bus hiccup, timeout, logind restart) a
-// real sleep/resume signal must not be dropped, so the last known owner is used;
-// with none known the signal is accepted because the bus-side match rule
-// (WithMatchSender) already restricts delivery to logind's name.
-func senderTrusted(sender, owner string, lookupErr error, lastOwner string) (trusted bool, known string) {
-	if lookupErr == nil {
-		return owner != "" && sender == owner, owner
-	}
-	if lastOwner != "" {
-		return sender == lastOwner, lastOwner
-	}
-	return true, ""
+// isFromLogind reports whether sig was sent by the current logind bus owner.
+// The default system-bus policy lets any local user broadcast signals, so a
+// PrepareForSleep must be checked against the owner's unique name.
+func isFromLogind(sig *dbus.Signal, owner string) bool {
+	return owner != "" && sig.Sender == owner
 }
 
 // logindOwner resolves the unique bus name currently owning logind. It is
