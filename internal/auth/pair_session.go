@@ -21,19 +21,22 @@ const maxPairMessageSize = 128 << 10
 
 // connError extracts a clean message from Go's verbose network errors.
 // "Post http://...: dial tcp ...: connect: connection refused" → "server unreachable (connection refused)"
+// The result is safe to print to a terminal: TLS errors can embed certificate
+// SANs chosen by the attacker, so every return path goes through
+// SanitizeDisplayString.
 func connError(err error) string {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return fmt.Sprintf("cannot resolve server hostname %q", dnsErr.Name)
+		return SanitizeDisplayString(fmt.Sprintf("cannot resolve server hostname %q", dnsErr.Name))
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		if opErr.Timeout() {
 			return "server connection timed out"
 		}
-		return fmt.Sprintf("server unreachable (%s)", opErr.Err)
+		return SanitizeDisplayString(fmt.Sprintf("server unreachable (%s)", opErr.Err))
 	}
-	return err.Error()
+	return SanitizeDisplayString(err.Error())
 }
 
 // serverError extracts a short error message from a non-200 HTTP response body.
