@@ -1980,6 +1980,15 @@ func TestHandler_PreStreamPanicReleasesDetach(t *testing.T) {
 	if got := strings.TrimSpace(string(out)); got != "0" {
 		t.Errorf("pane_pipe = %q after a pre-stream panic, want 0 (pipe released)", got)
 	}
+	reset := false
+	for _, m := range catcher.get() {
+		if e, ok := m.Msg.(*protocol.ErrorEvent); ok && m.PeerID == "peer1" && e.Code == errCodeStreamReset {
+			reset = true
+		}
+	}
+	if !reset {
+		t.Error("no stream_reset sent after a pre-stream panic; the mobile would sit on a dead attachment")
+	}
 
 	returned := make(chan struct{})
 	go func() {

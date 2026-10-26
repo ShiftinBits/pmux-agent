@@ -283,9 +283,10 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 	// Until streamOutput takes ownership, this function owns the compressor
 	// and done, and releases both on every exit path, so a concurrent detach
 	// waiting on done is never stranded. A panic during the pre-stream sends
-	// also detaches the peer, as streamOutput's recovery does, so input and
-	// resize never reach a pane the mobile never saw attached; the panic is
-	// then re-raised for the peer's message recovery to log.
+	// ends the attachment as a pre-stream failure does: the peer is detached
+	// and, since the mobile may already have its attached event, sent a
+	// stream_reset so it does not sit on a dead stream. The panic is then
+	// re-raised for the peer's message recovery to log.
 	var compressor *protocol.OutputCompressor
 	streamOwned := false
 	defer func() {
@@ -298,7 +299,7 @@ func (h *Handler) handleAttach(peerID string, req *protocol.AttachRequest) {
 		r := recover()
 		// A canceled ctx means a concurrent detach owns the cleanup.
 		if r != nil && ctx.Err() == nil {
-			h.detachPeerWait(peerID, false)
+			h.resetStream(peerID, done, "attach failed; re-attach")
 		}
 		h.endStream(peerID, done)
 		if r != nil {

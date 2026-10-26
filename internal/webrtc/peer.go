@@ -396,11 +396,10 @@ func (pm *PeerManager) handlePeerUnavailable(deviceID, attemptID string) {
 // manager is open. It is for Pion closes: CloseAll waits for them, a reload
 // (CloseAllAndReopen) does not. The Add happens under pm.mu behind the closed
 // check, as in scheduleCleanup, so it can never race closeAll's
-// cleanupWg.Wait. Once closed,
-// fn still runs, untracked, as closeViaManager does: the peer fn tears down may
-// be missing from closeAll's snapshot (removed from the map first, or added
-// after the snapshot), so skipping it would leak the peer. Caller must not hold
-// pm.mu.
+// cleanupWg.Wait. Once closed, fn still runs, untracked, as closeViaManager
+// does: the peer fn tears down may be missing from closeAll's snapshot (removed
+// from the map first, or added after the snapshot), so skipping it would leak
+// the peer. Caller must not hold pm.mu.
 func (pm *PeerManager) goCleanup(fn func()) {
 	pm.mu.Lock()
 	tracked := !pm.closed
@@ -521,9 +520,11 @@ func (pm *PeerManager) CloseAll() {
 // happen only under pm.mu while the manager is open, and Waits on either group
 // run only while it is closed, so an Add never races a Wait. teardownWg is
 // zero when the reload's Wait returns. A later CloseAll's cleanupWg.Wait also
-// covers closes left running by an earlier reload, within the agent's 10s
-// shutdown cap. A CloseAll that overlaps the reload wins and the manager stays
-// closed.
+// covers background closes (goCleanup, scheduleCleanup) still running from
+// before an earlier reload, within the agent's 10s shutdown cap. The reload's
+// own peers' Close calls are tracked only by closeAll's local group, so no
+// later CloseAll waits for them. A CloseAll that overlaps the reload wins and
+// the manager stays closed.
 func (pm *PeerManager) CloseAllAndReopen() {
 	pm.closeAll(false)
 	pm.mu.Lock()
@@ -631,16 +632,26 @@ func (pm *PeerManager) scheduleCleanup(peer *Peer) {
 
 // teardownIfCurrent stops the peer's dispatch, then runs the disconnect
 // handler if the peer is still the one tracked under its device ID. The peer
-// is closed next either way, so dispatch stops unconditionally. Caller must
-// not hold pm.mu.
+// is closed next either way, so dispatch stops unconditionally. A panic in the
+// disconnect handler is logged, not propagated, so the peer is still closed
+// and the agent keeps running (the ConnectionCleaner sweep relied on this
+// before it tore peers down through here). Caller must not hold pm.mu.
 func (pm *PeerManager) teardownIfCurrent(peer *Peer) {
 	peer.stopDispatch()
 	pm.mu.Lock()
 	current := pm.peers[peer.DeviceID] == peer
 	pm.mu.Unlock()
-	if current && pm.OnPeerDisconnect != nil {
-		pm.OnPeerDisconnect(peer.DeviceID)
+	if !current || pm.OnPeerDisconnect == nil {
+		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			pm.logger.Error("panic in disconnect handler",
+				"recover", r, "mobile", peer.DeviceID,
+				"stack", string(debug.Stack()))
+		}
+	}()
+	pm.OnPeerDisconnect(peer.DeviceID)
 }
 
 // DisconnectPeer tears down the peer tracked under deviceID as failed-peer

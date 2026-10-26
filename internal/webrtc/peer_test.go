@@ -3504,9 +3504,11 @@ func TestPeerManager_DisconnectPeer(t *testing.T) {
 	tests := []struct {
 		name        string
 		tracked     bool
+		panics      bool // the disconnect handler panics; the peer must still close
 		wantTracked bool
 	}{
 		{name: "tracked peer", tracked: true, wantTracked: true},
+		{name: "tracked peer with panicking disconnect handler", tracked: true, panics: true, wantTracked: true},
 		{name: "untracked device", tracked: false, wantTracked: false},
 	}
 	for _, tt := range tests {
@@ -3533,6 +3535,9 @@ func TestPeerManager_DisconnectPeer(t *testing.T) {
 				fired = append(fired, id)
 				dispatchingAtFire = dispatchingAtFire || !stopped
 				closedAtFire = closedAtFire || closed
+				if tt.panics {
+					panic("disconnect handler exploded")
+				}
 			}
 
 			if got := pm.DisconnectPeer(peer.DeviceID); got != tt.wantTracked {
