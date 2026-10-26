@@ -121,9 +121,11 @@ func isFromLogind(sig *dbus.Signal, owner string) bool {
 
 // logindOwner resolves the unique bus name currently owning logind. It is
 // resolved per signal rather than cached so a logind restart can't leave a
-// stale owner. The round-trip is bounded so a stuck bus can't block.
+// stale owner. The round-trip runs while the delay lock is held, so it is
+// capped well under logind's default 5s InhibitDelayMaxSec to leave time for
+// onSleep to notify the server before the host suspends.
 func logindOwner(ctx context.Context, conn *dbus.Conn) (string, error) {
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()
 
 	var owner string
