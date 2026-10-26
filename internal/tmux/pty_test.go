@@ -405,10 +405,13 @@ func TestAttachPane_ClosePromptlyWhenIdle(t *testing.T) {
 		t.Fatalf("AttachPane: %v", err)
 	}
 
-	// Let the relay settle into its idle poll, then close. Close returns only
-	// after the relay exits, so its duration bounds the relay's shutdown: one
-	// poll interval plus the pipe-pane subprocess.
+	// Let the relay settle into its idle poll, then close. Release the pipe
+	// first (untimed) so the releasePipe inside Close returns immediately.
+	// Close returns only after the relay exits, so its duration bounds the
+	// relay's shutdown: one poll interval plus fd/dir cleanup, excluding the
+	// pipe-pane subprocess.
 	time.Sleep(100 * time.Millisecond)
+	c.releasePipe(bridge)
 	const closeBound = 200 * time.Millisecond
 	start := time.Now()
 	closeDone := make(chan struct{})

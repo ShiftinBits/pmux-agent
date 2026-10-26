@@ -15,14 +15,14 @@ import (
 
 const singlePairingSocket = "pmux-integ-single"
 
-// TestSinglePairing_RejectsSecondDevice verifies the handler-level behavior
+// TestSinglePairing_LatestAttachOwnsPane verifies the handler-level behavior
 // when a second peer ID attaches a pane that another peer already streams.
 // In production, MaxPeers=1 and the PeerManager device-ID check reject a second
 // device before it reaches the handler, and tmux allows only one pipe per pane.
 // The handler therefore guarantees only that the latest attach owns the pane's
 // output stream: after peerB attaches, peerB receives output echoed via its own
 // input. peerA is not asserted to keep receiving output.
-func TestSinglePairing_RejectsSecondDevice(t *testing.T) {
+func TestSinglePairing_LatestAttachOwnsPane(t *testing.T) {
 	skipIfNoTmux(t)
 	cleanupTmuxServer(t, singlePairingSocket)
 
